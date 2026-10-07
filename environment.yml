@@ -1,0 +1,31 @@
+name: dkf-agent
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - fastapi
+      - uvicorn[standard]
+      - python-multipart
+      - pydantic-settings
+      - sqlalchemy
+      - alembic
+      - psycopg[binary]
+      - pgvector
+      - celery
+      - redis
+      - pymupdf
+      - python-docx
+      - rank-bm25
+      - sentence-transformers
+      - FlagEmbedding
+      - transformers
+      - langchain
+      - langgraph
+      - httpx
+      - tenacity
+      - sympy
+      - orjson
+      - pytest
+      - ruff
