@@ -78,36 +78,41 @@ VOLCENGINE_ACCESS_KEY
 VOLCENGINE_SECRET_KEY
 ```
 
-### 3. 启动基础服务
+### 3. 启动当前 API 服务
 
-```bash
-docker compose up -d postgres redis
-```
-
-### 4. 初始化数据库
-
-```bash
-alembic upgrade head
-```
-
-### 5. 启动 Celery Worker
-
-CPU 任务：
-
-```bash
-celery -A app.core.celery_app worker -Q default_queue --concurrency=2 -l info
-```
-
-GPU 任务：
-
-```bash
-celery -A app.core.celery_app worker -Q gpu_queue --concurrency=1 -l info
-```
-
-### 6. 启动 API
+当前阶段已实现 FastAPI 最小服务，可在项目根目录执行：
 
 ```bash
 uvicorn app.main:app --reload
+```
+
+默认访问地址为 `http://127.0.0.1:8000`。若需供局域网设备访问，可显式指定监听地址：
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+PostgreSQL / pgvector、Redis、Celery 与数据库迁移将在后续开发阶段接入；在这些功能完成前，请勿执行相关启动或迁移命令。
+
+### 4. 当前 API 接口
+
+| 方法 | 路径 | 说明 | 预期结果 |
+|---|---|---|---|
+| `GET` | `/health` | FastAPI 服务健康检查 | 返回服务状态和 `knowledge-service` 标识 |
+| `GET` | `/docs` | Swagger UI | 可交互查看当前 OpenAPI 文档 |
+| `GET` | `/openapi.json` | OpenAPI JSON 描述 | 返回接口定义 JSON |
+
+健康检查示例：
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+```json
+{
+  "status": "ok",
+  "service": "knowledge-service"
+}
 ```
 
 ## 主要功能
