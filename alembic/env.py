@@ -1,8 +1,10 @@
 """迁移使用与应用一致的 DATABASE_URL，不把密码写入 alembic.ini。"""
 
+import re
 from logging.config import fileConfig
 
 from pgvector.sqlalchemy import VECTOR
+from sqlalchemy import inspect, text
 
 from alembic import context
 from app.db.base import Base
@@ -59,17 +61,44 @@ def run_migrations_online() -> None:
 
 
 def migrate(connection) -> None:
-    """在给定连接的迁移事务中执行修订，并启用列类型及服务端默认值比较。"""
+    """执行迁移或结构比较；测试连接显式隔离版本表和反射范围，部署配置保持不变。"""
 
-    context.configure(
-        connection=connection,
-        target_metadata=target_metadata,
-        compare_type=True,
-        compare_server_default=True,
-        render_item=render_item,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
+    test_schema = config.attributes.get("test_schema")
+    original_schema = connection.dialect.default_schema_name
+    include_name = None
+    if test_schema is not None:
+        # 仅接受测试生成的随机 schema，禁止隔离配置意外指向 public。
+        if not re.fullmatch(r"dkf_test_[0-9a-f]{32}", test_schema):
+            raise ValueError("迁移测试必须使用随机生成的 dkf_test_ schema")
+        if connection.scalar(text("SELECT current_schema()")) != test_schema:
+            raise RuntimeError("测试 search_path 与版本表 schema 不一致，拒绝执行迁移")
+        local_tables = set(inspect(connection).get_table_names(schema=test_schema))
+
+        def include_name(name, type_, parent_names):
+            """仅比较测试 schema 内的业务表，排除版本表和 search_path 中的外部表。"""
+
+            return type_ != "table" or (
+                name != "alembic_version" and name in local_tables
+            )
+
+    try:
+        if test_schema is not None:
+            # 表和外键反射也需把临时 schema 当作默认值，否则可能错误比较 public。
+            connection.dialect.default_schema_name = test_schema
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=test_schema,
+            include_name=include_name,
+            compare_type=True,
+            compare_server_default=True,
+            render_item=render_item,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+    finally:
+        # 方言对象属于共享 Engine，即使迁移失败也必须还原，避免影响后续连接。
+        connection.dialect.default_schema_name = original_schema
 
 
 if context.is_offline_mode():

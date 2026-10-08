@@ -15,32 +15,115 @@ from app.db.seed import DEFAULT_KB_ID, ensure_default_knowledge_base
 from app.db.session import get_engine
 from app.models import Document, DocumentBlock, DocumentChunk, KnowledgeBase
 
+PROJECT_TABLES = (
+    "alembic_version",
+    "knowledge_bases",
+    "documents",
+    "document_blocks",
+    "document_chunks",
+)
 
-@pytest.fixture(scope="module")
-def migrated_connection():
-    """在事务内创建隔离 schema 并迁移，提供连接、配置和 schema 名，结束后全部回滚。"""
+
+def public_snapshot(connection):
+    """记录 public 项目表的标识及内容摘要，用于发现测试对真实表或数据的误操作。"""
+
+    snapshot = {}
+    inspector = inspect(connection)
+    for table in PROJECT_TABLES:
+        if not inspector.has_table(table, schema="public"):
+            snapshot[table] = None
+            continue
+        # 表名来自固定常量；仅比较摘要，不在测试日志中输出业务数据。
+        snapshot[table] = (
+            connection.scalar(text(f"SELECT 'public.{table}'::regclass::oid")),
+            connection.execute(
+                text(
+                    f"SELECT count(*), "
+                    f"array_agg(md5(to_jsonb(t)::text) ORDER BY md5(to_jsonb(t)::text)) "
+                    f"FROM public.{table} AS t"
+                )
+            ).one(),
+        )
+    return snapshot
+
+
+def assert_test_schema(connection, schema):
+    """确认所有测试表存在且未限定表名实际解析到临时 schema，否则立即停止测试。"""
+
+    assert connection.scalar(text("SELECT current_schema()")) == schema
+    assert set(inspect(connection).get_table_names(schema=schema)) == set(
+        PROJECT_TABLES
+    )
+    for table in PROJECT_TABLES:
+        actual_schema = connection.scalar(
+            text(
+                "SELECT n.nspname FROM pg_class AS c "
+                "JOIN pg_namespace AS n ON n.oid = c.relnamespace "
+                "WHERE c.oid = to_regclass(:table_name)"
+            ),
+            {"table_name": table},
+        )
+        assert actual_schema == schema, f"{table} 意外解析到 {actual_schema}"
+
+
+@pytest.fixture(
+    scope="module", params=[False, True], ids=["empty_fallback", "head_fallback"]
+)
+def migrated_connection(request):
+    """覆盖后备 schema 无版本或已达 head 的情况，强制隔离测试并在结束后全部回滚。"""
 
     engine = get_engine()
     schema = f"dkf_test_{uuid4().hex}"
+    fallback_schema = f"dkf_fallback_{uuid4().hex}"
     with engine.connect() as connection:
         transaction = connection.begin()
+        before = public_snapshot(connection)
         try:
             connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-            connection.execute(text(f'SET LOCAL search_path TO "{schema}", public'))
+            connection.execute(text(f'CREATE SCHEMA "{fallback_schema}"'))
+            if request.param:
+                # 模拟已迁移环境的可见版本表，不改动真实 public 的版本或业务表。
+                connection.execute(
+                    text(
+                        f'CREATE TABLE "{fallback_schema}".alembic_version '
+                        "(version_num varchar(32) PRIMARY KEY)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        f'INSERT INTO "{fallback_schema}".alembic_version '
+                        "VALUES ('0001_knowledge_base')"
+                    )
+                )
+            # 保留 public 是为了访问人工启用的 vector 类型，而不是作为项目表的后备。
+            connection.execute(
+                text(
+                    f'SET LOCAL search_path TO "{schema}", "{fallback_schema}", public'
+                )
+            )
             config = Config(str(PROJECT_ROOT / "alembic.ini"))
             config.attributes["connection"] = connection
+            config.attributes["test_schema"] = schema
             command.upgrade(config, "head")
+            # 必须先通过隔离检查，再允许任何 ORM 写入或 downgrade。
+            assert_test_schema(connection, schema)
+            assert public_snapshot(connection) == before
             yield connection, config, schema
+            assert public_snapshot(connection) == before
         finally:
             # PostgreSQL 支持事务 DDL，回滚同时移除测试 schema，不删除项目表或扩展。
             transaction.rollback()
+        assert public_snapshot(connection) == before
+        assert not inspect(connection).has_schema(schema)
+        assert not inspect(connection).has_schema(fallback_schema)
 
 
 @pytest.fixture
 def session(migrated_connection):
     """为每个用例提供基于保存点的会话，结束后回滚数据且不影响外层迁移事务。"""
 
-    connection, _, _ = migrated_connection
+    connection, _, schema = migrated_connection
+    assert_test_schema(connection, schema)
     with Session(connection, join_transaction_mode="create_savepoint") as db:
         yield db
         db.rollback()
@@ -68,16 +151,10 @@ def test_migration_matches_models_and_has_expected_schema(migrated_connection):
     """验证迁移后的表、修订号及 vector 扩展符合预期，且模型与数据库结构无差异。"""
 
     connection, config, schema = migrated_connection
-    assert set(inspect(connection).get_table_names(schema=schema)) == {
-        "alembic_version",
-        "knowledge_bases",
-        "documents",
-        "document_blocks",
-        "document_chunks",
-    }
+    assert_test_schema(connection, schema)
     command.check(config)
     assert (
-        connection.scalar(text("SELECT version_num FROM alembic_version"))
+        connection.scalar(text(f'SELECT version_num FROM "{schema}".alembic_version'))
         == "0001_knowledge_base"
     )
     assert connection.scalar(
@@ -246,6 +323,8 @@ def test_downgrade_and_reupgrade_preserve_extension(migrated_connection):
     """在保存点内验证迁移可回滚再升级，且全过程保留共享的 vector 扩展。"""
 
     connection, config, schema = migrated_connection
+    assert_test_schema(connection, schema)
+    before = public_snapshot(connection)
     with connection.begin_nested():
         command.downgrade(config, "base")
         assert inspect(connection).get_table_names(schema=schema) == ["alembic_version"]
@@ -253,4 +332,6 @@ def test_downgrade_and_reupgrade_preserve_extension(migrated_connection):
             text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')")
         )
         command.upgrade(config, "head")
+        assert_test_schema(connection, schema)
         command.check(config)
+        assert public_snapshot(connection) == before
