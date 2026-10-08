@@ -94,6 +94,15 @@ REDIS_URL=redis://127.0.0.1:6379/0
 
 已有 `.env` 应保留本地密码与密钥，参考 `.env.example` 按分组合并新增配置。模板保留的 `POSTGRES_*` / `REDIS_PORT` 为历史部署元信息，应用只读取连接 URL。模型与 OCR 密钥在对应接入阶段配置。
 
+文档上传阶段在“存储与可选功能”分组配置：
+
+```dotenv
+UPLOAD_DIR=data/uploads
+MAX_UPLOAD_SIZE_MB=50
+```
+
+相对存储路径固定以项目根目录为基准，也可指定绝对目录；`MAX_UPLOAD_SIZE_MB` 必须为正整数，按 MiB（1024 × 1024 字节）计算。修改 `.env` 后需重启 FastAPI。运行账号需有该目录的创建、写入和删除权限，目录在首次有效上传时自动创建。默认 `data/uploads/` 已被 Git 忽略；自定义仓库内目录时需自行补充忽略规则。
+
 ### 3. Windows 原生 PostgreSQL 17
 
 手动安装 PostgreSQL 17，启动其 Windows 服务，默认监听 `127.0.0.1:5432`。通过 pgAdmin 或 psql，以管理员账号连接后创建项目用户和数据库；已存在时无需重复创建：
@@ -203,6 +212,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `GET` | `/api/admin/knowledge-bases` | 分页查询知识库 | HTTP 200，返回 `items`、`total`、`limit`、`offset` |
 | `GET` | `/api/admin/knowledge-bases/{kb_id}` | 按 UUID 查询知识库详情 | HTTP 200，返回知识库详情 |
 | `GET` | `/api/admin/knowledge-bases/{kb_id}/documents` | 分页查询指定知识库的文档 | HTTP 200，返回文档分页列表 |
+| `POST` | `/api/admin/knowledge-bases/{kb_id}/documents` | 单文件上传，暂不解析 | HTTP 201，返回 `UPLOADED` 文档元信息 |
 
 管理员知识库接口依赖 PostgreSQL 和第 9 节的数据库迁移；不依赖 Redis 或 Celery Worker。启动方式不变，接口参数及响应模型可在 `/docs` 的 `admin-knowledge-bases` 分组查看。
 
@@ -214,9 +224,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 `name` 必填，去除首尾空白后长度为 1～255，且名称唯一；`description` 为可选字符串或 `null`，不接受其他字段。创建后的 `status` 为 `ACTIVE`。详情包含 `kb_id`、`name`、`description`、`status`、`created_at`、`updated_at`，UUID 和时间在 JSON 中均为字符串。
 
-两个列表接口接受 `limit`（默认 20，范围 1～100）和 `offset`（默认 0，非负），按创建时间、UUID 倒序返回。文档列表项包含 `doc_id`、`kb_id`、`file_name`、`file_type`、`file_hash`、`source_type`、`status`、`error_message`、`created_at`、`updated_at`；不包含本地文件路径、正文或向量。已有知识库没有文档时返回 `items: []`、`total: 0`。当前尚未提供文档上传接口。
+两个列表接口接受 `limit`（默认 20，范围 1～100）和 `offset`（默认 0，非负），按创建时间、UUID 倒序返回。文档列表项包含 `doc_id`、`kb_id`、`file_name`、`file_type`、`file_hash`、`source_type`、`status`、`error_message`、`created_at`、`updated_at`；不包含本地文件路径、正文或向量。已有知识库没有文档时返回 `items: []`、`total: 0`。
 
-错误响应：名称重复返回 HTTP 409；知识库不存在返回 404；非法 UUID、创建参数或分页参数返回 422；数据库连接、配置或迁移不可用返回 503。业务错误使用 `{"detail": "中文提示"}`，422 使用 FastAPI 默认的结构化校验错误。数据库失败响应不包含连接串或底层 SQL 异常。
+上传接口接收 `multipart/form-data`，必填字段名为 `file`，一次提交一个文件；在 `/docs` 中输入已有 `kb_id` 后可通过文件选择框提交。不使用 JSON 或 Base64。支持 `.pdf`、`.docx`、`.txt`、`.md`、`.jpg`、`.jpeg`、`.png`，扩展名不区分大小写。原始文件名保留在数据库，磁盘使用 `<doc_id><小写扩展名>`，客户端不能指定存储路径。文件名不能包含路径或控制字符，长度最多 255；不接受空文件。
+
+服务分块计算实际文件内容的 SHA256 并检查大小，不依赖客户端声明的大小或 MIME 类型。PDF、PNG、JPEG 检查基本格式标识，DOCX 检查 ZIP 容器的必要成员；这不等同于完整格式验证、正文解析或恶意文件扫描，TXT / MD 的编码留待解析阶段处理。同一知识库内相同内容返回 409，即使文件名不同也视为重复，`detail` 包含 `message`、已有 `doc_id` 与 `kb_id`；不同知识库可各自保存一份。
+
+成功上传返回前述文档元信息，`source_type=uploaded`、`status=UPLOADED`、`error_message=null`，不触发解析、OCR 或 Celery。普通写盘或入库失败会回滚并清理本次文件；400 表示无效文件名或空文件，413 表示超限，415 表示不支持的格式或标识不匹配，507 表示存储不可用，其他数据库故障仍返回 503。缺少 `file` 或非法 UUID 返回 422，知识库不存在返回 404。
+
+文件系统与数据库不是同一事务：进程崩溃、文件清理失败或数据库提交确认丢失时仍需人工核对文件与 Document。提交结果不确定时服务会保留原件并返回 503，避免误删可能已提交记录的文件。部署时应备份数据库和上传目录；上传大小检查发生于 multipart 接收之后，对外部署还需在网关限制请求体大小，并增加鉴权，当前仍仅用于本机或可信内网。
+
+错误响应：名称重复返回 HTTP 409；知识库不存在返回 404；非法 UUID、创建参数或分页参数返回 422；数据库连接、配置或迁移不可用返回 503。一般业务错误使用 `{"detail": "中文提示"}`，文档重复上传的 `detail` 为前述结构化对象；422 使用 FastAPI 默认的结构化校验错误。数据库失败响应不包含连接串或底层 SQL 异常。
 
 健康检查示例：
 

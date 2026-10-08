@@ -4,11 +4,12 @@ from collections.abc import Iterator
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_session
 from app.models import Document, KnowledgeBase
 from app.schemas.knowledge_base import (
@@ -17,6 +18,7 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseResponse,
     PageResponse,
 )
+from app.services.document_upload import store_document
 
 router = APIRouter(
     prefix="/api/admin/knowledge-bases",
@@ -146,3 +148,31 @@ def list_knowledge_base_documents(
         limit=limit,
         offset=offset,
     )
+
+
+@router.post(
+    "/{kb_id}/documents",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="上传知识库文档（暂不解析）",
+    responses={
+        400: {"description": "文件名无效或文件为空"},
+        404: {"description": "知识库不存在"},
+        409: {"description": "同一知识库已存在相同内容，detail 包含已有 doc_id"},
+        413: {"description": "单文件大小超限"},
+        415: {"description": "格式不支持或内容标识不匹配"},
+        507: {"description": "文件存储不可用"},
+    },
+)
+def upload_knowledge_base_document(
+    kb_id: UUID,
+    session: AdminSession,
+    file: Annotated[UploadFile, File(description="单个 PDF、DOCX、TXT、MD 或图片文件")],
+) -> DocumentResponse:
+    """验证知识库存在后保存单个上传文件及元信息，始终关闭上传流且不触发 Celery。"""
+
+    try:
+        require_knowledge_base(session, kb_id)
+        return store_document(session, kb_id, file, get_settings())
+    finally:
+        file.file.close()

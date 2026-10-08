@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 配置文件固定从项目根目录加载，避免因启动目录不同导致本地 .env 未生效。
@@ -19,6 +20,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
+    upload_dir: Path = Path("data/uploads")
+    max_upload_size_mb: int = Field(default=50, gt=0)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
