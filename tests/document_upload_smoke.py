@@ -16,6 +16,7 @@ from app.api import admin_knowledge_bases as admin_api
 from app.core.config import get_settings
 from app.models import Document
 from app.services import document_upload as uploads
+from app.tasks.documents import process_document
 
 pytest_plugins = ("knowledge_admin_smoke",)
 PREFIX = "/api/admin/knowledge-bases"
@@ -53,6 +54,13 @@ def upload_context(api, tmp_path, monkeypatch):
         return settings
 
     monkeypatch.setattr(admin_api, "get_settings", test_settings)
+
+    def accepted_task(*args, **kwargs):
+        """模拟 Broker 接受任务而不执行 Worker，避免上传验收污染真实 Redis 队列。"""
+
+        return SimpleNamespace(id=kwargs["task_id"])
+
+    monkeypatch.setattr(process_document, "apply_async", accepted_task)
     kb = api("POST", PREFIX, json={"name": "上传验收库"}).json()
     return api, kb["kb_id"], settings.upload_dir
 

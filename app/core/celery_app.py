@@ -11,13 +11,16 @@ celery_app = Celery(
     "knowledge-service",
     broker=settings.celery_broker_url or settings.redis_url,
     backend=settings.celery_result_backend or settings.redis_url,
-    include=["app.tasks.demo"],
+    include=["app.tasks.demo", "app.tasks.documents"],
 )
 
 celery_app.conf.update(
     task_default_queue="default_queue",
     task_queues=(Queue("default_queue"), Queue("gpu_queue")),
-    task_routes={"app.tasks.demo.add": {"queue": "default_queue"}},
+    task_routes={
+        "app.tasks.demo.add": {"queue": "default_queue"},
+        "app.tasks.documents.process_document": {"queue": "default_queue"},
+    },
     # 队列拼写错误应直接暴露，避免任务误入无人消费的新队列。
     task_create_missing_queues=False,
     task_serializer="json",
@@ -26,7 +29,7 @@ celery_app.conf.update(
     task_track_started=True,
     task_ignore_result=False,
     result_expires=86400,
-    # 测试任务是纯计算，可安全重复执行；后续文档任务须自行保证业务幂等。
+    # 晚确认允许重复投递；文档框架用行锁和任务标识去重，后续数据写入仍需业务幂等。
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,

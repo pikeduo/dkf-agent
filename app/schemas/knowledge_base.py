@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 Item = TypeVar("Item")
 
@@ -59,6 +59,7 @@ class DocumentResponse(BaseModel):
         "FAILED",
     ]
     error_message: str | None
+    task_id: UUID | None = Field(default=None, validation_alias="processing_task_id")
     created_at: datetime
     updated_at: datetime
 

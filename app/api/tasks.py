@@ -1,6 +1,6 @@
-"""异步测试任务的提交与结果查询。"""
+"""异步测试任务提交，以及通用任务状态与结果查询。"""
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -29,7 +29,7 @@ class TaskSubmitted(BaseModel):
 class TaskStatus(BaseModel):
     task_id: str
     status: str
-    result: int | None = None
+    result: int | dict[str, Any] | None = None
     error: str | None = None
 
 

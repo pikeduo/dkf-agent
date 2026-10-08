@@ -184,7 +184,7 @@ python -c "import redis; r=redis.Redis(host='127.0.0.1', port=6379, db=0); print
 
 ### 6. 启动当前 API 服务
 
-当前 API 已提供健康检查、异步任务入口及管理员知识库管理接口，可在项目根目录执行：
+当前 API 已提供健康检查、异步任务入口、管理员知识库管理及文档上传接口。先按第 9 节升级数据库迁移，再启动 API 和第 8 节的 CPU Worker，可在项目根目录执行：
 
 ```powershell
 conda activate dkf-agent
@@ -212,9 +212,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `GET` | `/api/admin/knowledge-bases` | 分页查询知识库 | HTTP 200，返回 `items`、`total`、`limit`、`offset` |
 | `GET` | `/api/admin/knowledge-bases/{kb_id}` | 按 UUID 查询知识库详情 | HTTP 200，返回知识库详情 |
 | `GET` | `/api/admin/knowledge-bases/{kb_id}/documents` | 分页查询指定知识库的文档 | HTTP 200，返回文档分页列表 |
-| `POST` | `/api/admin/knowledge-bases/{kb_id}/documents` | 单文件上传，暂不解析 | HTTP 201，返回 `UPLOADED` 文档元信息 |
+| `POST` | `/api/admin/knowledge-bases/{kb_id}/documents` | 单文件上传，提交后投递 CPU 任务 | HTTP 201，返回文档元信息及 `task_id`；投递失败时返回 `FAILED` 文档 |
+| `GET` | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 查询文档持久化状态 | HTTP 200，返回当前状态、失败原因及 `task_id` |
+| `POST` | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递待处理或失败文档，无请求体 | HTTP 202，返回新 `task_id` 的文档元信息；投递失败返回 503 |
 
-管理员知识库接口依赖 PostgreSQL 和第 9 节的数据库迁移；不依赖 Redis 或 Celery Worker。启动方式不变，接口参数及响应模型可在 `/docs` 的 `admin-knowledge-bases` 分组查看。
+管理员知识库接口依赖 PostgreSQL 和第 9 节的数据库迁移。知识库创建、列表和文档状态查询不依赖 Redis；文档上传后的任务投递及手动重新投递需要 Redis，任务执行需要消费 `default_queue` 的 CPU Worker。接口参数及响应模型可在 `/docs` 的 `admin-knowledge-bases` 分组查看。
 
 当前管理员接口**尚未提供身份鉴权或 RBAC**，只用于本机或可信内网开发，不应直接暴露到公网。调用方不能指定知识库 ID、状态或时间。创建请求为 JSON，例如：
 
@@ -224,13 +226,25 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 `name` 必填，去除首尾空白后长度为 1～255，且名称唯一；`description` 为可选字符串或 `null`，不接受其他字段。创建后的 `status` 为 `ACTIVE`。详情包含 `kb_id`、`name`、`description`、`status`、`created_at`、`updated_at`，UUID 和时间在 JSON 中均为字符串。
 
-两个列表接口接受 `limit`（默认 20，范围 1～100）和 `offset`（默认 0，非负），按创建时间、UUID 倒序返回。文档列表项包含 `doc_id`、`kb_id`、`file_name`、`file_type`、`file_hash`、`source_type`、`status`、`error_message`、`created_at`、`updated_at`；不包含本地文件路径、正文或向量。已有知识库没有文档时返回 `items: []`、`total: 0`。
+两个列表接口接受 `limit`（默认 20，范围 1～100）和 `offset`（默认 0，非负），按创建时间、UUID 倒序返回。文档列表项及详情包含 `doc_id`、`kb_id`、`file_name`、`file_type`、`file_hash`、`source_type`、`status`、`error_message`、`task_id`、`created_at`、`updated_at`；不包含本地文件路径、正文或向量。`task_id` 是当前一轮处理的 UUID，迁移前的历史文档可为 `null`。已有知识库没有文档时返回 `items: []`、`total: 0`。
 
 上传接口接收 `multipart/form-data`，必填字段名为 `file`，一次提交一个文件；在 `/docs` 中输入已有 `kb_id` 后可通过文件选择框提交。不使用 JSON 或 Base64。支持 `.pdf`、`.docx`、`.txt`、`.md`、`.jpg`、`.jpeg`、`.png`，扩展名不区分大小写。原始文件名保留在数据库，磁盘使用 `<doc_id><小写扩展名>`，客户端不能指定存储路径。文件名不能包含路径或控制字符，长度最多 255；不接受空文件。
 
 服务分块计算实际文件内容的 SHA256 并检查大小，不依赖客户端声明的大小或 MIME 类型。PDF、PNG、JPEG 检查基本格式标识，DOCX 检查 ZIP 容器的必要成员；这不等同于完整格式验证、正文解析或恶意文件扫描，TXT / MD 的编码留待解析阶段处理。同一知识库内相同内容返回 409，即使文件名不同也视为重复，`detail` 包含 `message`、已有 `doc_id` 与 `kb_id`；不同知识库可各自保存一份。
 
-成功上传返回前述文档元信息，`source_type=uploaded`、`status=UPLOADED`、`error_message=null`，不触发解析、OCR 或 Celery。普通写盘或入库失败会回滚并清理本次文件；400 表示无效文件名或空文件，413 表示超限，415 表示不支持的格式或标识不匹配，507 表示存储不可用，其他数据库故障仍返回 503。缺少 `file` 或非法 UUID 返回 422，知识库不存在返回 404。
+上传先保存原件并提交 `source_type=uploaded`、`status=UPLOADED` 的 Document，再投递 `process_document(doc_id)` 到 `default_queue`。正常返回 HTTP 201、`task_id`、`error_message=null`；上传响应是投递前快照，最新处理状态以文档详情接口为准。若 Redis 投递失败，已上传的文件和记录仍保留，通常返回 HTTP 201、`status=FAILED` 及安全失败原因；若 Worker 已推进状态，不会回退覆盖。**HTTP 201 只代表原件与 Document 创建成功，不代表异步处理完成。** 重复文件返回 409 且不会重复投递任务。
+
+普通写盘或入库失败会回滚并清理本次文件；400 表示无效文件名或空文件，413 表示超限，415 表示不支持的格式或标识不匹配，507 表示存储不可用，其他数据库故障仍返回 503。缺少 `file` 或非法 UUID 返回 422，知识库不存在返回 404。
+
+#### 文档处理入口与状态查询
+
+当前阶段只建立状态机和任务框架：Worker 检查原件存在、非空且可读取后，将文档推进到 `PARSING`。任务成功结果为 `{"doc_id": "...", "document_status": "PARSING", "status": "awaiting_parser"}`，表示等待后续 Parser 接入；尚未解析、OCR、生成 Block / Chunk / Embedding，也不会标记 `READY`。状态机预留后续 OCR、切片、向量化、索引阶段的合法流转。
+
+使用上传返回的 `kb_id`、`doc_id` 调用 `GET /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` 查看数据库中的最新状态与 `error_message`；使用 `task_id` 调用 `GET /tasks/{task_id}` 查询 Redis 中的 Celery 状态。后者成功结果可以是加法任务的整数或文档任务的字典。Celery `SUCCESS` 只表示当前框架步骤完成，不等于文档 `READY`；未知或已过期的任务结果可能为 `PENDING`，不能据此认定任务仍在排队，Document 状态以数据库为准。
+
+恢复 Redis 或修复原件问题后，可对 `UPLOADED` / `FAILED` 文档调用 `POST /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process`，无请求体。接口重置错误、分配新 `task_id`、提交后投递，成功返回 HTTP 202；投递失败返回 503 并保留文件，可再次查询持久化状态。旧任务标识不能覆盖新一轮状态。已经进入 `PARSING` 或更后续阶段的文档返回 409，不重复投递；该入口不是 Reindex。文档不存在或不属于指定知识库返回 404，非法 UUID 返回 422。
+
+当前没有事务 Outbox 或后台补投器，数据库提交与消息投递并非原子操作：进程在两者之间退出，可能留下 `UPLOADED` 但没有消息的文档，可通过上述接口显式重新投递。仅启动 API 不会扫描或自动处理历史文档。API 与 CPU Worker 必须连接同一项目数据库，且能够访问同一上传目录；相对文件路径以各自项目根目录为基准。
 
 文件系统与数据库不是同一事务：进程崩溃、文件清理失败或数据库提交确认丢失时仍需人工核对文件与 Document。提交结果不确定时服务会保留原件并返回 503，避免误删可能已提交记录的文件。部署时应备份数据库和上传目录；上传大小检查发生于 multipart 接收之后，对外部署还需在网关限制请求体大小，并增加鉴权，当前仍仅用于本机或可信内网。
 
@@ -279,7 +293,9 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
 ```
 
-当前 GPU Worker 尚未加载模型。Worker 启动完成后，日志应显示对应队列及 `ready`。
+当前文档任务仅使用 CPU Worker，GPU Worker 尚未加载模型。阶段 7 部署后需重启已有 CPU Worker，日志的任务列表应包含 `app.tasks.documents.process_document`，并显示 `default_queue` 及 `ready`。
+
+文档任务最多自动重试 3 次（含首次共 4 次），临时数据库或文件访问错误按 5、10、20 秒退避；原件缺失或为空立即失败，不自动重试。失败原因写入 Document 的 `error_message`，重试成功会清除旧错误；重试耗尽将文档标记为 `FAILED`。数据库持续不可用时可能无法持久化错误，需结合 Worker 安全错误日志及 Celery 失败状态定位，不能只依赖 Document。任务使用晚确认与文档行锁，同一任务重复执行不会生成额外数据；重新投递时通过新任务标识阻止过期消息及失败回调覆盖当前状态。后续 Parser / Chunk / Embedding 接入时仍须在实际数据写入处维护唯一约束与幂等，当前框架不代替这些业务保证。
 
 Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.html#does-celery-support-windows)；上述 `threads` / `solo` 为本地开发验证方式。线程池不保证 Python CPU 密集任务并行加速，正式 CPU Worker 在 Linux/WSL 环境使用默认 prefork 池，规划并发 2～4。不同池的能力见[官方并发说明](https://docs.celeryq.dev/en/stable/userguide/concurrency/index.html)。GPU Worker 保持单进程串行。后续重型任务的超时和幂等须单独验证。
 
@@ -294,7 +310,7 @@ python -m alembic upgrade head
 python -m app.db.seed
 ```
 
-迁移创建 `knowledge_bases`、`documents`、`document_blocks`、`document_chunks` 四张表，以及 Alembic 版本表。Chunk 的 Embedding 列为 `vector(1024)`。迁移只检查扩展是否存在，不安装或自动启用 pgvector。
+初始迁移创建 `knowledge_bases`、`documents`、`document_blocks`、`document_chunks` 四张表，以及 Alembic 版本表。阶段 7 的 `0002_document_tasks` 迁移给 `documents` 增加可空且唯一的 `processing_task_id`，对外响应名为 `task_id`；历史记录保留且该字段默认为空。**已有数据库也必须执行 `python -m alembic upgrade head`，再重启 FastAPI 与 CPU Worker。** Chunk 的 Embedding 列仍为 `vector(1024)`。迁移只检查扩展是否存在，不安装或自动启用 pgvector。
 
 默认知识库初始化命令可重复执行，固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`，首次创建名称为“默认知识库”、状态为 `ACTIVE`。FastAPI 启动时不会自动迁移或插入数据。
 
@@ -304,7 +320,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期显示 `0001_knowledge_base (head)`。通过 pgAdmin 或 psql 连接项目库，确认四张业务表存在且默认知识库记录唯一。
+预期显示 `0002_document_tasks (head)`。通过 pgAdmin 或 psql 连接项目库，确认四张业务表存在、`documents.processing_task_id` 列存在且默认知识库记录唯一。
 
 ### 10. 部署成功检查
 

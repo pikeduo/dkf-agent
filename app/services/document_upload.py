@@ -166,6 +166,7 @@ def store_document(
             file_path=stored_path,
             source_type="uploaded",
             status="UPLOADED",
+            processing_task_id=uuid4(),
         )
         session.add(document)
         # flush 先裁决唯一约束并取回时间；响应校验必须在提交前完成，避免成功后误删文件。

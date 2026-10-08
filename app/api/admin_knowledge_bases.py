@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from typing import Annotated
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import func, select
@@ -18,6 +18,8 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseResponse,
     PageResponse,
 )
+from app.services.document_dispatch import publish_document
+from app.services.document_processing import transition_document
 from app.services.document_upload import store_document
 
 router = APIRouter(
@@ -154,7 +156,7 @@ def list_knowledge_base_documents(
     "/{kb_id}/documents",
     response_model=DocumentResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="上传知识库文档（暂不解析）",
+    summary="上传文档并提交异步处理任务",
     responses={
         400: {"description": "文件名无效或文件为空"},
         404: {"description": "知识库不存在"},
@@ -169,10 +171,73 @@ def upload_knowledge_base_document(
     session: AdminSession,
     file: Annotated[UploadFile, File(description="单个 PDF、DOCX、TXT、MD 或图片文件")],
 ) -> DocumentResponse:
-    """验证知识库存在后保存单个上传文件及元信息，始终关闭上传流且不触发 Celery。"""
+    """文档与原件提交成功后才投递 Celery，投递失败保留原件并返回持久化失败状态。"""
 
     try:
         require_knowledge_base(session, kb_id)
-        return store_document(session, kb_id, file, get_settings())
+        response = store_document(session, kb_id, file, get_settings())
+        if not publish_document(session, response.doc_id, response.task_id):
+            session.expire_all()
+            document = session.get(Document, response.doc_id)
+            return DocumentResponse.model_validate(document)
+        return response
     finally:
         file.file.close()
+
+
+def require_document(
+    session: Session, kb_id: UUID, doc_id: UUID, lock: bool = False
+) -> Document:
+    """按知识库和文档双标识查询，必要时加行锁，阻止跨库访问及并发重投覆盖。"""
+
+    query = select(Document).where(Document.doc_id == doc_id, Document.kb_id == kb_id)
+    if lock:
+        query = query.with_for_update()
+    document = session.scalar(query)
+    if document is None:
+        raise HTTPException(status_code=404, detail="知识库文档不存在")
+    return document
+
+
+@router.get(
+    "/{kb_id}/documents/{doc_id}",
+    response_model=DocumentResponse,
+    summary="查询文档状态与当前任务标识",
+    responses={404: {"description": "文档不存在"}},
+)
+def get_document(kb_id: UUID, doc_id: UUID, session: AdminSession) -> DocumentResponse:
+    """返回文档状态、失败原因和任务标识，不依赖 Redis 获取数据库中的持久化状态。"""
+
+    return DocumentResponse.model_validate(require_document(session, kb_id, doc_id))
+
+
+@router.post(
+    "/{kb_id}/documents/{doc_id}/process",
+    response_model=DocumentResponse,
+    status_code=202,
+    summary="重新投递待处理或失败文档",
+    responses={
+        404: {"description": "文档不存在"},
+        409: {"description": "已进入处理阶段或已经完成"},
+    },
+)
+def resubmit_document(
+    kb_id: UUID, doc_id: UUID, session: AdminSession
+) -> DocumentResponse:
+    """为待处理或失败文档分配新任务标识并提交后投递，旧消息因标识不符自动跳过。"""
+
+    document = require_document(session, kb_id, doc_id, lock=True)
+    if document.status not in {"UPLOADED", "FAILED"}:
+        raise HTTPException(
+            status_code=409, detail="文档已进入处理阶段或已经完成，不重复投递"
+        )
+    transition_document(document, "UPLOADED")
+    document.processing_task_id = uuid4()
+    session.flush()
+    response = DocumentResponse.model_validate(document)
+    session.commit()
+    if not publish_document(session, response.doc_id, response.task_id):
+        raise HTTPException(
+            status_code=503, detail="任务投递失败，文件已保留，请查询文档状态后重试"
+        )
+    return response

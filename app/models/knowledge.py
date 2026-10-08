@@ -88,6 +88,8 @@ class Document(Timestamps, Base):
         String(32), default="UPLOADED", server_default="UPLOADED"
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+    # 每次重新投递分配新标识，旧消息不能覆盖新一轮处理的状态。
+    processing_task_id: Mapped[UUID | None] = mapped_column(unique=True)
 
 
 class DocumentBlock(Base):
