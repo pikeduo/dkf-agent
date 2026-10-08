@@ -16,6 +16,8 @@ depends_on = None
 
 
 def id_column(name):
+    """按指定列名创建 UUID 主键列，直接 SQL 插入时由数据库生成默认标识。"""
+
     return sa.Column(
         name,
         sa.UUID(),
@@ -26,6 +28,8 @@ def id_column(name):
 
 
 def timestamp_columns():
+    """返回带时区的创建、更新时间列，首次插入时默认使用数据库当前时间。"""
+
     return [
         sa.Column(
             name,
@@ -38,6 +42,8 @@ def timestamp_columns():
 
 
 def upgrade() -> None:
+    """建立四张知识库核心表、约束、索引和更新时间触发器，在线迁移先检查 vector。"""
+
     # 扩展安装与启用属于人工部署；迁移只检查，避免项目用户需要管理员权限。
     if not context.is_offline_mode():
         enabled = op.get_bind().scalar(
@@ -194,6 +200,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """按依赖顺序删除本次建立的表及触发器函数，保留人工启用的 vector 扩展。"""
+
     op.drop_table("document_chunks")
     op.drop_table("document_blocks")
     op.drop_table("documents")

@@ -18,6 +18,8 @@ from app.models import Document, DocumentBlock, DocumentChunk, KnowledgeBase
 
 @pytest.fixture(scope="module")
 def migrated_connection():
+    """在事务内创建隔离 schema 并迁移，提供连接、配置和 schema 名，结束后全部回滚。"""
+
     engine = get_engine()
     schema = f"dkf_test_{uuid4().hex}"
     with engine.connect() as connection:
@@ -36,6 +38,8 @@ def migrated_connection():
 
 @pytest.fixture
 def session(migrated_connection):
+    """为每个用例提供基于保存点的会话，结束后回滚数据且不影响外层迁移事务。"""
+
     connection, _, _ = migrated_connection
     with Session(connection, join_transaction_mode="create_savepoint") as db:
         yield db
@@ -43,6 +47,8 @@ def session(migrated_connection):
 
 
 def make_document(session, kb_id, **overrides):
+    """创建并刷新指定知识库的测试文档，允许覆盖字段以验证约束，但不提交事务。"""
+
     values = {
         "kb_id": kb_id,
         "file_name": "sample.pdf",
@@ -59,6 +65,8 @@ def make_document(session, kb_id, **overrides):
 
 
 def test_migration_matches_models_and_has_expected_schema(migrated_connection):
+    """验证迁移后的表、修订号及 vector 扩展符合预期，且模型与数据库结构无差异。"""
+
     connection, config, schema = migrated_connection
     assert set(inspect(connection).get_table_names(schema=schema)) == {
         "alembic_version",
@@ -78,6 +86,8 @@ def test_migration_matches_models_and_has_expected_schema(migrated_connection):
 
 
 def test_seed_is_idempotent_and_does_not_overwrite_existing_state(session):
+    """验证默认知识库重复初始化不新增记录，也不覆盖已修改的描述。"""
+
     first = ensure_default_knowledge_base(session)
     assert first.kb_id == DEFAULT_KB_ID
     first.description = "保留已有说明"
@@ -89,6 +99,8 @@ def test_seed_is_idempotent_and_does_not_overwrite_existing_state(session):
 
 
 def test_hash_dedup_is_per_knowledge_base(session):
+    """验证相同文件哈希可跨知识库保存，但在同一知识库重复插入会触发唯一约束。"""
+
     first = KnowledgeBase(name="第一个知识库")
     second = KnowledgeBase(name="第二个知识库")
     session.add_all([first, second])
@@ -101,6 +113,8 @@ def test_hash_dedup_is_per_knowledge_base(session):
 
 
 def test_chunk_cannot_reference_another_knowledge_base(session):
+    """验证复合外键拒绝文档与知识库归属不一致的 Chunk，防止证据跨库关联。"""
+
     first = KnowledgeBase(name="文档所属库")
     second = KnowledgeBase(name="错误的库")
     session.add_all([first, second])
@@ -128,6 +142,8 @@ def test_chunk_cannot_reference_another_knowledge_base(session):
     ],
 )
 def test_document_checks(session, overrides):
+    """逐项传入非法来源、状态或哈希，验证文档检查约束拒绝对应记录。"""
+
     kb = ensure_default_knowledge_base(session)
     with pytest.raises(IntegrityError), session.begin_nested():
         make_document(session, kb.kb_id, **overrides)
@@ -143,6 +159,8 @@ def test_document_checks(session, overrides):
     ],
 )
 def test_block_checks(session, overrides):
+    """逐项传入非法页码、置信度或块类型，验证解析块检查约束拒绝对应记录。"""
+
     kb = ensure_default_knowledge_base(session)
     document = make_document(session, kb.kb_id)
     values = {
@@ -160,6 +178,8 @@ def test_block_checks(session, overrides):
 
 
 def test_vector_json_roundtrip_and_delete_cascade(session):
+    """验证向量维度、JSON 读写及页码约束，并确认删除知识库会级联删除下属数据。"""
+
     kb = ensure_default_knowledge_base(session)
     document = make_document(session, kb.kb_id)
     block = DocumentBlock(
@@ -208,6 +228,8 @@ def test_vector_json_roundtrip_and_delete_cascade(session):
 
 
 def test_updated_at_is_maintained_for_direct_sql(session):
+    """通过直接 SQL 更新知识库，验证触发器也能维护更新时间而不依赖 ORM。"""
+
     kb = KnowledgeBase(name="更新时间验证", updated_at=datetime(2000, 1, 1, tzinfo=UTC))
     session.add(kb)
     session.flush()
@@ -221,6 +243,8 @@ def test_updated_at_is_maintained_for_direct_sql(session):
 
 
 def test_downgrade_and_reupgrade_preserve_extension(migrated_connection):
+    """在保存点内验证迁移可回滚再升级，且全过程保留共享的 vector 扩展。"""
+
     connection, config, schema = migrated_connection
     with connection.begin_nested():
         command.downgrade(config, "base")

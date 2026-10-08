@@ -12,6 +12,11 @@ from app.core.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
+    """读取 DATABASE_URL 并缓存 PostgreSQL 引擎，未配置或驱动不符合要求时拒绝创建。
+
+    引擎仅在实际使用连接时访问已有数据库，不负责安装服务或自动建表。
+    """
+
     database_url = get_settings().database_url
     if not database_url:
         raise RuntimeError("请在本地 .env 中配置 DATABASE_URL")
@@ -26,7 +31,7 @@ def get_engine() -> Engine:
 
 
 def get_session() -> Iterator[Session]:
-    """每次调用使用独立 Session，避免 API 或 Celery 任务共享事务。"""
+    """提供独立数据库会话，并在使用结束后关闭；事务提交由调用方显式控制。"""
 
     with Session(get_engine()) as session:
         yield session
