@@ -6,6 +6,8 @@
 **项目目录名：** `dkf-agent`  
 **当前开发模块：** `knowledge-service`（非结构化知识问答）
 
+本文说明开发环境配置、基础服务部署、应用启动及部署成功检查。业务测试、任务测试和自动化评测由独立测试文件维护。
+
 ## 项目简介
 
 DKF-Agent 面向“多模态数据驱动的可解释精准问数 / 问答智能体”赛题。
@@ -186,7 +188,7 @@ uvicorn app.main:app --reload
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-当前 `/health` 仅检查服务进程，不验证 PostgreSQL 或 Redis 连接。Celery 测试任务通过下方 `/tasks` 接口验证 Redis；PostgreSQL 应用连接与业务数据库迁移需按开发阶段逐步接入。
+当前 `/health` 仅检查服务进程，不验证 PostgreSQL 或 Redis 连接。基础服务连通性需通过前文的部署检查分别确认。
 
 ### 7. 当前 API 接口
 
@@ -241,93 +243,21 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
 ```
 
-`gpu_queue` 当前只用同一个加法任务验证调度，不加载 GPU 模型。Worker 日志应包含 `app.tasks.demo.add` 和对应队列，启动完成后显示 `ready`。
+当前 GPU Worker 尚未加载模型。Worker 启动完成后，日志应显示对应队列及 `ready`。
 
 Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.html#does-celery-support-windows)；上述 `threads` / `solo` 为本地开发验证方式。线程池不保证 Python CPU 密集任务并行加速，正式 CPU Worker 在 Linux/WSL 环境使用默认 prefork 池，规划并发 2～4。不同池的能力见[官方并发说明](https://docs.celeryq.dev/en/stable/userguide/concurrency/index.html)。GPU Worker 保持单进程串行。后续重型任务的超时和幂等须单独验证。
 
-### 9. 提交任务与查询结果
+### 9. 部署成功检查
 
-启动两个 Worker 和 FastAPI 后，在 Windows PowerShell 中提交：
+基础服务按前文章节确认：PostgreSQL `SELECT 1` 返回 `1`，项目库中存在 `vector` 扩展，Ubuntu 为 `Running`，Redis 返回 `PONG`，Windows 6379 端口可连接。
 
-```powershell
-$task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/tasks/add -ContentType 'application/json' -Body '{"x":2,"y":3,"queue":"default_queue"}'
-$task
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/tasks/$($task.task_id)"
-```
+FastAPI 启动后，访问 `/health` 应返回 `status: ok`，访问 `http://127.0.0.1:8000/docs` 应能打开 Swagger。
 
-任务执行完成后，预期查询结果：
-
-```json
-{
-  "task_id": "返回的 UUID",
-  "status": "SUCCESS",
-  "result": 5,
-  "error": null
-}
-```
-
-将 `queue` 改为 `gpu_queue`，重复提交与查询，应在 GPU Worker 日志中看到执行。请求参数 `x`、`y` 必须为整数，`queue` 只允许这两个队列，不传时默认 `default_queue`。
-
-提交成功为 `202`，不等待计算完成；任务状态可能为 `PENDING`、`STARTED`、`RETRY`、`SUCCESS`、`FAILURE`。`PENDING` 也可能表示未知 ID 或结果已过期，本阶段尚无业务任务表，不能据此判断任务不存在。UUID 格式或参数无效返回 `422`。Redis 不可用时提交/查询返回 `503`，先检查 WSL 与 Redis；失败详情写入 Worker 日志和 Celery 结果元数据，API 只返回脱敏提示。
-
-加法任务无副作用，可重复执行；对暂时性 `OSError` 最多退避重试 3 次，参数错误不重试。后续文档任务需另外实现数据库幂等，不能将此测试任务视为文档入库已完成。
-
-自动化测试依赖 `environment.yml` 已声明的 pytest 与 httpx；环境中尚未安装时执行 `python -m pip install pytest httpx`。无需 Redis 的边界测试：
+两个 Celery Worker 启动并显示 `ready` 后，在已激活项目环境的终端检查 Worker 连通性与消费队列：
 
 ```powershell
-python -m pytest tests/test_celery.py -q
+python -m celery -A app.core.celery_app:celery_app inspect ping
+python -m celery -A app.core.celery_app:celery_app inspect active_queues
 ```
 
-真实链路复测（先确认 Ubuntu Running 与 Redis PONG）：
-
-```powershell
-python -m pytest tests/celery_smoke.py -q
-```
-
-该测试临时启动两个独立命名的 Worker 和一个临时端口 FastAPI，检查队列隔离、任务执行、API 查询与失败记录，结束时关闭本次测试进程并仅清理本次任务结果，不修改系统服务或清空 Redis。源码、测试文件需要版本控制；测试缓存与运行日志由现有 `.gitignore` 忽略。
-
-## 主要功能
-
-当前非结构化模块按以下顺序开发：
-
-1. Knowledge Base 数据模型。
-2. 预置知识库批量导入。
-3. PDF / DOCX / TXT / Markdown 解析。
-4. JPG / PNG / 扫描 PDF OCR。
-5. 文档 Chunk。
-6. BGE-M3 向量化并写入 pgvector。
-7. Dense Retrieval + BM25。
-8. bge-reranker-v2-m3 重排。
-9. DeepSeek RAG 与来源引用。
-10. 管理员文档上传、状态查看、Delete、Reindex。
-11. 文档公式识别、参数绑定和 SymPy 计算。
-12. Knowledge Agent 封装。
-13. RAG / OCR / Formula 评测。
-
-## 使用方式
-
-### 普通知识库问答
-
-知识库完成构建后，用户无需上传文件即可直接提问：
-
-```text
-用户问题
-→ 检索知识库
-→ 重排
-→ RAG
-→ 返回答案、文件名、页码和证据片段
-```
-
-### 管理员增量入库
-
-```text
-管理员上传文档
-→ Celery 后台解析 / OCR
-→ Chunk
-→ Embedding
-→ pgvector
-→ READY
-→ 新文档自动加入知识库
-```
-
-当前开发目标以非结构化知识问答独立闭环为准，后续再接入 Data Agent、Coordinator Agent 和 Fusion Agent。
+预期 CPU 和 GPU Worker 均返回 `pong`，CPU Worker 仅消费 `default_queue`，GPU Worker 仅消费 `gpu_queue`。以上检查不提交业务任务，仅确认进程启动、Redis 消息通道和队列配置可用。
