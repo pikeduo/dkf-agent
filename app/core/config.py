@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    database_url: str | None = None
     redis_url: str = "redis://127.0.0.1:6379/0"
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None

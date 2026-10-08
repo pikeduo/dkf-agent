@@ -247,7 +247,30 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 
 Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.html#does-celery-support-windows)；上述 `threads` / `solo` 为本地开发验证方式。线程池不保证 Python CPU 密集任务并行加速，正式 CPU Worker 在 Linux/WSL 环境使用默认 prefork 池，规划并发 2～4。不同池的能力见[官方并发说明](https://docs.celeryq.dev/en/stable/userguide/concurrency/index.html)。GPU Worker 保持单进程串行。后续重型任务的超时和幂等须单独验证。
 
-### 9. 部署成功检查
+### 9. 初始化知识库数据库
+
+确认本地 `.env` 的 `DATABASE_URL` 使用项目用户 `dkf_user`，并已在 `dkf_agent` 数据库手动启用 `vector`。项目用户需有建表权限。安装已声明的 Python 数据库依赖后，在项目根目录执行：
+
+```powershell
+conda activate dkf-agent
+python -m pip install sqlalchemy alembic "psycopg[binary]" pgvector
+python -m alembic upgrade head
+python -m app.db.seed
+```
+
+迁移创建 `knowledge_bases`、`documents`、`document_blocks`、`document_chunks` 四张表，以及 Alembic 版本表。Chunk 的 Embedding 列为 `vector(1024)`。迁移只检查扩展是否存在，不安装或自动启用 pgvector。
+
+默认知识库初始化命令可重复执行，固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`，首次创建名称为“默认知识库”、状态为 `ACTIVE`。FastAPI 启动时不会自动迁移或插入数据。
+
+部署检查：
+
+```powershell
+python -m alembic current
+```
+
+预期显示 `0001_knowledge_base (head)`。通过 pgAdmin 或 psql 连接项目库，确认四张业务表存在且默认知识库记录唯一。
+
+### 10. 部署成功检查
 
 基础服务按前文章节确认：PostgreSQL `SELECT 1` 返回 `1`，项目库中存在 `vector` 扩展，Ubuntu 为 `Running`，Redis 返回 `PONG`，Windows 6379 端口可连接。
 

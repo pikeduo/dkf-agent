@@ -13,7 +13,8 @@ __pycache__/
 data/uploads/
 data/parsed/
 
-models/
+# 仅忽略根目录模型权重，app/models/ 中的 ORM 源码需要提交。
+/models/
 checkpoints/
 
 *.log
