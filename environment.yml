@@ -13,7 +13,7 @@ dependencies:
       - alembic
       - psycopg[binary]
       - pgvector
-      - celery
+      - celery[redis]
       - redis
       - pymupdf
       - python-docx

@@ -81,6 +81,8 @@ VOLCENGINE_ACCESS_KEY
 VOLCENGINE_SECRET_KEY
 ```
 
+Celery 阶段还需按“异步任务”分组配置 `CELERY_BROKER_URL` 和 `CELERY_RESULT_BACKEND`；参见下方启动与验收步骤。
+
 在本地 `.env` 中按“数据库与缓存”分组配置连接地址（密码替换为实际本地密码；URL 中的特殊字符需进行百分号编码）：
 
 ```dotenv
@@ -88,7 +90,7 @@ DATABASE_URL=postgresql+psycopg://dkf_user:your_password@127.0.0.1:5432/dkf_agen
 REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-本次环境调整仅同步文档，现有 `.env` / `.env.example` 请手动核对，不要覆盖真实密钥。模型与 OCR 密钥在对应接入阶段配置。
+已有 `.env` 应保留本地密码与密钥，参考 `.env.example` 按分组合并新增配置。模板保留的 `POSTGRES_*` / `REDIS_PORT` 为历史部署元信息，应用只读取连接 URL。模型与 OCR 密钥在对应接入阶段配置。
 
 ### 3. Windows 原生 PostgreSQL 17
 
@@ -184,7 +186,7 @@ uvicorn app.main:app --reload
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-当前 FastAPI 仍为最小服务，`/health` 仅检查服务进程，不验证 PostgreSQL 或 Redis 连接。基础服务的应用连接、Celery 与业务数据库迁移需按开发阶段逐步接入。
+当前 `/health` 仅检查服务进程，不验证 PostgreSQL 或 Redis 连接。Celery 测试任务通过下方 `/tasks` 接口验证 Redis；PostgreSQL 应用连接与业务数据库迁移需按开发阶段逐步接入。
 
 ### 7. 当前 API 接口
 
@@ -193,6 +195,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `GET` | `/health` | FastAPI 服务健康检查 | 返回服务状态和 `knowledge-service` 标识 |
 | `GET` | `/docs` | Swagger UI | 可交互查看当前 OpenAPI 文档 |
 | `GET` | `/openapi.json` | OpenAPI JSON 描述 | 返回接口定义 JSON |
+| `POST` | `/tasks/add` | 提交异步加法任务 | 返回 HTTP 202、`task_id`、`submitted` 和队列名 |
+| `GET` | `/tasks/{task_id}` | 查询 UUID 对应的任务状态 | 返回状态、成功结果或失败提示 |
 
 健康检查示例：
 
@@ -207,19 +211,80 @@ curl http://127.0.0.1:8000/health
 }
 ```
 
-### 8. 后续 Celery 启动参考（尚未实现）
+### 8. Celery 配置与 Worker 启动
 
-Celery 应用与队列尚未建立，以下命令仅作为阶段 3 的启动约定，当前不要执行；实际实现后需同步确认模块路径和队列名。
+Celery 使用 Redis 作为 Broker 与 Result Backend，默认任务进入 `default_queue`，GPU 任务显式选择 `gpu_queue`。两个 Worker 分别只消费自己的队列。
 
-```bash
-# CPU Worker
-celery -A app.core.celery_app worker -Q default_queue --concurrency=2 -l info
+在 `.env` 的“异步任务”分组设置以下配置，两个 URL 必须指向已运行的 WSL Redis（含认证时也应保持一致）：
 
-# GPU Worker，避免多进程重复加载模型
-celery -A app.core.celery_app worker -Q gpu_queue --concurrency=1 -l info
+```dotenv
+CELERY_BROKER_URL=redis://127.0.0.1:6379/1
+CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
 ```
 
-Windows 开发环境中，后续 Celery Worker 的运行环境与进程池需在阶段 3 明确并验证，不能将这些参考命令视为已通过 Windows 验收。
+使用同一 Redis 服务的不同逻辑数据库分离消息与结果；若未配置这两项，应用使用 `REDIS_URL`。结果保留 24 小时。安装阶段 3 Python 依赖：
+
+```powershell
+conda activate dkf-agent
+python -m pip install "celery[redis]"
+```
+
+先确认 `wsl -l -v` 中 Ubuntu 为 `Running`，再按前文验证 `PONG` 和 Windows 6379 连通。在项目根目录分别打开终端启动 Windows 开发 Worker：
+
+```powershell
+# CPU Worker：默认并发 2，也可设为 3 或 4。
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=threads --concurrency=2 --hostname=cpu@%h -l info
+```
+
+```powershell
+# GPU Worker：单进程串行执行，避免后续模型被多进程重复加载。
+python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
+```
+
+`gpu_queue` 当前只用同一个加法任务验证调度，不加载 GPU 模型。Worker 日志应包含 `app.tasks.demo.add` 和对应队列，启动完成后显示 `ready`。
+
+Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.html#does-celery-support-windows)；上述 `threads` / `solo` 为本地开发验证方式。线程池不保证 Python CPU 密集任务并行加速，正式 CPU Worker 在 Linux/WSL 环境使用默认 prefork 池，规划并发 2～4。不同池的能力见[官方并发说明](https://docs.celeryq.dev/en/stable/userguide/concurrency/index.html)。GPU Worker 保持单进程串行。后续重型任务的超时和幂等须单独验证。
+
+### 9. 提交任务与查询结果
+
+启动两个 Worker 和 FastAPI 后，在 Windows PowerShell 中提交：
+
+```powershell
+$task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/tasks/add -ContentType 'application/json' -Body '{"x":2,"y":3,"queue":"default_queue"}'
+$task
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/tasks/$($task.task_id)"
+```
+
+任务执行完成后，预期查询结果：
+
+```json
+{
+  "task_id": "返回的 UUID",
+  "status": "SUCCESS",
+  "result": 5,
+  "error": null
+}
+```
+
+将 `queue` 改为 `gpu_queue`，重复提交与查询，应在 GPU Worker 日志中看到执行。请求参数 `x`、`y` 必须为整数，`queue` 只允许这两个队列，不传时默认 `default_queue`。
+
+提交成功为 `202`，不等待计算完成；任务状态可能为 `PENDING`、`STARTED`、`RETRY`、`SUCCESS`、`FAILURE`。`PENDING` 也可能表示未知 ID 或结果已过期，本阶段尚无业务任务表，不能据此判断任务不存在。UUID 格式或参数无效返回 `422`。Redis 不可用时提交/查询返回 `503`，先检查 WSL 与 Redis；失败详情写入 Worker 日志和 Celery 结果元数据，API 只返回脱敏提示。
+
+加法任务无副作用，可重复执行；对暂时性 `OSError` 最多退避重试 3 次，参数错误不重试。后续文档任务需另外实现数据库幂等，不能将此测试任务视为文档入库已完成。
+
+自动化测试依赖 `environment.yml` 已声明的 pytest 与 httpx；环境中尚未安装时执行 `python -m pip install pytest httpx`。无需 Redis 的边界测试：
+
+```powershell
+python -m pytest tests/test_celery.py -q
+```
+
+真实链路复测（先确认 Ubuntu Running 与 Redis PONG）：
+
+```powershell
+python -m pytest tests/celery_smoke.py -q
+```
+
+该测试临时启动两个独立命名的 Worker 和一个临时端口 FastAPI，检查队列隔离、任务执行、API 查询与失败记录，结束时关闭本次测试进程并仅清理本次任务结果，不修改系统服务或清空 Redis。源码、测试文件需要版本控制；测试缓存与运行日志由现有 `.gitignore` 忽略。
 
 ## 主要功能
 

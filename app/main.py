@@ -3,6 +3,7 @@
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -15,3 +16,4 @@ app = FastAPI(
 
 # 路由集中在入口注册，后续模块可按领域扩展而不影响应用启动流程。
 app.include_router(health_router)
+app.include_router(tasks_router)
