@@ -175,7 +175,7 @@ python -c "import redis; r=redis.Redis(host='127.0.0.1', port=6379, db=0); print
 
 ### 6. 启动当前 API 服务
 
-当前阶段已实现 FastAPI 最小服务，可在项目根目录执行：
+当前 API 已提供健康检查、异步任务入口及管理员知识库管理接口，可在项目根目录执行：
 
 ```powershell
 conda activate dkf-agent
@@ -199,6 +199,24 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | `GET` | `/openapi.json` | OpenAPI JSON 描述 | 返回接口定义 JSON |
 | `POST` | `/tasks/add` | 提交异步加法任务 | 返回 HTTP 202、`task_id`、`submitted` 和队列名 |
 | `GET` | `/tasks/{task_id}` | 查询 UUID 对应的任务状态 | 返回状态、成功结果或失败提示 |
+| `POST` | `/api/admin/knowledge-bases` | 创建知识库 | HTTP 201，返回知识库详情 |
+| `GET` | `/api/admin/knowledge-bases` | 分页查询知识库 | HTTP 200，返回 `items`、`total`、`limit`、`offset` |
+| `GET` | `/api/admin/knowledge-bases/{kb_id}` | 按 UUID 查询知识库详情 | HTTP 200，返回知识库详情 |
+| `GET` | `/api/admin/knowledge-bases/{kb_id}/documents` | 分页查询指定知识库的文档 | HTTP 200，返回文档分页列表 |
+
+管理员知识库接口依赖 PostgreSQL 和第 9 节的数据库迁移；不依赖 Redis 或 Celery Worker。启动方式不变，接口参数及响应模型可在 `/docs` 的 `admin-knowledge-bases` 分组查看。
+
+当前管理员接口**尚未提供身份鉴权或 RBAC**，只用于本机或可信内网开发，不应直接暴露到公网。调用方不能指定知识库 ID、状态或时间。创建请求为 JSON，例如：
+
+```json
+{"name": "项目资料", "description": "项目参考文档"}
+```
+
+`name` 必填，去除首尾空白后长度为 1～255，且名称唯一；`description` 为可选字符串或 `null`，不接受其他字段。创建后的 `status` 为 `ACTIVE`。详情包含 `kb_id`、`name`、`description`、`status`、`created_at`、`updated_at`，UUID 和时间在 JSON 中均为字符串。
+
+两个列表接口接受 `limit`（默认 20，范围 1～100）和 `offset`（默认 0，非负），按创建时间、UUID 倒序返回。文档列表项包含 `doc_id`、`kb_id`、`file_name`、`file_type`、`file_hash`、`source_type`、`status`、`error_message`、`created_at`、`updated_at`；不包含本地文件路径、正文或向量。已有知识库没有文档时返回 `items: []`、`total: 0`。当前尚未提供文档上传接口。
+
+错误响应：名称重复返回 HTTP 409；知识库不存在返回 404；非法 UUID、创建参数或分页参数返回 422；数据库连接、配置或迁移不可用返回 503。业务错误使用 `{"detail": "中文提示"}`，422 使用 FastAPI 默认的结构化校验错误。数据库失败响应不包含连接串或底层 SQL 异常。
 
 健康检查示例：
 
