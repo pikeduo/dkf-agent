@@ -11,7 +11,7 @@ DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结�
 | Python | Python 3.11，Conda 环境 `dkf-agent` |
 | API | FastAPI，默认 `127.0.0.1:8000` |
 | 数据库 | Windows 原生 PostgreSQL 17 + pgvector，`127.0.0.1:5432` |
-| 消息与结果存储 | WSL2 Ubuntu Redis，Windows 通过 `127.0.0.1:6379` 访问 |
+| 消息与结果存储 | Windows 本地 Redis 服务，`127.0.0.1:6379` |
 | 异步执行 | Celery CPU Worker；GPU Worker 按需启动 |
 
 当前 Windows 开发环境不使用 Docker 部署 PostgreSQL 或 Redis。Docker Compose 保留为未来整体部署方案。
@@ -103,38 +103,46 @@ SELECT '[1,2,3]'::vector;
 
 扩展已启用时无需重复创建。预期数据库为 `dkf_agent`，扩展查询返回一行 `vector` 和版本号，类型转换返回 `[1,2,3]`。扩展需在项目数据库单独启用。
 
-### Redis（WSL2 Ubuntu）
+### Redis（Windows 本地服务）
 
-在 Windows PowerShell 中检查并进入 Ubuntu；发行版名称以实际列表为准：
+使用本机已有的 Windows Redis 安装，不通过 WSL 部署。以下命令以当前安装位置和服务名 `Redis` 为例；其他机器请替换为实际路径和服务名。已有服务无需重复安装。
 
-```powershell
-wsl -l -v
-wsl -d Ubuntu
+服务使用的配置文件是 `redis.windows-service.conf`，本机监听配置应为：
+
+```conf
+bind 127.0.0.1
+port 6379
+protected-mode yes
 ```
 
-在 Ubuntu 中安装并启动 Redis：
-
-```bash
-sudo apt update
-sudo apt install redis-server
-sudo systemctl start redis-server
-redis-cli ping
-```
-
-不支持 systemd 时改用 `sudo service redis-server start`。预期返回 `PONG`。
-
-Windows 通过本机端口转发访问 Redis，参见 [Microsoft WSL 网络说明](https://learn.microsoft.com/en-us/windows/wsl/networking)。WSL 停止会导致 Redis 停止，开发期间需保持 Ubuntu 为 `Running`，可保留 Ubuntu 终端会话。
-
-在 Windows 验证连通性：
+如果使用 ZIP 发行包且尚未注册服务，在**管理员 PowerShell** 中执行一次；MSI 已注册服务或 `Get-Service Redis` 能找到服务时跳过。参见该 Windows 发行版的[服务安装说明](https://github.com/tporadowski/redis/blob/develop/Windows%20Service%20Documentation.md)。
 
 ```powershell
-wsl -l -v
-wsl -d Ubuntu -- redis-cli ping
+& "D:\Redis\redis-server.exe" --service-install --service-name Redis "D:\Redis\redis.windows-service.conf"
+```
+
+设置开机自动启动并启动服务（管理员 PowerShell；已有自动启动且运行中的服务可跳过设置和启动）：
+
+```powershell
+Set-Service -Name Redis -StartupType Automatic
+Start-Service -Name Redis
+Get-Service -Name Redis
+```
+
+Redis 作为 Windows 后台服务运行，关闭 PowerShell 窗口不会停止它，不需要保持 Ubuntu 或额外终端运行。修改服务配置后，由开发者手动重启 Redis；同一端口不要同时运行其他 Redis 实例。
+
+在 Windows 验证部署：
+
+```powershell
+& "D:\Redis\redis-cli.exe" -h 127.0.0.1 -p 6379 ping
 Test-NetConnection 127.0.0.1 -Port 6379
+conda activate dkf-agent
 python -c "import redis; r=redis.Redis(host='127.0.0.1', port=6379, db=0); print(r.ping())"
 ```
 
-预期 Ubuntu 为 `Running`、Redis 返回 `PONG`、端口检查为 `True`、Python 输出 `True`。
+预期服务状态为 `Running`、Redis 返回 `PONG`、端口检查为 `True`、Python 输出 `True`。连接 URL 仍使用前文的 `127.0.0.1:6379`，三个 Redis URL 无需因部署方式切换而改变；启用认证时需同步配置 URL 和检查命令中的认证信息。
+
+当前已有 Redis 5.0.14.1 属于[第三方 Windows 移植版](https://github.com/tporadowski/redis)，仅沿用作本机开发环境，不作为生产推荐。当前安装的 redis-py 5.3.1 [声明支持 Redis 5](https://github.com/redis/redis-py/blob/v5.3.1/README.md)；更新环境依赖前需重新核对兼容性。新部署或生产环境需另行评估受维护的原生方案，可参考 [Redis 的 Windows 原生部署指南](https://redis.io/tutorials/howtos/how-to-run-redis-on-windows-natively-with-memurai/)。
 
 ## 4. 初始化数据库
 
@@ -233,7 +241,7 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 ## 7. 部署成功检查与常见问题
 
-基础服务按前文确认：PostgreSQL `SELECT 1` 返回 `1`、项目库中存在 `vector` 扩展、Ubuntu 为 `Running`、Redis 返回 `PONG`。
+基础服务按前文确认：PostgreSQL `SELECT 1` 返回 `1`、项目库中存在 `vector` 扩展、Windows Redis 服务为 `Running`、Redis 返回 `PONG`。
 
 API 启动后打开 `http://127.0.0.1:8000/health`，预期返回：
 
@@ -252,6 +260,6 @@ python -m celery -A app.core.celery_app:celery_app inspect active_queues
 
 已启动的 Worker 应返回 `pong`；CPU 消费 `default_queue`，可选 GPU 消费 `gpu_queue`。这些检查不提交业务任务。
 
-Redis 连接失败时，依次检查 WSL 是否 `Running`、Redis 服务是否启动、6379 是否监听、Ubuntu 中 `redis-cli ping` 是否返回 `PONG`。上传失败或超时后先查询文档列表，避免对已保存的文件反复上传。
+Redis 连接失败时，依次检查 Windows Redis 服务状态、服务配置中的绑定地址与端口、6379 是否监听、本地 `redis-cli ping` 是否返回 `PONG`，再核对应用与 Celery 的连接 URL。上传失败或超时后先查询文档列表，避免对已保存的文件反复上传。
 
 数据库和上传目录应一起备份。文件格式检查不等同于恶意文件扫描；对外部署前还需增加鉴权及网关请求体限制。

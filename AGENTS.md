@@ -209,18 +209,18 @@ Docker Compose
 
 - PostgreSQL 17 原生安装于 Windows，默认地址 `127.0.0.1:5432`；项目数据库为 `dkf_agent`，项目用户为 `dkf_user`，应用通过 `DATABASE_URL` 连接。
 - pgvector 在 Windows 原生编译安装；必须使用 Visual Studio 2022 Build Tools 的 **x64 C++ 工具链**，禁止使用 x86 工具链。`PGROOT` 指向 `C:\Program Files\PostgreSQL\17`。由开发者在 `dkf_agent` 数据库中执行 `CREATE EXTENSION vector;`，通过 `pg_extension` 查询验证启用状态。
-- Redis 运行于 WSL2 Ubuntu，不使用 Windows Redis 5。默认从 Windows 通过 `127.0.0.1:6379`、`REDIS_URL=redis://127.0.0.1:6379/0` 连接，Redis 服务由开发者通过 systemd / service 管理。
+- Redis 运行于 Windows 本地，沿用已有原生安装，作为 Windows 服务后台运行；默认地址 `127.0.0.1:6379`、`REDIS_URL=redis://127.0.0.1:6379/0`，不通过 WSL 部署。当前已有 Redis 5.0.14.1 仅作为本机开发环境，不作为生产推荐；服务器或 Python 客户端升级需先核对兼容性，不自行替换安装方案。
 
 Codex 必须遵守：
 
 1. 不自动创建 `docker-compose.yml` 来部署 PostgreSQL 或 Redis。
 2. 不自动修改、安装 PostgreSQL / Redis 系统软件，不自动编译安装 pgvector，不修改系统服务。
 3. 应用代码只负责通过环境变量连接现有基础服务，不承担服务安装或启动工作。
-4. 测试 Redis 前，先确认 `wsl -l -v` 中 Ubuntu 状态为 `Running`。WSL 停止会导致 Redis 停止。
-5. Redis 连接失败时，不直接修改 Python 代码；先依次检查 WSL 是否 Running、Redis 服务是否启动、6379 是否监听、Ubuntu 中 `redis-cli ping` 是否返回 `PONG`，再依据检查结果定位应用问题。
-6. Docker Compose 保留为未来整体部署方案，当前 Windows 开发环境不使用 Docker 部署 PostgreSQL 或 Redis；除非用户明确要求，不恢复 Docker 版基础服务部署。
+4. 测试 Redis 前，先通过 `Get-Service Redis` 确认本地服务为 `Running`（服务名以实际安装为准）；Redis 不依赖 WSL 状态，不要求开启 Ubuntu。
+5. Redis 连接失败时，不直接修改 Python 代码；先依次检查 Windows 服务状态、服务配置中的绑定地址与端口、6379 是否监听、本地 `redis-cli ping` 是否返回 `PONG`，再核对 `REDIS_URL`、Celery Broker 与 Result Backend 的 URL 是否指向同一本地服务。需要调整服务时交由用户手动处理。
+6. Docker Compose 保留为未来整体部署方案，当前 Windows 开发环境不使用 Docker 部署 PostgreSQL 或 Redis；除非用户明确要求，不恢复 Docker 基础服务或 WSL Redis 部署。
 
-本节优先于开发计划或其他文档中遗留的 Docker 基础服务部署说明。开发顺序不变，但当前 PostgreSQL、pgvector 和 Redis 的部署方式以上述约束为准。
+本节优先于开发计划或其他文档中遗留的 Docker 基础服务或 WSL Redis 部署说明。开发顺序不变，但当前 PostgreSQL、pgvector 和 Redis 的部署方式以上述约束为准。
 
 ---
 
