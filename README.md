@@ -240,6 +240,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 当前阶段只建立状态机和任务框架：Worker 检查原件存在、非空且可读取后，将文档推进到 `PARSING`。任务成功结果为 `{"doc_id": "...", "document_status": "PARSING", "status": "awaiting_parser"}`，表示等待后续 Parser 接入；尚未解析、OCR、生成 Block / Chunk / Embedding，也不会标记 `READY`。状态机预留后续 OCR、切片、向量化、索引阶段的合法流转。
 
+阶段 8 已定义独立的 `ParsedDocument / ParsedBlock` 数据契约与 Parser 公共校验入口，供后续格式解析器使用；目前尚未接入具体 Parser，以上任务行为保持不变。该阶段不新增依赖、环境变量、迁移或启动命令，按现有方式启动 FastAPI 和 Worker 即可。结构约定及独立验收步骤见 [Parser 契约说明](PARSER_CONTRACT.md)，README 不包含业务测试代码。
+
 使用上传返回的 `kb_id`、`doc_id` 调用 `GET /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` 查看数据库中的最新状态与 `error_message`；使用 `task_id` 调用 `GET /tasks/{task_id}` 查询 Redis 中的 Celery 状态。后者成功结果可以是加法任务的整数或文档任务的字典。Celery `SUCCESS` 只表示当前框架步骤完成，不等于文档 `READY`；未知或已过期的任务结果可能为 `PENDING`，不能据此认定任务仍在排队，Document 状态以数据库为准。
 
 恢复 Redis 或修复原件问题后，可对 `UPLOADED` / `FAILED` 文档调用 `POST /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process`，无请求体。接口重置错误、分配新 `task_id`、提交后投递，成功返回 HTTP 202；投递失败返回 503 并保留文件，可再次查询持久化状态。旧任务标识不能覆盖新一轮状态。已经进入 `PARSING` 或更后续阶段的文档返回 409，不重复投递；该入口不是 Reindex。文档不存在或不属于指定知识库返回 404，非法 UUID 返回 422。
