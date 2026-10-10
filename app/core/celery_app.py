@@ -11,7 +11,7 @@ celery_app = Celery(
     "knowledge-service",
     broker=settings.celery_broker_url or settings.redis_url,
     backend=settings.celery_result_backend or settings.redis_url,
-    include=["app.tasks.demo", "app.tasks.documents"],
+    include=["app.tasks.demo", "app.tasks.documents", "app.tasks.mineru"],
 )
 
 celery_app.conf.update(
@@ -20,6 +20,8 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.demo.add": {"queue": "default_queue"},
         "app.tasks.documents.process_document": {"queue": "default_queue"},
+        "app.tasks.mineru.submit_mineru_parse": {"queue": "default_queue"},
+        "app.tasks.mineru.check_mineru_result": {"queue": "default_queue"},
     },
     # 队列拼写错误应直接暴露，避免任务误入无人消费的新队列。
     task_create_missing_queues=False,

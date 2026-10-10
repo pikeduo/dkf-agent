@@ -2,7 +2,7 @@
 
 DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结构化知识库建设与问答。本文说明安装、配置、启动和接口使用。
 
-当前可使用知识库创建与查询、文档上传、异步原生文本解析和状态查询。支持 TXT、Markdown、DOCX 及文本型 PDF 解析；OCR、切片和知识库问答尚不可用，上传或解析成功不代表文档已经可以检索。
+当前提供知识库管理、上传、原生文本解析与显式 MinerU Cloud 解析入口。TXT、Markdown、DOCX 和文本型 PDF 使用原生解析；图片、扫描件、表格与公式 PDF 可显式提交 MinerU 官方云端精准解析 API V4（需配置 Token 并完成人工验证）。尚无自动 Parser 路由、切片、索引或问答，上传和解析成功不代表可以检索。
 
 ## 1. 运行环境
 
@@ -13,6 +13,7 @@ DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结�
 | 数据库 | Windows 原生 PostgreSQL 17 + pgvector，`127.0.0.1:5432` |
 | 消息与结果存储 | Windows 本地 Redis 服务，`127.0.0.1:6379` |
 | 异步执行 | Celery CPU Worker；GPU Worker 按需启动 |
+| 复杂文档解析 | MinerU Cloud 精准解析 V4，默认 `vlm`；不下载本地 MinerU 模型 |
 
 当前 Windows 开发环境不使用 Docker 部署 PostgreSQL 或 Redis。Docker Compose 保留为未来整体部署方案。
 
@@ -51,6 +52,15 @@ REDIS_URL=redis://127.0.0.1:6379/0
 CELERY_BROKER_URL=redis://127.0.0.1:6379/1
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
 
+# OCR / 外部服务：仅使用云解析时需要 Token
+MINERU_API_BASE_URL=https://mineru.net/api/v4
+MINERU_API_TOKEN=
+MINERU_MODEL_VERSION=vlm
+MINERU_LANGUAGE=ch
+MINERU_ENABLE_TABLE=true
+MINERU_ENABLE_FORMULA=true
+MINERU_IS_OCR=true
+
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
@@ -60,8 +70,32 @@ MAX_UPLOAD_SIZE_MB=50
 - Redis 三个 URL 应指向同一服务；逻辑数据库 0、1、2 分别用于应用连接、消息和结果。未配置 Celery URL 时使用 `REDIS_URL`。
 - `UPLOAD_DIR` 的相对路径以项目根目录为基准，也可使用绝对路径。运行账号需有创建、写入和删除权限；默认目录首次有效上传时创建，并已被 Git 忽略。
 - 上传限制默认为 50 MiB，必须为正整数。API 与 CPU Worker 必须使用同一数据库，并能访问同一上传目录。
-- 当前功能无需填写 DeepSeek 或 OCR 密钥；模板中的相关变量为后续接入保留。`POSTGRES_*`、`REDIS_PORT` 是历史元信息，应用不读取它们。
+- 原生解析无需 MinerU 或 DeepSeek 密钥。云解析仅需要在本机 `.env` 填写 `MINERU_API_TOKEN`，从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取；API 与 Worker 使用同一配置。Token 错误或过期由你手动替换，程序不自动刷新。
+- `POSTGRES_*`、`REDIS_PORT`、`OCR_PROVIDER`、`VOLCENGINE_*` 为历史配置，应用不读取；当前不接入火山 / 百度 OCR。
 - 修改配置后重启 API 和 Worker。使用 Uvicorn 命令启动时，监听地址和端口以命令行参数为准。
+
+### MinerU 调用保护配置
+
+其余变量已按用途放在 `.env.example`，保留默认值即可开始小样本使用：
+
+| 变量 | 默认值 / 含义 |
+|---|---|
+| `MINERU_SUBMIT_FILE_LIMIT_PER_MINUTE` | 50，按文件数量而非请求数量计量 |
+| `MINERU_RESULT_QUERY_LIMIT_PER_MINUTE` | 1000，批次查询次数 |
+| `MINERU_DAILY_FILE_LIMIT` | 5000，应用按滚动 24 小时保守保护 |
+| `MINERU_HIGH_PRIORITY_PAGE_LIMIT` | 1000，仅估计优先页消耗，超出不拒绝 |
+| `MINERU_UPLOAD_BATCH_MAX_FILES` | 50，Provider 单批最大文件数；管理接口每次上传一份 |
+| `MINERU_RATE_SAFETY_RATIO` | 0.9，实际分钟保护为 45 文件 / 900 查询；批量需满足安全额度 |
+| `MINERU_QUOTA_NAMESPACE` | `dkf-agent:mineru`，同一账户的所有 Worker 必须共用同一 Redis 与命名空间 |
+| `MINERU_REQUEST_TIMEOUT_SECONDS` | 60，单次 HTTP 超时 |
+| `MINERU_POLL_INTERVAL_SECONDS` | 15，未完成时下次检查间隔 |
+| `MINERU_JOB_TIMEOUT_SECONDS` | 7200，整份任务总等待上限 |
+| `MINERU_MAX_RETRIES` | 5，临时错误重试上限 |
+| `MINERU_RESULT_MAX_MB` | 256，结果 ZIP 下载上限（MiB） |
+
+这些是本应用保护值，不能代替平台账户的实际额度；其他程序使用同一 Token 的消耗不在本应用计数内。平台可能动态限流，收到 429 会退避；Redis 不可用时不绕过保护调用云端。不要通过更换命名空间绕过额度。
+
+原件会上传到 MinerU 云端，使用前确认文档允许外传、账户额度可用和运行机器可访问官方 API / 对象存储；不需 GPU，也不需 DeepSeek Key。
 
 ## 3. 部署基础服务
 
@@ -157,7 +191,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期当前迁移版本为 `0003_block_order (head)`，默认知识库“默认知识库”存在。初始化可重复执行，其固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。
+预期当前迁移版本为 `0004_mineru_jobs (head)`，默认知识库“默认知识库”存在。初始化可重复执行，其固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。
 
 已有数据库更新应用时也需执行迁移，再重启 API 和 Worker。应用启动不会自动迁移或创建默认知识库，也不会自动安装或启用 pgvector。
 
@@ -181,7 +215,7 @@ uvicorn app.main:app --reload
 python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=threads --concurrency=2 --hostname=cpu@%h -l info
 ```
 
-并发可设为 2～4。启动日志应显示 `default_queue`、`app.tasks.documents.process_document` 和 `ready`。仅启动 API 不会执行文档任务。
+并发可设为 2～4。启动日志应显示 `default_queue`、`app.tasks.documents.process_document`、`app.tasks.mineru.submit_mineru_parse`、`app.tasks.mineru.check_mineru_result` 和 `ready`。升级代码与迁移后必须重启 CPU Worker；仅启动 API 不会执行文档任务。
 
 ### GPU Worker（可选）
 
@@ -209,6 +243,9 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传单个文件，成功创建返回 201 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、失败原因及任务 ID |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递任务，无请求体，成功返回 202 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份 PDF / 图片至 MinerU，multipart `file`，返回 202 与 Parse Job |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 显式提交已有待处理 / 失败文档，或恢复同代次云任务；无请求体，返回 202 |
+| GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 最近 20 条云端任务、安全错误及外部状态；无签名 URL 或 Token |
 | POST | `/tasks/add` | 提交加法任务；JSON 参数为整数 `x`、`y` 和可选 `queue`，返回 202 |
 | GET | `/tasks/{task_id}` | 查询 Celery 任务状态和结果 |
 
@@ -232,7 +269,7 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 可自动解析 TXT、Markdown、DOCX 正文及文本型 PDF。TXT/Markdown 支持 UTF-8、带 BOM 的 UTF-16/32 和 GB18030；无法识别的编码需先转换为 UTF-8。DOCX 提取正文段落、标题及表格，不包含页眉、页脚、文本框或图片文字。PDF 保留真实页码；TXT、Markdown 与 DOCX 的页码为逻辑页 1，不等同于 Word 排版页码。
 
-图片、纯扫描 PDF 及包含无原生文本扫描页的混合 PDF 需要 OCR，当前任务会失败并记录原因，原件保留。文本与图片同页时仅提取已有文本，不识别图片内文字；加密、损坏、空文本文件也会返回解析失败。
+此上传入口仍只投递原生 Parser，图片、纯扫描及包含无文本扫描页的混合 PDF 会记录需要云端解析的失败原因并保留原件；不会自动回退 MinerU。文本与图片同页时仅提取已有文本，不识别图片内文字。需要复杂文档解析时使用下方显式 MinerU 入口；加密、损坏、空文本文件也会失败。
 
 响应包含 `doc_id`、`status`、`error_message`、`task_id` 等元信息。**201 表示原件及文档记录创建成功，不代表任务执行成功。** 队列投递失败时文件和记录可能已保留，应先查询文档详情，再决定是否重新投递。
 
@@ -245,6 +282,18 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 - 旧版任务留下的 `PARSING` 记录不会因更新代码自动解析，也不能通过 `/process` 重新投递；升级后的首次使用请上传新文档，不要假定历史记录已处理。
 
 常见错误：400 文件名无效或文件为空；404 资源不存在；409 名称、内容重复或状态不允许；413 文件超限；415 格式不支持或标识不匹配；422 参数校验失败；503 基础服务、配置或迁移不可用；507 文件存储不可用。错误提示位于响应的 `detail`，具体模型见 Swagger。
+
+### 显式使用 MinerU Cloud
+
+在 Swagger 选择 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents`，填写知识库标识并上传 PDF、JPG、JPEG 或 PNG。云端限制为单文件 200 MB / 200 页，应用默认上传上限仍为 50 MiB，以更小者为准。返回的 `job_id / doc_id / state` 用于后续查询；202 只表示本地任务已建立并投递，不代表云端已经成功。
+
+查询 `GET /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs`：外部状态为 `waiting-file / pending / running / converting / done / failed`；响应还包含 `batch_id / data_id / trace_id / retry_count / error_code / error_message`、活动标记和时间。`task_id` 是本地处理代次，不是整份云任务的 Celery 结果 ID。云任务应以此列表和文档详情为准，不以单个短任务 SUCCESS 或 `/tasks` 的 PENDING 判断解析成功。
+
+成功时外部任务为 `done`、文档为 `CHUNKING`；仍不能检索。失败时查看安全错误；文件原件保留。已有 `UPLOADED / FAILED` 的 PDF / 图片可通过 `POST .../documents/{doc_id}/mineru` 提交；同代次活动云任务可用该入口恢复投递，重复请求沿用原任务。已经 `CHUNKING` 的文档返回 409，不提供 Reparse / Reindex。
+
+未配置 Token 返回 503；不支持格式返回 415；云端原件可读性校验失败返回 422（如文件已保存，detail 含 doc_id）；队列投递失败返回 503 与已保存的 doc_id / job_id。先查现有状态再恢复任务，不要重复上传。日额度、鉴权、损坏文件不盲目重试；若提示提交结果不确定，先在 MinerU 平台核对是否已创建批次，不能直接反复申请。
+
+目前没有自动路由、结果缓存、Admin Markdown 预览或后台补投器。更新版本不会自动处理历史记录；使用新知识库 / 新文档验证，或对符合状态条件的已有记录显式提交。管理员接口尚无鉴权，包含会产生云端调用的入口，仅限本机或可信内网。
 
 ## 7. 部署成功检查与常见问题
 

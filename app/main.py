@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.api.admin_knowledge_bases import router as admin_knowledge_bases_router
 from app.api.health import router as health_router
+from app.api.mineru import router as mineru_router
 from app.api.tasks import router as tasks_router
 from app.core.config import get_settings
 
@@ -19,3 +20,4 @@ app = FastAPI(
 app.include_router(health_router)
 app.include_router(tasks_router)
 app.include_router(admin_knowledge_bases_router)
+app.include_router(mineru_router)

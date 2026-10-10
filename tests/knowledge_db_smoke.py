@@ -21,6 +21,7 @@ PROJECT_TABLES = (
     "documents",
     "document_blocks",
     "document_chunks",
+    "document_parse_jobs",
 )
 
 
@@ -93,7 +94,7 @@ def migrated_connection(request):
                 connection.execute(
                     text(
                         f'INSERT INTO "{fallback_schema}".alembic_version '
-                        "VALUES ('0003_block_order')"
+                        "VALUES ('0004_mineru_jobs')"
                     )
                 )
             # 保留 public 是为了访问人工启用的 vector 类型，而不是作为项目表的后备。
@@ -156,7 +157,7 @@ def test_migration_matches_models_and_has_expected_schema(migrated_connection):
     command.check(config)
     assert (
         connection.scalar(text(f'SELECT version_num FROM "{schema}".alembic_version'))
-        == "0003_block_order"
+        == "0004_mineru_jobs"
     )
     assert connection.scalar(
         text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')")

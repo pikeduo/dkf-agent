@@ -22,7 +22,7 @@
 ```text
 Knowledge Ingestion
 知识库文档
-→ Parser / OCR
+→ Native Parser / MinerU Cloud（复杂文档精准解析）
 → Chunk
 → BGE-M3
 → pgvector
@@ -133,7 +133,7 @@ Query
 ```text
 上传 / 批量上传
 → Celery
-→ Parse / OCR
+→ Native Parse / MinerU Cloud
 → 查看解析结果
 → Chunk
 → Embedding
@@ -184,7 +184,7 @@ BAAI/bge-m3
 BAAI/bge-reranker-v2-m3
 PyMuPDF
 python-docx
-火山引擎 OCR（预留百度 OCR Provider）
+MinerU Cloud 官方精准解析 API V4（默认 vlm）
 SymPy
 LangChain
 LangGraph
@@ -415,6 +415,21 @@ concurrency = 1
 - 上传按实际内容计算 SHA256、检查大小和基本格式标识，不依赖客户端大小或 MIME 声明；这些检查不是完整格式解析或恶意文件扫描，文本编码留待 Parser 判断。
 - CPU Worker 在 Windows 使用线程池仅作开发验证，正式 Linux 环境使用 prefork 并发 2～4；GPU Worker 单进程串行，当前不加载模型。不能把线程池等同于 CPU 密集任务的多进程加速。
 
+### 6.6.2 MinerU Cloud 实现约定与阶段边界
+
+- 仅使用 [MinerU 官方精准解析 API V4](https://mineru.net/apiManage/docs)，不使用轻量 Agent API、不部署本地 MinerU 模型；复杂 PDF、扫描件、图片的 OCR、表格与公式识别统一由 MinerU 承担，不继续接入火山 / 百度 OCR。
+- HTTP 只能放在 `MinerUCloudProvider`；本地原件采用申请批量上传 URL、签名 PUT、批次 GET 流程。对象存储请求不携带 API Token，不设置上传 Content-Type、不跟随重定向。只接受官方 HTTPS 签名资源域名。
+- Token 只读取本地 `MINERU_API_TOKEN`，使用 SecretStr 遮盖表示；不进入日志、前端、Celery 消息或异常详情，不实现到期跟踪、续期或刷新。上游错误原文和签名链接不得透传。
+- 提交前校验实际格式、可读性、Hash、200 MB / 200 页限制；批量申请最多 50 文件。应用上传限制仍生效，以更小的限制为准。
+- Redis Lua 原子共享频控：提交按文件数计量、查询按次数计量；默认平台上限为 50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9。日额度使用保守的滚动 24 小时；1000 优先页按 UTC 日估计，只观测不硬拒绝。相同账户的所有 Worker 必须使用同一 Redis 与命名空间，Redis 故障时关闭云端调用。
+- `submit_mineru_parse / check_mineru_result` 是 CPU 短任务。只查一次，未完成通过 countdown 再投递；禁止 while/sleep 等待。已确认临时错误有限指数退避加抖动，并尊重 Retry-After；永久错误立即记录 FAILED，总等待时间有上限。
+- `document_parse_jobs` 保存外部六种状态、batch / data / trace 标识、参数快照、重试、错误及提交检查点；Document 保持供应商无关状态。`task_id` 为本地处理代次，不是外部单文件 task_id，也不表示整份文档的 Celery 执行结果。
+- 文档行锁、活动解析身份部分唯一索引、当前代次检查和稳定 Block ID 共同保证幂等。POST 前保存申请意图、PUT 前保存 batch，上传恢复沿用同一 batch；已确认远端失败后才自动申请新 batch。POST 响应丢失时安全失败，禁止盲目重复申请；官方接口无已确认的幂等请求键，不得宣称跨数据库与云端绝对 exactly-once。
+- 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留顺序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
+- Block 替换与 Document=CHUNKING、job=done 在同一事务内提交；失败回滚所有块修改，再独立记录安全错误。full.md 仅供供应商平台人工核对，当前未新增 Admin Markdown 预览接口。
+- 阶段 10 使用显式 MinerU 上传 / 已有文档提交入口，不改变阶段 9 原生接口的行为；重复活动请求仅恢复同一任务，完成文档拒绝重解析。没有 Router、Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
+- 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
+
 ### 6.7 数据和证据规则
 
 每个 Chunk 必须至少保留：
@@ -435,7 +450,7 @@ text
 
 ### 6.7.1 统一 Parser 契约
 
-- 所有具体 Parser 使用 `ParsedDocument / ParsedBlock`，继承 `BaseParser` 并实现 `_parse`；调用方通过公共 `parse` 入口校验结果，文档 ID、原始文件名和文件类型必须与输入一致。
+- 所有原生 Parser 使用 `ParsedDocument / ParsedBlock`，继承 `BaseParser` 并实现 `_parse`；调用方通过公共 `parse` 入口校验结果，文档 ID、原始文件名和文件类型必须与输入一致。异步云端 Provider 使用 ResultAdapter 输出同一契约，不伪装为同步本地 Parser。
 - 数据契约独立于数据库、Celery 和 RAG，不写库、不调度任务、不生成 Chunk、向量或答案；详细字段、序列化和验收步骤见 [Parser 契约说明](PARSER_CONTRACT.md)，无需在 README 重复说明内部模型。
 - 块 ID 必须由 Parser 显式提供且在同一文档内唯一，不在契约中随机生成；当前原生 Parser 共用基于文档、版本及块位置的 UUID5 标识。后续 Parser 继续保留稳定标识、原文顺序及持久化事务幂等。
 - `page` 与现有数据库非空约束一致，从 1 开始；TXT、Markdown 和未分页 DOCX 使用逻辑页 1，不得当作真实排版页码。PDF 使用物理页码，证据展示必须区分页码语义。
@@ -445,37 +460,34 @@ text
 
 ## 7. 开发顺序
 
-严格优先按以下顺序推进：
+以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.3 · MinerU Cloud）为最新路线；它优先于根目录旧计划的 OCR 路线，但不覆盖第 5.1 节已验收的 Windows 本地服务约束。阶段 1～9 已完成，不重新实现。严格按以下顺序推进：
 
 ```text
-01. Python / Conda 环境
-02. PostgreSQL + pgvector
-03. Redis + Celery
-04. Knowledge Base 数据表
-05. 预置知识库文档准备
-06. 批量导入
-07. PDF / DOCX / TXT / Markdown Parser
-08. OCR Provider
-09. 扫描 PDF / 图片 OCR
-10. Unified Document
-11. Chunk
-12. BGE-M3 Embedding
-13. pgvector Index
-14. Dense Retrieval
-15. 单文档 Retrieval
-16. BM25
-17. Hybrid Retrieval
-18. bge-reranker-v2-m3
-19. DeepSeek RAG
-20. Citation / Evidence
-21. Admin 文档管理
-22. Delete / Reindex
-23. 公式识别
-24. 参数抽取与绑定
-25. SymPy 计算
-26. Knowledge Agent
-27. RAG / OCR / Formula Eval
-28. Knowledge Base Service 独立验收
+01～09. 已有 FastAPI、基础服务、数据模型、管理员 API、上传、异步入口与原生 Parser
+10. MinerU Cloud Provider（当前代码阶段；真实 API 待人工验收）
+11. Parser Router
+12. Parse Cache
+13. Chunk
+14. BGE-M3 Embedding
+15. pgvector 索引入库
+16. 预置知识库批量导入
+17. Dense Retrieval
+18. 单文档 Retrieval
+19. BM25
+20. Hybrid Retrieval
+21. Reranker
+22. DeepSeek RAG
+23. Citation / Evidence
+24. Knowledge Query API
+25. Admin 文档管理完善
+26. 动态增量入库
+27. 公式语义结构化
+28. 公式参数识别与绑定
+29. 公式安全计算
+30. Knowledge Agent
+31～36. 自动测试、正式评测与性能记录
+37. 独立 Demo
+38. Knowledge Service 独立验收
 ```
 
 不得为了提前展示 Agent 而跳过底层 Knowledge Base 能力。
@@ -493,8 +505,9 @@ text
 | 7：异步入口 | `0002_document_tasks` 增加可空且唯一的任务标识；已建立提交、状态查询、重新投递及重试幂等框架，具体处理步骤由后续 Parser 扩展。 |
 | 8：统一解析结构 | 已建立 `ParsedDocument / ParsedBlock`、Parser 公共校验入口及独立契约测试；契约不耦合数据库、Celery、RAG 或模型部署。 |
 | 9：原生文本解析 | TXT、Markdown、DOCX、文本型 PDF 输出统一 Block，PDF 保留物理页码，其他格式使用逻辑页 1；`0003_block_order` 增加块顺序及约束。任务事务性落库后停在 `CHUNKING / awaiting_chunk`；不执行 OCR、Chunk、Embedding 或 RAG。 |
+| 10：MinerU Cloud | 增加 `0004_mineru_jobs`、官方 V4 Provider、Redis 共享频控、提交 / 检查短任务、结果 Adapter 和显式管理入口；云解析事务写块后停在 CHUNKING。配置 Token 并真实验收后才可确认云端可用。 |
 
-下一开发范围为 OCR Provider 接口，等待阶段 9 人工验收及用户确认后再开始。继续遵守逐阶段推进，不提前接入 Chunk、Embedding、RAG 或其他成员模块。
+当前只实施阶段 10；人工验收通过并经用户确认后，下一开发范围为阶段 11 Parser Router。阶段 12 Parse Cache、Chunk、Embedding、RAG 和其他成员模块均不得提前开发。
 
 ---
 
