@@ -5,6 +5,7 @@
 ## 1. 官方契约与实现边界
 
 - 官方协议依据：[精准解析 API 文档](https://mineru.net/apiManage/docs)。采用 V4 本地批量申请上传链接、签名 PUT、批次 GET；不使用轻量 Agent API。
+- 生产 HTTP 客户端固定 `trust_env=False`，API、签名上传、结果下载共用直连策略，不发现环境 / Windows 系统代理，不自动回退代理。保持默认 HTTPS 证书校验；不读取 `SSL_CERT_FILE / SSL_CERT_DIR`，不修改系统代理或 VPN / TUN 路由。不新增环境变量。
 - 结构化结果依据：官方 [ContentListV1 序列化源码](https://github.com/opendatalab/MinerU/blob/3e60291846cb7c3bf8fe7f4f16238f4fc6cce491/mineru/backend/pipeline/pipeline_middle_json_mkcontent.py)。云端实际格式仍须以真实 ZIP 验收；不能把 API V4 与开源模型版本或 ContentListV2 混为一谈。
 - 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。接口上传一份文件，Provider 支持按文件数计量的批量申请；不实现批量导入 API。
 - 内存读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，不持久化下载 ZIP、Markdown 或标准化结果文件，不实现 Parse Cache。未知 V2 / 类型安全失败，不能偷换成读取 full.md。
@@ -115,7 +116,7 @@ WHERE doc_id = '替换为文档UUID' GROUP BY block_type;
 
 1. 使用文档详情及 `GET .../documents/{doc_id}/parse-jobs` 确认本地状态、错误码、重试次数、活动标记与 batch_id；在 MinerU 平台核对同一批次是否已完成。
 2. 区分三条网络链路：API 为 `mineru.net`，原件上传使用官方签名对象存储链接，结果 ZIP 使用响应中的官方 CDN 地址。API 查询、原件上传成功不能证明结果下载成功。
-3. 检查 Windows“设置 → 网络和 Internet → 代理”、Worker 终端中的 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY` 及代理软件的分流 / TUN 设置。HTTPX 默认启用 `trust_env`，Windows 下还可能通过系统代理配置获取代理；代理环境变量为空不代表直连。参考 [HTTPX 官方代理配置说明](https://www.python-httpx.org/environment_variables/)。不要公开带账号密码的代理 URL、Token 或签名下载链接。
+3. 确认更新后的 CPU Worker 已重启；当前 MinerU 客户端固定 `trust_env=False`，不读取 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY` 或 Windows 系统代理。HTTPX 原始默认值为 `True`，因此旧 Worker 仍可能自动使用代理，环境变量为空也不代表旧版本直连。参考 [HTTPX 官方代理配置说明](https://www.python-httpx.org/environment_variables/)。该设置不绕过 VPN / TUN / 全局路由；若希望网络层也直连，需要你手动关闭相关模式或设置系统级直连。不要公开代理凭据、Token 或签名下载链接。
 4. 对官方结果域名分别检查 DNS、TCP 和 HTTPS；当前官方示例为 `cdn-mineru.openxlab.org.cn`。以下命令不提交云端解析任务：
 
 ```powershell
@@ -124,7 +125,7 @@ Test-NetConnection cdn-mineru.openxlab.org.cn -Port 443
 curl.exe --head --noproxy "*" --connect-timeout 5 --max-time 15 https://cdn-mineru.openxlab.org.cn/
 ```
 
-站点根路径返回 403 / 404 也可以证明收到 HTTPS 响应，但不能证明具体签名 ZIP 有效；DNS 或 TCP 成功也不代表 TLS 与下载成功。若实际使用代理，应在代理软件中检查该域名及其子资源的路线；直连也超时时，不要把关闭代理视为已经修复，需要继续核对网络 / 防火墙 / CDN 或在平台验证下载。
+站点根路径返回 403 / 404 也可以证明收到 HTTPS 响应，但不能证明具体签名 ZIP 有效；DNS 或 TCP 成功也不代表 TLS 与下载成功。直连仍超时时，先手动核对 VPN / TUN / 防火墙，再用其他网络（例如手机热点）对比；在 MinerU 平台尝试下载同一批次。如果只有当前网络失败，优先处理本地线路；多条独立直连网络均失败时，向 MinerU 支持提供安全的 batch_id / trace_id 核对 CDN。不要把禁用代理视为已恢复下载，也不要关闭 HTTPS 校验、改写签名 URL 或硬编码 CDN IP。
 
 5. `NETWORK` 表示连接阶段失败；`DOWNLOAD_NETWORK` 归并了其他下载 HTTP 客户端异常，可能是读取超时、读取错误或代理异常，单凭中文错误不能确定具体异常类型。排查时只记录异常类型、耗时和域名，不输出原始带签名 URL 的异常。
 6. 网络恢复后重启 CPU Worker，并先确认旧任务是否仍活动。活动任务可恢复同一批次；已失败的非活动任务没有“仅下载旧批次”的现成接口。若平台已完成，优先人工下载核对结果，决定是否允许新建付费批次；不要把重新上传或对失败任务再 POST 描述为无成本的原任务恢复。人工下载不会自动把结果导入本地数据库。

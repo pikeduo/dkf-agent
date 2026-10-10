@@ -28,6 +28,7 @@ from app.services.mineru.provider import (
 from app.services.mineru.rate_limit import MinerURateLimiter
 
 SIGNED_URL = "https://mineru.oss-cn-shanghai.aliyuncs.com/mock?signature=private"
+RESULT_URL = "https://cdn-mineru.openxlab.org.cn/mock.zip?signature=private"
 
 
 class StubLimiter:
@@ -62,8 +63,10 @@ def source(tmp_path):
     return LocalFile(path, path.name, "dkf-test", hashlib.sha256(content).hexdigest())
 
 
-def test_precision_api_contract_and_signed_upload_security(settings, source, caplog):
-    """检查 V4 路径、参数、鉴权、PUT 头及 ZIP 下载，敏感值不得进入日志。"""
+def test_precision_api_contract_and_signed_upload_security(
+    settings, source, caplog, monkeypatch
+):
+    """默认客户端统一直连 API、上传和 CDN，并验证协议及敏感日志边界。"""
 
     limiter = StubLimiter()
     seen = []
@@ -94,7 +97,7 @@ def test_precision_api_contract_and_signed_upload_security(settings, source, cap
                         {
                             "data_id": source.data_id,
                             "state": "done",
-                            "full_zip_url": SIGNED_URL,
+                            "full_zip_url": RESULT_URL,
                         }
                     ],
                 }
@@ -109,9 +112,21 @@ def test_precision_api_contract_and_signed_upload_security(settings, source, cap
             200, content=result_zip() if request.method == "GET" else b""
         )
 
+    original_client = httpx.Client
+
+    def create_direct_client(**kwargs):
+        """保留生产客户端的直连参数，仅替换传输层，避免测试触发真实云调用。"""
+
+        assert kwargs["trust_env"] is False
+        assert kwargs["follow_redirects"] is False
+        assert kwargs["timeout"] == settings.mineru_request_timeout_seconds
+        return original_client(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.mineru.provider.httpx.Client", create_direct_client
+    )
     provider = MinerUCloudProvider(
         settings,
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
         limiter=limiter,
     )
     batch = provider.request_upload_urls([source], parse_options(settings))
@@ -125,6 +140,29 @@ def test_precision_api_contract_and_signed_upload_security(settings, source, cap
     assert seen == ["POST", "PUT", "GET", "GET"]
     assert "unit-secret" not in caplog.text and "signature=private" not in caplog.text
     provider.close()
+
+
+def test_default_client_ignores_proxy_and_certificate_environment(
+    settings, monkeypatch
+):
+    """即使存在代理和自定义 CA 环境，默认客户端也不发现系统代理或关闭校验。"""
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+    monkeypatch.setenv("SSL_CERT_FILE", "missing-mineru-test-ca.pem")
+    monkeypatch.setenv("SSL_CERT_DIR", "missing-mineru-test-ca-directory")
+
+    def reject_proxy_lookup():
+        """代理发现入口被调用即失败，覆盖环境代理及 Windows 系统代理读取路径。"""
+
+        pytest.fail("MinerU 默认客户端不应查询环境或系统代理")
+
+    monkeypatch.setattr("httpx._client.get_environment_proxies", reject_proxy_lookup)
+    provider = MinerUCloudProvider(settings, limiter=StubLimiter())
+    try:
+        assert provider.client.trust_env is False
+    finally:
+        provider.close()
 
 
 @pytest.mark.parametrize(
@@ -263,13 +301,13 @@ def test_adapter_order_geometry_types_context_and_stable_ids():
     """五类块保留文本、章节和输入顺序；物理页码与坐标统一且未知置信度为空。"""
 
     identifier = uuid4()
-    arguments = dict(
-        doc_id=identifier,
-        file_name="测试.pdf",
-        file_type="pdf",
-        geometry={0: (600, 800)},
-        identity="same-options",
-    )
+    arguments = {
+        "doc_id": identifier,
+        "file_name": "测试.pdf",
+        "file_type": "pdf",
+        "geometry": {0: (600, 800)},
+        "identity": "same-options",
+    }
     first = MinerUResultAdapter().normalize(result_zip(), **arguments)
     second = MinerUResultAdapter().normalize(result_zip(), **arguments)
     assert first == second

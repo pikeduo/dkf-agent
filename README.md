@@ -99,6 +99,8 @@ MAX_UPLOAD_SIZE_MB=50
 
 原件会上传到 MinerU 云端，使用前确认文档允许外传、账户额度可用和运行机器可访问官方 API / 对象存储；不需 GPU，也不需 DeepSeek Key。
 
+MinerU 的 API、签名原件上传和结果 ZIP 下载统一使用直连，不读取 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY` 或 Windows 系统代理，不自动回退代理；无需新增 `.env` 配置。HTTPS 证书仍正常校验，但不会读取 `SSL_CERT_FILE / SSL_CERT_DIR` 指定的 CA。此策略只作用于 MinerU 客户端，不修改系统代理，也不能绕过 VPN / TUN 的系统级路由。更新代码后必须重启 CPU Worker。
+
 ## 3. 部署基础服务
 
 ### PostgreSQL 17
@@ -320,6 +322,6 @@ python -m celery -A app.core.celery_app:celery_app inspect active_queues
 
 Redis 连接失败时，依次检查 Windows Redis 服务状态、服务配置中的绑定地址与端口、6379 是否监听、本地 `redis-cli ping` 是否返回 `PONG`，再核对应用与 Celery 的连接 URL。上传失败或超时后先查询文档列表，避免对已保存的文件反复上传。
 
-MinerU 上传成功但结果下载失败时，分别检查 API 域名 `mineru.net` 与结果 CDN 域名（当前官方示例为 `cdn-mineru.openxlab.org.cn`）的 HTTPS 连通性；API 可用不代表 ZIP 下载链路可用。当前 HTTP 客户端默认读取代理配置，Windows 系统代理也可能被采用；仅关闭 VPN 窗口不代表代理已关闭。请手动检查 Windows 代理设置、代理软件分流及 Worker 启动环境；调整后重启 CPU Worker，再查询现有任务状态，避免重复上传或直接新建云端批次。详细检查及恢复限制见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md#结果下载与代理排查)。
+MinerU 上传成功但结果下载失败时，分别检查 API 域名 `mineru.net` 与结果 CDN 域名（当前官方示例为 `cdn-mineru.openxlab.org.cn`）的 HTTPS 连通性；API 可用不代表 ZIP 下载链路可用。当前 MinerU 客户端已禁用自动代理，仍超时时请手动确认 VPN / TUN / 全局路由已关闭或对这些域名设置系统级直连；必要时用其他网络（例如手机热点）对比。不要关闭证书校验或改写签名 URL。更新代码后重启 CPU Worker，再查询现有任务状态，避免重复上传或直接新建云端批次。详细检查及恢复限制见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md#结果下载与代理排查)。
 
 数据库和上传目录应一起备份。文件格式检查不等同于恶意文件扫描；对外部署前还需增加鉴权及网关请求体限制。

@@ -421,6 +421,7 @@ concurrency = 1
 
 - 仅使用 [MinerU 官方精准解析 API V4](https://mineru.net/apiManage/docs)，不使用轻量 Agent API、不部署本地 MinerU 模型；复杂 PDF、扫描件、图片的 OCR、表格与公式识别统一由 MinerU 承担，不继续接入火山 / 百度 OCR。
 - HTTP 只能放在 `MinerUCloudProvider`；本地原件采用申请批量上传 URL、签名 PUT、批次 GET 流程。对象存储请求不携带 API Token，不设置上传 Content-Type、不跟随重定向。只接受官方 HTTPS 签名资源域名。
+- MinerU 默认 HTTP 客户端固定 `trust_env=False`：API、签名上传及结果下载统一直连，不读取环境或 Windows 系统代理，不自动回退代理。保持 HTTPS 证书校验；该设置不绕过系统 VPN / TUN 路由，不自动修改系统网络。注入客户端仅用于离线测试；不将环境代理可用视为 CDN 已直连可用。
 - Token 只读取本地 `MINERU_API_TOKEN`，使用 SecretStr 遮盖表示；不进入日志、前端、Celery 消息或异常详情，不实现到期跟踪、续期或刷新。上游错误原文和签名链接不得透传。
 - 提交前校验实际格式、可读性、Hash、200 MB / 200 页限制；批量申请最多 50 文件。应用上传限制仍生效，以更小的限制为准。
 - Redis Lua 原子共享频控：提交按文件数计量、查询按次数计量；默认平台上限为 50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9。日额度使用保守的滚动 24 小时；1000 优先页按 UTC 日估计，只观测不硬拒绝。相同账户的所有 Worker 必须使用同一 Redis 与命名空间，Redis 故障时关闭云端调用。

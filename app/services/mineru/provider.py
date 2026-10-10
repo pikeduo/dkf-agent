@@ -134,7 +134,11 @@ class MinerUCloudProvider:
     """集中执行官方精准解析 HTTP，调用方负责持久化和 Celery 延时调度。"""
 
     def __init__(self, settings: Settings, *, client=None, limiter=None) -> None:
-        """校验云端配置并注入测试客户端；Token 从 SecretStr 读取，不记录到日志。"""
+        """校验配置并创建直连客户端；可注入测试客户端，Token 不进入日志。
+
+        默认客户端不读取环境或 Windows 系统代理，API、签名上传和结果下载
+        共用该连接策略；仍验证 HTTPS 证书，不改变系统路由或 VPN 设置。
+        """
 
         self.settings = settings
         if settings.mineru_api_base_url.rstrip("/") != "https://mineru.net/api/v4":
@@ -144,8 +148,11 @@ class MinerUCloudProvider:
         if settings.mineru_model_version not in {"vlm", "pipeline"}:
             raise MinerUError("CONFIG", "MinerU 模型版本只能为 vlm 或 pipeline")
         self.limiter = limiter or MinerURateLimiter(settings)
+        # 统一绕过自动代理发现，避免 API 可用但结果 CDN 被本机代理拦截。
         self.client = client or httpx.Client(
-            timeout=settings.mineru_request_timeout_seconds, follow_redirects=False
+            timeout=settings.mineru_request_timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
         )
         # httpx INFO 会记录签名 URL；降低库日志级别，业务日志只记录安全标识。
         logging.getLogger("httpx").setLevel(logging.WARNING)
