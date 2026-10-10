@@ -1,6 +1,6 @@
 # MinerU Cloud Provider：接口边界与人工验收
 
-本文件供开发与验收使用；部署说明和日常调用入口见 README，不把测试记录写入 README。
+本文件供开发与验收使用；部署说明和日常调用入口见 [README](../README.md)，开发路线见 [最新开发计划](DEVELOPMENT_PLAN_CODEX.md)，不把测试记录写入 README。
 
 ## 1. 官方契约与实现边界
 
@@ -21,7 +21,7 @@
 
 未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 且原因匹配已确认临时分类时可以重建 batch；未知 err_msg 不透传也不猜测可重试。
 
-没有 Outbox / 自动补投器。已有任务通过显式 `POST .../documents/{doc_id}/mineru` 恢复；状态已完成或原生 PARSING 不允许借用它重新解析。更换参数不能覆盖活动任务。不对旧任务做后台扫描。
+没有 Outbox / 自动补投器。同代次的活动任务可通过显式 `POST .../documents/{doc_id}/mineru` 恢复投递，继续沿用已保存的 batch。任务已经失败且非活动时，该入口会建立新任务，可能重新申请云端批次、上传并消耗额度；它不是旧失败批次的“仅重新下载”入口。状态已完成或原生 PARSING 不允许借用它重新解析。更换参数不能覆盖活动任务。不对旧任务做后台扫描。
 
 Redis 使用 TIME + Lua 原子滚动计数，默认安全系数 0.9，按实际文件数预留；失败调用预留量不返还，采取保守策略。日文件额度滚动 24 小时，不假定平台重置时区；优先页按 UTC 日粗略观测，超出不拒绝。所有同账户 Worker 共用 Redis 与命名空间；外部平台 / 其他应用消耗仍以平台为准。
 
@@ -106,6 +106,28 @@ WHERE doc_id = '替换为文档UUID' GROUP BY block_type;
 6. **幂等**：重复请求活动任务仍为同一 job_id；完成后再次提交应 409。记录块数与 Block ID，确认重复短消息不新增块（Mock 已覆盖）；不要为了测试在真实平台反复创建付费批次。
 7. **异常**：可用一个无效 Token 在独立测试环境验证安全失败，再恢复有效 Token；确认前端、Worker 日志和 Celery 结果无 Token / 签名 URL。空文件、损坏原件、超 200 页应在提交前拒绝，不消耗 API 额度。429、临时失败、日额度和 Worker 重启主要由 Mock / 共享限流测试覆盖，不向平台发压测来耗尽真实额度。
 8. **恢复**：如果 Broker 中断导致 503，先查询已保存 doc_id / job_id，修复服务后调用显式提交入口恢复，不重新上传；若 SUBMIT_UNCERTAIN，先人工核对远端孤立批次，不直接重试。
+
+### 结果下载与代理排查
+
+本地 `submit_mineru_parse` 成功且返回 `scheduled_check` 只说明该短任务完成并安排了检查，不代表 ZIP 已下载或 Block 已入库。`check_mineru_result` 查询云端状态为 `done` 后才下载结果；下载失败会回滚本轮事务，本地 job 可能仍显示之前的 `waiting-file / pending`。达到重试上限后，本地 job 与 Document 会标记失败，即使云端已经成功。
+
+按以下顺序人工检查，先不要重复上传：
+
+1. 使用文档详情及 `GET .../documents/{doc_id}/parse-jobs` 确认本地状态、错误码、重试次数、活动标记与 batch_id；在 MinerU 平台核对同一批次是否已完成。
+2. 区分三条网络链路：API 为 `mineru.net`，原件上传使用官方签名对象存储链接，结果 ZIP 使用响应中的官方 CDN 地址。API 查询、原件上传成功不能证明结果下载成功。
+3. 检查 Windows“设置 → 网络和 Internet → 代理”、Worker 终端中的 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY` 及代理软件的分流 / TUN 设置。HTTPX 默认启用 `trust_env`，Windows 下还可能通过系统代理配置获取代理；代理环境变量为空不代表直连。参考 [HTTPX 官方代理配置说明](https://www.python-httpx.org/environment_variables/)。不要公开带账号密码的代理 URL、Token 或签名下载链接。
+4. 对官方结果域名分别检查 DNS、TCP 和 HTTPS；当前官方示例为 `cdn-mineru.openxlab.org.cn`。以下命令不提交云端解析任务：
+
+```powershell
+Resolve-DnsName cdn-mineru.openxlab.org.cn
+Test-NetConnection cdn-mineru.openxlab.org.cn -Port 443
+curl.exe --head --noproxy "*" --connect-timeout 5 --max-time 15 https://cdn-mineru.openxlab.org.cn/
+```
+
+站点根路径返回 403 / 404 也可以证明收到 HTTPS 响应，但不能证明具体签名 ZIP 有效；DNS 或 TCP 成功也不代表 TLS 与下载成功。若实际使用代理，应在代理软件中检查该域名及其子资源的路线；直连也超时时，不要把关闭代理视为已经修复，需要继续核对网络 / 防火墙 / CDN 或在平台验证下载。
+
+5. `NETWORK` 表示连接阶段失败；`DOWNLOAD_NETWORK` 归并了其他下载 HTTP 客户端异常，可能是读取超时、读取错误或代理异常，单凭中文错误不能确定具体异常类型。排查时只记录异常类型、耗时和域名，不输出原始带签名 URL 的异常。
+6. 网络恢复后重启 CPU Worker，并先确认旧任务是否仍活动。活动任务可恢复同一批次；已失败的非活动任务没有“仅下载旧批次”的现成接口。若平台已完成，优先人工下载核对结果，决定是否允许新建付费批次；不要把重新上传或对失败任务再 POST 描述为无成本的原任务恢复。人工下载不会自动把结果导入本地数据库。
 
 ## 5. 当前验证边界
 

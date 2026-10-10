@@ -1,5 +1,7 @@
 # DKF-Agent 非结构化知识问答开发计划
 
+> 历史归档，不作为当前开发或部署依据。最新计划见 [DEVELOPMENT_PLAN_CODEX.md](../DEVELOPMENT_PLAN_CODEX.md)，当前环境约束见 [AGENTS.md](../../AGENTS.md)。以下内容保留原稿，含已废弃的部署和 OCR 路线。
+
 > 当前范围：`knowledge-service`。每次只完成一个阶段，并在人工测试通过后进入下一阶段。
 
 ## 阶段 0：项目初始化

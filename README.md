@@ -4,6 +4,8 @@ DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结�
 
 当前提供知识库管理、上传、原生文本解析与显式 MinerU Cloud 解析入口。TXT、Markdown、DOCX 和文本型 PDF 使用原生解析；图片、扫描件、表格与公式 PDF 可显式提交 MinerU 官方云端精准解析 API V4（需配置 Token 并完成人工验证）。尚无自动 Parser 路由、切片、索引或问答，上传和解析成功不代表可以检索。
 
+开发与验收文档统一放在 `docs/`：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)、[Parser 契约](docs/PARSER_CONTRACT.md)、[MinerU Cloud 人工验收](docs/MINERU_CLOUD.md)。本文仅保留部署和使用说明。
+
 ## 1. 运行环境
 
 | 组件 | 本地环境 |
@@ -317,5 +319,7 @@ python -m celery -A app.core.celery_app:celery_app inspect active_queues
 已启动的 Worker 应返回 `pong`；CPU 消费 `default_queue`，可选 GPU 消费 `gpu_queue`。这些检查不提交业务任务。
 
 Redis 连接失败时，依次检查 Windows Redis 服务状态、服务配置中的绑定地址与端口、6379 是否监听、本地 `redis-cli ping` 是否返回 `PONG`，再核对应用与 Celery 的连接 URL。上传失败或超时后先查询文档列表，避免对已保存的文件反复上传。
+
+MinerU 上传成功但结果下载失败时，分别检查 API 域名 `mineru.net` 与结果 CDN 域名（当前官方示例为 `cdn-mineru.openxlab.org.cn`）的 HTTPS 连通性；API 可用不代表 ZIP 下载链路可用。当前 HTTP 客户端默认读取代理配置，Windows 系统代理也可能被采用；仅关闭 VPN 窗口不代表代理已关闭。请手动检查 Windows 代理设置、代理软件分流及 Worker 启动环境；调整后重启 CPU Worker，再查询现有任务状态，避免重复上传或直接新建云端批次。详细检查及恢复限制见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md#结果下载与代理排查)。
 
 数据库和上传目录应一起备份。文件格式检查不等同于恶意文件扫描；对外部署前还需增加鉴权及网关请求体限制。

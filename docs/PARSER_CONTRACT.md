@@ -4,7 +4,7 @@
 
 `ParsedDocument`、`ParsedBlock` 与 `BaseParser` 使用已有 Pydantic，契约及具体 Parser 均不依赖 SQLAlchemy、Celery、Redis、Embedding 或 RAG。任务服务负责状态机和数据库持久化，Parser 只读取原件并返回统一结构。
 
-已实现 TXT、Markdown、DOCX 和文本型 PDF 原生解析。Worker 校验原件、解析并保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。没有 OCR、Chunk、Embedding、索引或 `READY` 能力，不增加环境变量、外部 API 或模型下载。
+已实现 TXT、Markdown、DOCX 和文本型 PDF 原生解析。Worker 校验原件、解析并保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。本文描述原生解析路径，该路径不调用 OCR 或外部 API，不生成 Chunk、Embedding、索引或 `READY`。独立的云端精准解析入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)。
 
 ## 统一结构
 
@@ -35,7 +35,7 @@
 - `blocks` 必须显式提供，按原文阅读顺序排列。契约允许空列表，但当前原生 Parser 对空文本或需要 OCR 的页面明确抛出错误，任务不能把空结果当作成功。
 - `block_type` 仅允许 `title / text / table / formula / image_text`。表格和公式本阶段仍以 `text` 字段承载原始文本，不计算公式，也不做切片。
 - `text` 保留换行和空白，不在数据契约中清洗原文。允许空字符串，但不因此认定块可用于检索。
-- `source` 必须显式给出，非空且不超过 64 字符。原生解析约定为 `native_parser`，OCR 可使用 `volcengine_ocr`、`baidu_ocr` 等实际 Provider 标识；本阶段不实现这些 Provider。
+- `source` 必须显式给出，非空且不超过 64 字符。原生解析约定为 `native_parser`，MinerU 云端解析使用 `mineru_cloud`；当前不接入火山 / 百度 OCR。
 - `confidence` 为有限数值，范围为 `[0, 1]`；默认 `null` 表示未知。原生解析器可按业务约定显式给出 `1.0`，该值不是回答的事实准确率；OCR 无置信度时不得伪造高分。
 - 未知字段禁止进入顶层或块结构，防止各 Parser 私自加入 Chunk、Embedding、Answer 等不统一的字段。
 
@@ -116,7 +116,7 @@ python -m pytest tests/native_parser_db_smoke.py tests/document_processing_smoke
 
 真实上传验收：
 
-1. 按 README 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，确认 head 为 `0003_block_order`；重启 API 和 CPU Worker。
+1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0004_mineru_jobs`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
 2. 先确认 Windows Redis 服务为 `Running`，再在 Swagger 向测试知识库分别上传中文 TXT、含标题和代码围栏的 MD、含标题/段落/表格的 DOCX、多页文本 PDF；不同文件内容需不同以避免去重。
 3. 用文档详情和 `/tasks/{task_id}` 查询，预期文档为 `CHUNKING`、无失败原因，首次成功任务结果为 `awaiting_chunk` 且 `block_count > 0`。
 4. 在 pgAdmin 中用实际 `doc_id` 检查有序正文、标题章节及页码：
@@ -130,4 +130,4 @@ ORDER BY block_index;
 
 5. 上传扫描 PDF 或图片，预期文档为 `FAILED`、原因明确需要 OCR、原件保留且不生成部分 Block；再检查空文本及损坏文件的安全错误。文件名、正文、物理 / 逻辑页码应与原件人工对照。
 
-以上自动测试不等于真实 Redis、Worker 或用户样本文档已人工验证。下一阶段仅在本阶段人工验收并确认后接入 OCR Provider。
+以上自动测试不等于真实 Redis、Worker 或用户样本文档已人工验证。复杂文档的云端解析采用 MinerU，验收要求见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，不继续接入火山 / 百度 OCR。

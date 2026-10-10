@@ -19,4 +19,11 @@ checkpoints/
 
 *.log
 
-docs/
+# 工程文档需要提交，赛题附件、验收素材和其他本地资料仍保持忽略。
+docs/*
+!docs/DEVELOPMENT_PLAN_CODEX.md
+!docs/MINERU_CLOUD.md
+!docs/PARSER_CONTRACT.md
+!docs/archive/
+docs/archive/*
+!docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

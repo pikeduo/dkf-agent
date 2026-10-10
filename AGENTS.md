@@ -365,7 +365,9 @@ README 中应提供当前可执行的命令、访问地址或调用示例、预�
 
 - `README.md` 面向部署者和使用者，是项目说明书：说明项目用途、运行环境、配置、安装部署、启动顺序、接口使用、必要限制及部署故障排查。
 - `AGENTS.md` 面向开发智能体：保存开发规则、模块范围、阶段边界、当前工程基线，以及需要后续开发遵守的实现约定。
-- `DEVELOPMENT_PLAN_CODEX.md` 保存开发路线、阶段目标和验收标准；专题契约或设计文档保存详细技术说明，测试代码维护在 `tests/` 中。
+- `docs/DEVELOPMENT_PLAN_CODEX.md` 保存开发路线、阶段目标和验收标准；专题契约或设计文档保存详细技术说明，测试代码维护在 `tests/` 中。
+- 根目录的项目说明文档只保留 `AGENTS.md` 和 `README.md`；开发计划、契约、设计和人工验收文档统一放入 `docs/`，旧计划放入 `docs/archive/` 并标明仅供历史参考。移动文档时同步维护相对链接，不覆盖最新计划；源代码、配置和环境文件不因本规则迁出根目录。
+- 新增或移动文件、目录时，判断是否需要同步 `.gitignore`。`docs/` 中的工程文档必须纳入版本控制，赛题附件、验收素材和本地资料按需忽略，不能使用整目录忽略导致开发规则或验收文档无法提交。
 - 每个阶段做了什么、内部类与字段设计、事务及幂等实现、后续开发计划，不写入 README。需要持续保留的阶段信息简要更新本文件第 7.1 节，不逐次堆积修改日志。
 - README 不包含业务测试脚本、pytest 命令、测试结果统计或开发验收记录；可以保留用于确认服务部署成功的检查，以及必要的 API 调用说明。
 - 当前能力的简短限制仍需在 README 说明，例如“上传成功不代表可检索”，避免误导使用者；不要展开对应阶段的开发过程。
@@ -428,7 +430,7 @@ concurrency = 1
 - 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留顺序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
 - Block 替换与 Document=CHUNKING、job=done 在同一事务内提交；失败回滚所有块修改，再独立记录安全错误。full.md 仅供供应商平台人工核对，当前未新增 Admin Markdown 预览接口。
 - 阶段 10 使用显式 MinerU 上传 / 已有文档提交入口，不改变阶段 9 原生接口的行为；重复活动请求仅恢复同一任务，完成文档拒绝重解析。没有 Router、Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
-- 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
+- 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
 
 ### 6.7 数据和证据规则
 
@@ -451,7 +453,7 @@ text
 ### 6.7.1 统一 Parser 契约
 
 - 所有原生 Parser 使用 `ParsedDocument / ParsedBlock`，继承 `BaseParser` 并实现 `_parse`；调用方通过公共 `parse` 入口校验结果，文档 ID、原始文件名和文件类型必须与输入一致。异步云端 Provider 使用 ResultAdapter 输出同一契约，不伪装为同步本地 Parser。
-- 数据契约独立于数据库、Celery 和 RAG，不写库、不调度任务、不生成 Chunk、向量或答案；详细字段、序列化和验收步骤见 [Parser 契约说明](PARSER_CONTRACT.md)，无需在 README 重复说明内部模型。
+- 数据契约独立于数据库、Celery 和 RAG，不写库、不调度任务、不生成 Chunk、向量或答案；详细字段、序列化和验收步骤见 [Parser 契约说明](docs/PARSER_CONTRACT.md)，无需在 README 重复说明内部模型。
 - 块 ID 必须由 Parser 显式提供且在同一文档内唯一，不在契约中随机生成；当前原生 Parser 共用基于文档、版本及块位置的 UUID5 标识。后续 Parser 继续保留稳定标识、原文顺序及持久化事务幂等。
 - `page` 与现有数据库非空约束一致，从 1 开始；TXT、Markdown 和未分页 DOCX 使用逻辑页 1，不得当作真实排版页码。PDF 使用物理页码，证据展示必须区分页码语义。
 - `bbox` 为原始页面坐标数组 `[x0, y0, x1, y1]` 或空值，PDF 使用点数、图片使用像素；未知位置或置信度不能伪造。空块集合不代表解析、OCR 或知识库入库成功。
@@ -460,7 +462,7 @@ text
 
 ## 7. 开发顺序
 
-以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.3 · MinerU Cloud）为最新路线；它优先于根目录旧计划的 OCR 路线，但不覆盖第 5.1 节已验收的 Windows 本地服务约束。阶段 1～9 已完成，不重新实现。严格按以下顺序推进：
+以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.3 · MinerU Cloud）为最新路线；`docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md` 仅保留历史，不作为开发依据。最新计划不覆盖第 5.1 节已验收的 Windows 本地服务约束。阶段 1～9 已完成，不重新实现。严格按以下顺序推进：
 
 ```text
 01～09. 已有 FastAPI、基础服务、数据模型、管理员 API、上传、异步入口与原生 Parser
