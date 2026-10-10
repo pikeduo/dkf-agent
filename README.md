@@ -2,7 +2,7 @@
 
 DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结构化知识库建设与问答。本文说明安装、配置、启动和接口使用。
 
-当前可使用知识库创建与查询、文档上传、异步任务提交和状态查询。文档解析、OCR 和知识库问答尚不可用；上传成功不代表文档已经可以检索。
+当前可使用知识库创建与查询、文档上传、异步原生文本解析和状态查询。支持 TXT、Markdown、DOCX 及文本型 PDF 解析；OCR、切片和知识库问答尚不可用，上传或解析成功不代表文档已经可以检索。
 
 ## 1. 运行环境
 
@@ -26,6 +26,8 @@ conda activate dkf-agent
 ```
 
 已有环境需要同步依赖时，使用 `conda env update -n dkf-agent -f environment.yml`。
+
+原生解析需要环境文件中的 [python-docx](https://python-docx.readthedocs.io/en/latest/api/document.html)（1.2 及以上）和 [PyMuPDF](https://pymupdf.readthedocs.io/en/latest/changes.html#changes-in-version-1-24-3)（1.24.3 及以上）。更新依赖后重启 CPU Worker；只更新 API 不会更新 Worker 中已加载的解析代码。
 
 仅在尚无本地配置时复制模板：
 
@@ -155,7 +157,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期当前迁移版本为 `0002_document_tasks (head)`，默认知识库“默认知识库”存在。初始化可重复执行，其固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。
+预期当前迁移版本为 `0003_block_order (head)`，默认知识库“默认知识库”存在。初始化可重复执行，其固定 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。
 
 已有数据库更新应用时也需执行迁移，再重启 API 和 Worker。应用启动不会自动迁移或创建默认知识库，也不会自动安装或启用 pgvector。
 
@@ -228,14 +230,19 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 支持 PDF、DOCX、TXT、MD、JPG、JPEG、PNG；不接受空文件、含路径或控制字符的文件名，文件名最多 255 字符。相同知识库中内容相同的文件返回 409，错误信息包含已有 `doc_id`，无需再次上传。
 
+可自动解析 TXT、Markdown、DOCX 正文及文本型 PDF。TXT/Markdown 支持 UTF-8、带 BOM 的 UTF-16/32 和 GB18030；无法识别的编码需先转换为 UTF-8。DOCX 提取正文段落、标题及表格，不包含页眉、页脚、文本框或图片文字。PDF 保留真实页码；TXT、Markdown 与 DOCX 的页码为逻辑页 1，不等同于 Word 排版页码。
+
+图片、纯扫描 PDF 及包含无原生文本扫描页的混合 PDF 需要 OCR，当前任务会失败并记录原因，原件保留。文本与图片同页时仅提取已有文本，不识别图片内文字；加密、损坏、空文本文件也会返回解析失败。
+
 响应包含 `doc_id`、`status`、`error_message`、`task_id` 等元信息。**201 表示原件及文档记录创建成功，不代表任务执行成功。** 队列投递失败时文件和记录可能已保留，应先查询文档详情，再决定是否重新投递。
 
 ### 查询状态与重新投递
 
 - 使用文档详情接口查看持久化状态及 `error_message`；使用 `task_id` 查询 Celery 执行结果，结果默认保留 24 小时。
-- 当前文档任务检查原件后停在 `PARSING`，结果中的 `awaiting_parser` 表示尚未接入解析。Celery `SUCCESS` 不等于文档 `READY`。
+- 原生文本解析成功后保存解析结果，文档停在 `CHUNKING`（等待切片）；任务结果为 `awaiting_chunk`，并包含 `block_count`。当前不会继续切片或索引，Celery `SUCCESS` 不等于文档 `READY`。
 - 未知或已过期的任务结果可能显示 `PENDING`，不一定表示排队，文档状态以详情接口为准。
 - 修复基础服务或文件问题后，仅 `UPLOADED / FAILED` 文档可通过 `/process` 重新投递；已进入 `PARSING` 或后续状态时返回 409。该接口不是重新索引接口。
+- 旧版任务留下的 `PARSING` 记录不会因更新代码自动解析，也不能通过 `/process` 重新投递；升级后的首次使用请上传新文档，不要假定历史记录已处理。
 
 常见错误：400 文件名无效或文件为空；404 资源不存在；409 名称、内容重复或状态不允许；413 文件超限；415 格式不支持或标识不匹配；422 参数校验失败；503 基础服务、配置或迁移不可用；507 文件存储不可用。错误提示位于响应的 `detail`，具体模型见 Swagger。
 

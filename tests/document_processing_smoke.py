@@ -118,28 +118,33 @@ def test_upload_publishes_after_commit_and_duplicate_does_not_publish(
     assert len(messages) == 1
 
 
-def test_worker_placeholder_is_idempotent_without_generated_data(
+def test_worker_native_parser_is_idempotent_without_chunks(
     processing_context, migrated_connection
 ):
-    """重复执行只确认原件和 PARSING 状态，不创建解析块、Chunk 或伪造 READY。"""
+    """原生解析写入块后等待切片，重复任务不重新解析或生成 Chunk、READY。"""
 
     document = upload_document(processing_context)
     first = execute_task(document)
     assert first.state == "SUCCESS"
     assert first.result == {
         "doc_id": document["doc_id"],
-        "document_status": "PARSING",
-        "status": "awaiting_parser",
+        "document_status": "CHUNKING",
+        "status": "awaiting_chunk",
+        "block_count": 1,
     }
     snapshot = document_detail(processing_context, document)
-    assert snapshot["status"] == "PARSING"
+    assert snapshot["status"] == "CHUNKING"
     assert snapshot["error_message"] is None
-    assert execute_task(document).result == first.result
+    assert execute_task(document).result == {
+        "doc_id": document["doc_id"],
+        "document_status": "CHUNKING",
+        "status": "skipped",
+    }
     assert document_detail(processing_context, document) == snapshot
     connection, _, _ = migrated_connection
     with Session(connection, join_transaction_mode="create_savepoint") as session:
         assert session.scalar(select(func.count()).select_from(Document)) == 1
-        assert session.scalar(select(func.count()).select_from(DocumentBlock)) == 0
+        assert session.scalar(select(func.count()).select_from(DocumentBlock)) == 1
         assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 0
 
 
@@ -204,7 +209,7 @@ def test_transient_failure_retries_and_clears_error(
     assert "第 1 次重试" in failures[0]["error_message"]
     assert "secret_password" not in failures[0]["error_message"]
     final = document_detail(processing_context, document)
-    assert final["status"] == "PARSING"
+    assert final["status"] == "CHUNKING"
     assert final["task_id"] == document["task_id"]
     assert final["error_message"] is None
 
@@ -277,7 +282,7 @@ def test_resubmit_replaces_generation_and_old_task_cannot_overwrite(processing_c
     assert execute_task(old).result["status"] == "stale_task"
     tasks.save_failure(UUID(old["doc_id"]), UUID(old["task_id"]), "过期错误", True)
     assert document_detail(processing_context, current) == current
-    assert execute_task(current).result["status"] == "awaiting_parser"
+    assert execute_task(current).result["status"] == "awaiting_chunk"
     assert (
         api("POST", f"{PREFIX}/{kb_id}/documents/{old['doc_id']}/process").status_code
         == 409
@@ -312,7 +317,7 @@ def test_publish_failure_preserves_original_and_can_resubmit(
     assert current["task_id"] != document["task_id"]
     assert current["error_message"] is None
     assert execute_task(current).state == "SUCCESS"
-    assert document_detail(processing_context, current)["status"] == "PARSING"
+    assert document_detail(processing_context, current)["status"] == "CHUNKING"
 
 
 def test_lost_publish_confirmation_does_not_regress_worker_state(
@@ -333,7 +338,7 @@ def test_lost_publish_confirmation_does_not_regress_worker_state(
         tasks.process_document, "apply_async", accepted_but_confirmation_lost
     )
     document = upload_document(processing_context)
-    assert document["status"] == "PARSING"
+    assert document["status"] == "CHUNKING"
     assert document["error_message"] is None
 
 
@@ -445,7 +450,7 @@ def test_relative_source_path_is_root_anchored(
         row.file_path = f"uploads/{row.doc_id}.txt"
         session.commit()
     assert execute_task(document).state == "SUCCESS"
-    assert document_detail(processing_context, document)["status"] == "PARSING"
+    assert document_detail(processing_context, document)["status"] == "CHUNKING"
 
 
 def test_failure_to_record_reason_preserves_task_failure(

@@ -93,9 +93,13 @@ class Document(Timestamps, Base):
 
 
 class DocumentBlock(Base):
+    """解析块及阅读序号；历史块无序号时不假造原文位置。"""
+
     __tablename__ = "document_blocks"
     __table_args__ = (
         CheckConstraint("page >= 1", name="page"),
+        CheckConstraint("block_index >= 1", name="block_index"),
+        UniqueConstraint("doc_id", "block_index", name="uq_document_blocks_doc_index"),
         CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence"),
         CheckConstraint(
             "block_type IN ('title', 'text', 'table', 'formula', 'image_text')",
@@ -110,6 +114,8 @@ class DocumentBlock(Base):
     doc_id: Mapped[UUID] = mapped_column(
         ForeignKey("documents.doc_id", ondelete="CASCADE")
     )
+    # 原生 Parser 始终写入从 1 开始的序号；允许空值以兼容历史解析块。
+    block_index: Mapped[int | None] = mapped_column(Integer)
     page: Mapped[int] = mapped_column(Integer)
     section: Mapped[str | None] = mapped_column(Text)
     block_type: Mapped[str] = mapped_column(String(32))

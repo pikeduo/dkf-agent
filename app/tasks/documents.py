@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
 from app.db.session import get_engine
+from app.parsers.common import ParserError
 from app.services.document_processing import (
     DocumentSourceError,
     record_failure,
@@ -48,7 +49,7 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def process_document(self, doc_id: str) -> dict[str, str]:
+def process_document(self, doc_id: str) -> dict[str, str | int]:
     """处理当前文档阶段；临时数据库或 I/O 错误最多重试三次，永久失败立即记录。"""
 
     try:
@@ -59,7 +60,7 @@ def process_document(self, doc_id: str) -> dict[str, str]:
     try:
         with processing_session() as session, session.begin():
             return run_processing_step(session, identifier, task_id)
-    except DocumentSourceError as exc:
+    except (DocumentSourceError, ParserError) as exc:
         message = str(exc)
         save_failure(identifier, task_id, message, final=True)
         raise DocumentProcessingError(message) from None
