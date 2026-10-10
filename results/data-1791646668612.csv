@@ -1,0 +1,43 @@
+"doc_id","file_name","file_type","block_index","page","section","block_type","text","bbox","source","confidence"
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",1,1,"DKF-Agent Stage 9 Parser Test - DOCX","title","DKF-Agent Stage 9 Parser Test - DOCX","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",2,1,"DKF-Agent Stage 9 Parser Test - DOCX","text","[DOCX-ORDER-01] 这是标题后的第一段正文，用于确认段落顺序。","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",3,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02]","title","一、解析目标 [DOCX-ORDER-02]","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",4,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02]","text","[DOCX-ORDER-03] DOCX 解析需要保留标题、段落与表格在原文中的阅读顺序。","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",5,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02]","text","[DOCX-ORDER-04] 下方表格位于本段之后、后续段落之前。","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",6,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02]","table","字段	示例值	用途
+[DOCX-TABLE-R1] 文档数	12	验证表格第一行
+[DOCX-TABLE-R2] 候选数	20	验证表格第二行
+[DOCX-TABLE-R3] 证据数	5	验证表格第三行","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",7,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02]","text","[DOCX-ORDER-05] 这是表格后的正文。若解析顺序正确，本段应出现在表格内容之后。","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",8,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02] / 二、阶段边界 [DOCX-ORDER-06]","title","二、阶段边界 [DOCX-ORDER-06]","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",9,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02] / 二、阶段边界 [DOCX-ORDER-06]","text","[DOCX-ORDER-07] 当前只测试原生 DOCX 解析，不涉及 OCR、Chunk、Embedding 或 RAG。","null","native_parser",1.0
+"3ab02bb6-d659-498d-8c75-41175ce2544f","03_parser_test.docx","docx",10,1,"DKF-Agent Stage 9 Parser Test - DOCX / 一、解析目标 [DOCX-ORDER-02] / 二、阶段边界 [DOCX-ORDER-06]","text","关键标记：DOCX-END-MARKER","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",1,1,"DKF-Agent Stage 9 Parser Test - Markdown","title","DKF-Agent Stage 9 Parser Test - Markdown","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",2,1,"DKF-Agent Stage 9 Parser Test - Markdown","text","[MD-P1] 本段位于一级标题之后，用于验证 Markdown 标题与正文顺序。","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",3,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程","title","知识库处理流程","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",4,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程","text","[MD-P2] 文档进入知识库后，需要依次经过解析、切片、向量化和索引构建。","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",5,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程","text","- [MD-L1] Parser：读取原始内容
+- [MD-L2] Chunk：保留文档来源和阅读顺序
+- [MD-L3] Embedding：后续阶段处理","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",6,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程 / 当前阶段边界","title","当前阶段边界","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",7,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程 / 当前阶段边界","text","[MD-P3] Stage 9 只验证原生文本解析，不要求 OCR、Chunk、Embedding 或 RAG。","null","native_parser",1.0
+"4f0f73b6-963e-420e-945a-744d113cf6ed","02_parser_test.md","md",8,1,"DKF-Agent Stage 9 Parser Test - Markdown / 知识库处理流程 / 当前阶段边界","text","**关键标记：MD-END-MARKER**","null","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",1,1,"","text","DKF-Agent Stage 9 Parser Test - PDF / 第 1 页","[62.36220169067383, 56.80364990234375, 422.3621826171875, 72.80364990234375]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",2,1,"","text","[PDF-P1-A] 本页用于验证文本型 PDF 可以通过 PyMuPDF 直接提取文本。","[62.36220169067383, 104.1573486328125, 403.6121826171875, 114.6573486328125]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",3,1,"","text","[PDF-P1-B] 本页唯一标记为 PDF-PAGE-1-MARKER，解析结果应记录物理页码 1。","[62.36220169067383, 129.66912841796875, 435.1121826171875, 140.16912841796875]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",4,1,"","text","[PDF-LOWER-1] 这是页面下部文本，用于检查坐标位置。","[62.36220169067383, 734.3275756835938, 299.8621826171875, 743.8275756835938]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",5,1,"","text","物理页码测试 PAGE-1","[254.88780212402344, 791.4598999023438, 340.3878173828125, 800.4598999023438]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",6,2,"","text","第二部分：知识库处理说明 / 第 2 页","[62.36220169067383, 56.80364990234375, 334.3621826171875, 72.80364990234375]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",7,2,"","text","[PDF-P2-A] 文档解析结果需要保留页码、正文内容以及文本块坐标。","[62.36220169067383, 104.1573486328125, 382.6121826171875, 114.6573486328125]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",8,2,"","text","[PDF-P2-B] 本页唯一标记为 PDF-PAGE-2-MARKER，不应被错误归到第 1 页或第 3 页。","[62.36220169067383, 129.66912841796875, 466.6121826171875, 140.16912841796875]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",9,2,"","text","[PDF-LOWER-2] 这是页面下部文本，用于检查坐标位置。","[62.36220169067383, 734.3275756835938, 299.8621826171875, 743.8275756835938]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",10,2,"","text","物理页码测试 PAGE-2","[254.88780212402344, 791.4598999023438, 340.3878173828125, 800.4598999023438]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",11,3,"","text","第三部分：阶段边界 / 第 3 页","[62.36220169067383, 56.80364990234375, 286.3621826171875, 72.80364990234375]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",12,3,"","text","[PDF-P3-A] Stage 9 只测试原生文本 PDF，不测试扫描 PDF 的 OCR 识别能力。","[62.36220169067383, 104.1573486328125, 435.1121826171875, 114.6573486328125]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",13,3,"","text","[PDF-P3-B] 关键标记：PDF-PAGE-3-MARKER / PDF-END-MARKER。","[62.36220169067383, 129.66912841796875, 361.6121826171875, 140.16912841796875]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",14,3,"","text","[PDF-LOWER-3] 这是页面下部文本，用于检查坐标位置。","[62.36220169067383, 734.3275756835938, 299.8621826171875, 743.8275756835938]","native_parser",1.0
+"55c8456a-69d7-4d8e-abf7-7f4552e89f6a","04_parser_test_text.pdf","pdf",15,3,"","text","物理页码测试 PAGE-3","[254.88780212402344, 791.4598999023438, 340.3878173828125, 800.4598999023438]","native_parser",1.0
+"b686f86a-a0cd-4f48-811b-da4251564c41","01_parser_test.txt","txt",1,1,"","text","DKF-Agent Stage 9 Parser Test - TXT","null","native_parser",1.0
+"b686f86a-a0cd-4f48-811b-da4251564c41","01_parser_test.txt","txt",2,1,"","text","[TXT-P1] 这是第一段正文，用于验证 UTF-8 中文文本能够被完整读取。当前项目模块为非结构化知识问答 Knowledge Base Service。","null","native_parser",1.0
+"b686f86a-a0cd-4f48-811b-da4251564c41","01_parser_test.txt","txt",3,1,"","text","[TXT-P2] 这是第二段正文，用于验证段落顺序。测试数据：文档数量 12 份，检索候选 20 条，最终证据 5 条。","null","native_parser",1.0
+"b686f86a-a0cd-4f48-811b-da4251564c41","01_parser_test.txt","txt",4,1,"","text","[TXT-P3] 这是第三段正文。关键标记：TXT-END-MARKER。解析后应保持 P1 -> P2 -> P3 的阅读顺序。","null","native_parser",1.0

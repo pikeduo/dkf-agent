@@ -9,8 +9,22 @@
 - 结构化结果依据：官方 [ContentListV1 序列化源码](https://github.com/opendatalab/MinerU/blob/3e60291846cb7c3bf8fe7f4f16238f4fc6cce491/mineru/backend/pipeline/pipeline_middle_json_mkcontent.py)。云端实际格式仍须以真实 ZIP 验收；不能把 API V4 与开源模型版本或 ContentListV2 混为一谈。
 - 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。接口上传一份文件，Provider 支持按文件数计量的批量申请；不实现批量导入 API。
 - 内存读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，不持久化下载 ZIP、Markdown 或标准化结果文件，不实现 Parse Cache。未知 V2 / 类型安全失败，不能偷换成读取 full.md。
-- ContentListV1 的 `page_idx` 转 1 基页码、归一化 bbox 转原件尺寸，保留源顺序和实际标题章节；表格 HTML 与公式文本原样作为证据，不执行 HTML / JavaScript / 公式。图片仅有路径而无文字时不伪造正文；无可用块时失败。
+- ContentListV1 的 `page_idx` 转 1 基页码、归一化 bbox 转原件尺寸，保留正文顺序和实际标题章节；只在可选 layout 证据明确时恢复页眉/页脚位置，具体保护条件见下节。表格 HTML 与公式文本原样作为证据，不执行 HTML / JavaScript / 公式。图片仅有路径而无文字时不伪造正文；无可用块时失败。
 - `full.md` 可在供应商平台下载用于人工比对；当前没有 Admin 预览接口。
+
+### 阅读顺序：仅恢复有证据的页边界项
+
+真实扫描样本的 V1 数组把 `type=header` 放在该页正文、页底之后；数组项没有独立的阅读顺序字段。相同 ZIP 的旧版 `layout.json` 含 `pdf_info`：页眉在 `discarded_blocks` 中，父块 `index=0`，正文在 `para_blocks` 中且索引递增。原 Adapter 只读 V1 数组，因此丢失了这份可用的顺序证据；`persist_blocks` 忠实地把列表位置写成 block_index，并非 SQL 排序或页码错误。
+
+当前修复不重新推断整页阅读顺序：
+
+1. V1 仍是唯一正文输入。只内存读取唯一、最多 64 MiB 的可选 `layout.json`；未知新 schema、缺失、损坏或歧义时不用它改序，不用 V2 / Markdown 替代。
+2. 每个页面的所有原始项（含稍后跳过的空图片）必须与 `para_blocks + discarded_blocks` 的父块数量相同，并按类型、归一化 bbox 全量唯一关联；页内 `index` 必须为唯一的非负整数。坐标每个分量的容差为 2/1000，仅兼容取整，不是排序键。超过 512 项的页面保守不改序，限制匹配成本。
+3. 只允许移动明确的 header/footer。header 必须位于页面顶部 15% 且在所有正文上方；footer 必须位于底部 15% 且在所有正文下方。候选顺序来自 layout.index，且所有正文项的相对顺序必须完全不变；普通 title 不因位置靠上就被改序。
+4. 横向分离且纵向重叠的并排块、正文纵向回跳、无 bbox、索引或关联歧义均保留该页原序。检测只是保护条件，不是可靠的通用单栏/多栏分类器；绝不依靠 bbox 重建多栏顺序。
+5. 只替换该页已有槽位，不跨页、不给页面重新编号。table/formula 的完整内容、page、bbox、block_type、source、confidence 不变；原始数组位置仍生成稳定 Block ID，最终列表顺序由现有事务写入 block_index。重试和重复消息的幂等机制不变。
+
+现有真实扫描 ZIP 在内存重新转换后，两页都成为顶部页眉 → 正文 → 页底，块数仍为 17，ID 与原始顺序转换一致；图片、表格、公式分别转换为 12、5、16 块，原文和结构没有改写。这是已有结果的 Adapter 核对，不等于新 Worker 已完成真实上传和落库验收，也没有修改历史数据。
 
 ## 2. 持久化、幂等和恢复
 
@@ -31,7 +45,7 @@ Redis 使用 TIME + Lua 原子滚动计数，默认安全系数 0.9，按实际�
 以下测试不调用真实 MinerU；数据库用临时 schema + 外层回滚，Broker 与 Provider Mock，测试原件使用临时目录。
 
 ```powershell
-python -m pytest tests/test_mineru_provider.py tests/mineru_db_smoke.py -q
+python -m pytest tests/test_mineru_provider.py tests/test_mineru_order.py tests/mineru_db_smoke.py -q
 ```
 
 真实 Redis Lua 测试先人工确认 `Get-Service Redis` 为 Running；测试只使用随机命名空间并清理自己的键，绝不 FLUSHDB：
@@ -41,6 +55,8 @@ python -m pytest tests/mineru_redis_smoke.py -q
 ```
 
 回归测试保持前九阶段接口、原生解析、迁移和事务语义。基础迁移夹具仅更新 head 与新增表清单，避免误把新增结构当旧阶段回归失败。
+
+顺序测试覆盖单页、两页及交错页不跨页、同 y 稳定顺序、表格/公式整体保留、空图片不补 OCR、无 bbox、多栏/纵向回跳、未知/歧义 layout、稳定 ID；数据库测试覆盖新顺序事务落库、重复消息不增块，以及图片查询网络重试耗尽后必须显式建立新任务。
 
 ## 4. 真实 API 人工验收（必须由你执行）
 
@@ -130,8 +146,80 @@ curl.exe --head --noproxy "*" --connect-timeout 5 --max-time 15 https://cdn-mine
 5. `NETWORK` 表示连接阶段失败；`DOWNLOAD_NETWORK` 归并了其他下载 HTTP 客户端异常，可能是读取超时、读取错误或代理异常，单凭中文错误不能确定具体异常类型。排查时只记录异常类型、耗时和域名，不输出原始带签名 URL 的异常。
 6. 网络恢复后重启 CPU Worker，并先确认旧任务是否仍活动。活动任务可恢复同一批次；已失败的非活动任务没有“仅下载旧批次”的现成接口。若平台已完成，优先人工下载核对结果，决定是否允许新建付费批次；不要把重新上传或对失败任务再 POST 描述为无成本的原任务恢复。人工下载不会自动把结果导入本地数据库。
 
+### 图片不在 CSV 中的检查与恢复
+
+只查询 document_blocks 的内连接导出看不到零块文档，不能据此判断上传时有没有创建 Document。先在 pgAdmin / psql 执行以下只读 SQL，比较全部同名记录及它们所属的知识库，不要把旧原生入口记录和云入口记录混在一起：
+
+```sql
+SELECT d.kb_id, d.doc_id, d.file_name, d.file_type, d.file_hash,
+       d.status AS document_status, d.error_message AS document_error,
+       d.processing_task_id, j.task_id, j.job_id,
+       j.state AS job_state, j.batch_id, j.data_id,
+       j.upload_complete, j.is_active, j.retry_count,
+       j.error_code, j.error_message AS job_error, j.finished_at,
+       (SELECT count(*) FROM document_blocks b
+        WHERE b.doc_id = d.doc_id) AS block_count
+FROM documents d
+LEFT JOIN document_parse_jobs j ON j.doc_id = d.doc_id
+WHERE d.file_name = '01_mineru_image_ocr.png'
+ORDER BY d.created_at, j.created_at;
+```
+
+本次同 Hash 图片存在两份 Document：旧知识库的原生 Parser 明确拒绝图片且没有 parse job；云端验收库的图片 job 为 failed、upload_complete=true、batch_id 已保存、retry_count=5、error_code=NETWORK、is_active=false，块数为 0。只读查询原有云批次为 done，结果 ZIP 当前能下载，使用原件 1600×1100 像素 geometry 转换成功且有 12 个块；没有发现 file_type、geometry 或 content_list 类型导致 Adapter 拒绝。历史失败码只定位到网络连接阶段，不能据此确定最后一次失败究竟在查询 API 还是 ZIP 下载；本次没有重新申请或上传。
+
+API 检查（把 UUID 替换为上面 SQL 查出的云端记录）：
+
+```powershell
+$taskKbId = "替换为知识库UUID"
+$taskDocId = "替换为文档UUID"
+curl.exe "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId"
+curl.exe "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId/parse-jobs"
+```
+
+网络恢复不会自动复活该终态任务。先在平台核对旧批次和 ZIP，若你允许新建批次并消耗额度，再对同一个 Document 显式提交（无需重复上传原件）：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId/mineru"
+```
+
+返回 202、新 job_id；完成后该 job=done、Document=CHUNKING 且 block_count>0。它可能重新申请、PUT 并解析，不是复用旧 ZIP；若收到 409，先查询当前状态，不直接改数据库状态或删除旧记录。
+
+### 修复后的真实落库复验与导出
+
+重启 API 和 CPU Worker。已 CHUNKING 的扫描件不会自动重排，现有接口也不支持完成文档 Reparse。请在新的验收知识库上传扫描 PDF（建议同库再次覆盖四类样本），或对原 FAILED 图片使用上述显式入口；真实提交会消耗云端额度。使用显式 `/mineru/documents`，不要误用原生 `/documents`。
+
+等待 job=done、Document=CHUNKING 后执行以下 SQL，将知识库 UUID 替换为本次验收库。用 LEFT JOIN 同时显示尚无块的文档，再按 block_index 验收；不要用 `ORDER BY bbox` 掩盖持久化顺序问题：
+
+```sql
+SELECT d.doc_id, d.file_name, d.status, d.error_message,
+       b.block_id, b.block_index, b.page, b.block_type,
+       b.section, b.text, b.bbox, b.source, b.confidence
+FROM documents d
+LEFT JOIN document_blocks b ON b.doc_id = d.doc_id
+WHERE d.kb_id = '替换为知识库UUID'
+ORDER BY d.file_name, b.block_index;
+
+SELECT d.doc_id, d.file_name, count(b.block_id) AS block_count,
+       count(DISTINCT b.block_id) AS unique_ids,
+       count(DISTINCT b.block_index) AS unique_indices
+FROM documents d
+LEFT JOIN document_blocks b ON b.doc_id = d.doc_id
+WHERE d.kb_id = '替换为知识库UUID'
+GROUP BY d.doc_id, d.file_name
+ORDER BY d.file_name;
+```
+
+人工确认：扫描 PDF 两页的顶部页眉均先于正文和页底；物理页码、bbox 不变；同页正文相对顺序没有改变；图片有可读文字（类型可能是 text/title，而非固定 image_text）；表格、公式没有被拆分或替换。每份已完成文档的块数、不同 ID 数、不同序号数应相等。没有公开 Block 查询 API 时以 SQL 为准，不新增接口来绕过本阶段边界。
+
+### 四类样本当前质量边界
+
+- 扫描 PDF 第一页的倾斜 `SCANNED-1-CHECK` 未作为正文返回；对应原始项为空 image，Adapter 跳过而不伪造 OCR。第二页有识别文字。这是模型漏识别，不由顺序修复补全。
+- 公式样本名称 YoY 视觉识别为类似 `Y_0Y`，原始公式内容保持不变；上下文语义标准化留待阶段 27，不写特例替换。
+- 表格后 `TABLE-AFTER-TEXT-7B21` 在真实 V1 的 `table_footnote` 中，不是 Adapter 把独立正文吞掉。Adapter 按 caption → body → footnote 合成一个 table 块；目前没有足够独立位置与语义证据稳定拆分，故保留并记录为阶段 10 边界。
+- 本版不承诺修复所有标题顺序、双栏/多栏布局、左右图文、OCR、表格归属或公式语义。边界回退意味着保留供应商原序，不代表已经验证该原序正确。
+
 ## 5. 当前验证边界
 
-代码和 Mock 通过不代表真实 Token、账户额度、对象存储网络、云端当前 ZIP 契约或 OCR / 表格 / 公式质量已验证。实际 API 鉴权、申请、PUT、异步状态、ZIP 下载以及四类样本效果，必须完成上述人工验收再确认。
+已有四类真实 ZIP 已核对；扫描、表格、公式已经有真实数据库结果，图片仍为历史失败且未落库。本次顺序修复已通过已有真实 ZIP 的内存转换检查，未代替人工重启 Worker 后的新上传到落库复验。仍须人工确认图片成功入库、两页新 block_index、结构质量以及新运行代次的端到端链路。Mock 通过不等于真实 429、所有网络故障、多栏布局或 OCR 质量全部验证，不能宣称所有验收项已完成。
 
 未实现 Parser Router、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或自动 Token 续期；本阶段验收后停止，等待用户确认阶段 11。

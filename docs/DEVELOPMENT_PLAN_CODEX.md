@@ -1,12 +1,13 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.3 · MinerU Cloud）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.4 · 多格式文档与混合解析）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度：**阶段 1～9 已完成；后续默认从阶段 10 开始。**  
-> 文档解析策略：**Native Parser + MinerU 云端精准解析 API**。  
+> 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
+> 文档解析策略：**Native Parser + MinerU 云端精准解析 API + Parser Router**。  
+> 当前新增目标：扩展 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式，并为混合内容文档建立真实测试基线。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -83,14 +84,29 @@
 建议覆盖：
 
 ```text
-PDF
-扫描 PDF
-DOCX
 TXT
 Markdown
-JPG
-PNG
+CSV
+DOC / DOCX
+XLS / XLSX
+PPT / PPTX
+PDF（文本型 / 扫描型 / 混合型）
+JPG / JPEG / PNG
 ```
+
+解析测试不能只按扩展名判断“能否上传”，还必须覆盖文档内部内容形态：
+
+```text
+Plain Text
+Table
+Formula
+Chart
+Reading Order
+Native Text + Image / Scan 混合内容
+```
+
+OHR-Bench 可作为文档解析质量维度参考，其公开任务重点覆盖 Plain Text、Table、Formula、Chart、Reading Order：
+`https://github.com/opendatalab/OHR-Bench`。
 
 ## 2.3 RAG 技术实现
 
@@ -151,13 +167,15 @@ PNG
 | Reranker | BAAI/bge-reranker-v2-m3 |
 | PDF Parser | PyMuPDF |
 | DOCX Parser | python-docx |
-| Complex Document Parser | MinerU Cloud 精准解析 API（V4） |
+| CSV Parser | Python `csv` |
+| XLSX Parser | openpyxl |
+| Complex / Legacy Office Parser | MinerU Cloud 精准解析 API（V4） |
 | MinerU Model | `vlm`（默认） |
 | Sparse Retrieval | BM25 |
 | Formula | SymPy |
 | Agent | LangGraph / LangChain |
 | Test | pytest |
-| Local Infrastructure | PostgreSQL 17 + pgvector（Windows 原生）/ Redis（WSL2 Ubuntu） |
+| Local Infrastructure | PostgreSQL 17 + pgvector（Windows 原生）/ Redis（Windows 本地服务） |
 
 当前阶段不主动引入：
 
@@ -182,15 +200,14 @@ Kubernetes
 dkf-agent/
 ├── README.md
 ├── AGENTS.md
+├── environment.yml
+├── .env.example
+├── .gitignore
 ├── docs/
 │   ├── DEVELOPMENT_PLAN_CODEX.md
 │   ├── PARSER_CONTRACT.md
 │   ├── MINERU_CLOUD.md
 │   └── archive/
-│       └── DEVELOPMENT_PLAN_CODEX_legacy.md
-├── environment.yml
-├── .env.example
-├── .gitignore
 │
 ├── app/
 │   ├── main.py
@@ -199,15 +216,15 @@ dkf-agent/
 │   │   ├── admin/
 │   │   └── knowledge/
 │   ├── core/
-│   │   ├── config.py
-│   │   ├── database.py
-│   │   ├── redis.py
-│   │   ├── celery_app.py
-│   │   └── logging.py
 │   ├── models/
 │   ├── schemas/
+│   ├── parsers/
+│   │   ├── text.py
+│   │   ├── docx.py
+│   │   ├── pdf.py
+│   │   ├── csv.py        # 阶段 11A 新增
+│   │   └── xlsx.py       # 阶段 11A 新增
 │   ├── services/
-│   │   ├── parser/
 │   │   ├── mineru/
 │   │   ├── chunk/
 │   │   ├── embedding/
@@ -270,7 +287,7 @@ UPLOADED
 - 初始化项目目录。
 - 初始化 Git。
 - 创建 Conda 环境。
-- 根目录放置 README、AGENTS；开发计划放置于 `docs/DEVELOPMENT_PLAN_CODEX.md`，其他专题文档也放入 `docs/`。
+- 放置 README、AGENTS、DEVELOPMENT_PLAN_CODEX。
 - 创建 `.gitignore`、`.env.example`。
 - 确定 Python 3.11。
 
@@ -371,7 +388,7 @@ FastAPI 正常启动，Swagger 可访问。
 ```text
 PostgreSQL 17 → Windows 原生安装 → 127.0.0.1:5432
 pgvector      → 编译安装到 PostgreSQL 17，并在 dkf_agent 中启用 vector extension
-Redis         → WSL2 Ubuntu 中运行，Windows 应用通过 127.0.0.1:6379 访问
+Redis         → Windows 本地服务运行，应用通过 127.0.0.1:6379 访问
 ```
 
 ## 完成标准
@@ -537,7 +554,7 @@ GET  /api/admin/knowledge-bases/{kb_id}/documents
 ## 目标
 管理员可以上传文档，暂时不解析。
 
-## 第一版支持
+## 阶段 6 初始支持
 
 ```text
 PDF
@@ -548,6 +565,8 @@ JPG
 JPEG
 PNG
 ```
+
+该阶段已经完成。**不要回退或重写阶段 6**；阶段 11A 只对上传白名单、内容签名校验和统一 FileType 做兼容性扩展，以支持 CSV、DOC、PPT/PPTX、XLS/XLSX 等新增格式。
 
 ## 流程
 
@@ -674,7 +693,7 @@ PDF      → PyMuPDF
 
 ---
 
-# 16. 阶段 10：MinerU Cloud Provider
+# 16. 阶段 10：MinerU Cloud Provider ✅ 已完成并完成人工验收
 
 ## 目标
 接入 MinerU 官方**精准解析 API V4**，建立复杂文档云端解析能力。当前仅使用云端 API，不部署 MinerU 本地模型。
@@ -732,14 +751,20 @@ is_ocr = true
 简单文本型 PDF 继续使用阶段 9 已完成的 PyMuPDF Native Parser。
 
 ## 文件限制
-精准解析 API 当前限制：
+精准解析 API 当前核心限制：
 
 ```text
 单文件最大：200 MB
 单文件最多：200 页
-本地文件单次申请上传链接：最多 50 个
-上传链接有效期：24 小时
 ```
+
+本项目继续保留已验收的本地保护配置：
+
+```text
+MINERU_UPLOAD_BATCH_MAX_FILES=50
+```
+
+这里的 50 是当前应用保护值，并与账号“50 个文件 / 分钟”的提交频控保持安全一致，不把它写成永久的平台批量上限。平台支持数量发生变化时，只调整配置 / Provider 适配层。
 
 提交前必须先做文件类型、大小和可读性校验；PDF 能提前读取页数时应先检查页数。
 
@@ -990,46 +1015,375 @@ Block 入库
 
 并满足限流、幂等、错误分类和 Token 安全要求。
 
----
+## 已验收基线
 
-# 17. 阶段 11：Parser Router
-
-## 目标
-在阶段 9 Native Parser 与 MinerU Cloud 之间自动路由。
-
-## 第一版路由
+阶段 10 已使用真实 MinerU Cloud API 完成人工测试，至少覆盖：
 
 ```text
-TXT / Markdown / DOCX
-→ Native Parser
-
-JPG / JPEG / PNG
-→ MinerU Cloud
-
-PDF
-→ PyMuPDF 探测文本层
-   ├── 文本充足 → Native Parser
-   └── 无文本 / 文本极少 → MinerU Cloud
+图片 OCR
+纯扫描 PDF
+表格 PDF
+公式 PDF
 ```
 
-第一版扫描 / 复杂 PDF 以整份文档为单位交给 MinerU，不做逐页 Native/MinerU 混合路由。
+真实测试确认 API 鉴权、签名上传、异步查询、结果 ZIP、`content_list.json` 标准化和 Block 入库链路可运行。
 
-内部预留：
+同时保留以下解析质量边界，不在阶段 10 通过硬编码特例修复：
+
+- OCR / 公式字符可能存在供应商识别误差。
+- 表格边界可能包含邻近说明文本。
+- 复杂版式的 Reading Order 需要继续通过真实样本评估。
+- 不为某个测试 Marker 或公式名称写特例修复。
+
+---
+
+# 17A. 阶段 11A：多格式文档支持扩展（当前阶段）
+
+## 目标
+
+在进入自动 Parser Router 前，先把常见办公文档格式的上传、统一契约、Native Parser 和显式 MinerU 能力补齐，形成清晰的格式能力矩阵。
+
+本阶段**只扩展格式能力，不实现自动 Router**。
+
+## 格式能力矩阵
+
+| 格式 | 第一版处理方式 | 说明 |
+|---|---|---|
+| TXT | Native | 已完成 |
+| Markdown / MD | Native | 已完成 |
+| CSV | Native | 本阶段新增 |
+| DOCX | Native；允许显式 MinerU | Native 已完成；复杂图像内容后续 Router 决定 |
+| DOC | MinerU Cloud | 不开发旧 Word 二进制 Native Parser |
+| XLSX | Native；允许显式 MinerU | 本阶段新增 Native；图表 / 图片后续 Router 决定 |
+| XLS | MinerU Cloud | 不开发旧 Excel 二进制 Native Parser |
+| PPTX | MinerU Cloud | 第一版不开发 Native PPTX Parser |
+| PPT | MinerU Cloud | 不开发旧 PowerPoint 二进制 Native Parser |
+| 文本型 PDF | Native | 已完成 |
+| 扫描 / 复杂 PDF | MinerU Cloud | 已完成显式入口 |
+| JPG / JPEG / PNG | MinerU Cloud | 已完成显式入口 |
+
+MinerU 精准解析 API 的格式能力以官方文档为准：
+`https://mineru.net/apiManage/docs`。
+
+当前官方精准解析 API 支持 PDF、图片、Doc/Docx、Ppt/PPTx、Xls/Xlsx；CSV 不作为本项目 MinerU 主路径，使用 Native Parser。
+
+## 统一 FileType 扩展
+
+当前统一契约需要扩展为至少：
+
+```text
+pdf
+doc
+docx
+ppt
+pptx
+xls
+xlsx
+csv
+txt
+md
+jpg
+jpeg
+png
+```
+
+要求：
+
+- Pydantic Schema、上传接口、Document `file_type`、Parser Registry、MinerU 校验、API 响应与测试保持一致。
+- 不允许只修改扩展名白名单而遗漏统一契约。
+- 新增格式不得影响阶段 1～10 已验收格式。
+
+## 上传与文件内容校验
+
+现代 Office OOXML 不能只看后缀：
+
+```text
+DOCX → ZIP + word/document.xml
+PPTX → ZIP + ppt/presentation.xml
+XLSX → ZIP + xl/workbook.xml
+```
+
+旧 Office：
+
+```text
+DOC
+XLS
+PPT
+```
+
+属于 OLE / Compound Binary 系列。必须至少验证实际容器类型；若引入轻量依赖判断内部流，需要同步 `environment.yml` 和 README。
+
+不得仅通过 `filename.endswith()` 判断格式有效。
+
+## CSV Native Parser
+
+新增：
+
+```text
+app/parsers/csv.py
+```
+
+要求：
+
+- 使用 Python 标准 `csv` 模块，不使用简单 `split(',')`。
+- 复用现有严格文本解码策略，至少覆盖 UTF-8、UTF-8 BOM、GB18030。
+- 支持 quoted field、字段内逗号、空值、中文、数字、百分比。
+- 第一版可将整个 CSV 或合理分组输出为 `table` Block。
+- `page = 1`，`bbox = null`，`source = native_parser`。
+- 空 CSV、无法识别编码、结构异常必须安全失败。
+- Block ID 稳定、重试幂等。
+
+## XLSX Native Parser
+
+新增：
+
+```text
+app/parsers/xlsx.py
+```
+
+使用：
+
+```text
+openpyxl
+```
+
+要求：
+
+- 保留 Workbook 中 Sheet 顺序。
+- Sheet 名保存到 `section`。
+- 单元格按行列顺序读取。
+- 每个有效 Sheet 至少形成稳定 `table` Block。
+- 空 Sheet 可跳过；全空 Workbook 失败。
+- 公式保留公式文本，不执行公式，不使用 `eval()`。
+- `page = 1` 仅表示逻辑页，不声称 Excel 物理打印页。
+- `bbox = null`，`source = native_parser`。
+- 第一版不解析图片、图表、SmartArt、复杂绘图。
+- 如果存在视觉对象，不得声称 Native Parser 已完整解析这些视觉信息。
+
+## 扩展 MinerU Office 支持
+
+显式 MinerU Cloud 路径增加：
+
+```text
+DOC
+DOCX
+PPT
+PPTX
+XLS
+XLSX
+```
+
+不要将 CSV 发送到 MinerU 作为默认路径。
+
+特别注意现有 `page_geometry` / bbox 逻辑主要针对 PDF 与图片：
+
+```text
+PDF   → 真实物理页码 + 可映射 bbox
+图片  → 第 1 页 + 像素 bbox
+Office → MinerU 转换后的逻辑 page；无法可靠映射原始 Office 页面坐标时 bbox = null
+```
+
+禁止为了满足契约伪造 Office 原始物理页码或坐标。
+
+对于本地无法可靠提前计算页数的 Office 文档，不伪造页数；文件大小仍应本地校验，平台页数限制由 MinerU 正常返回安全错误。
+
+## Parser Registry
+
+Native Registry 增加：
+
+```text
+csv  → CsvParser
+xlsx → XlsxParser
+```
+
+不要把以下格式注册为 Native Parser：
+
+```text
+doc
+xls
+ppt
+pptx
+```
+
+它们走显式 MinerU Cloud。
+
+## 自动测试
+
+至少覆盖：
+
+```text
+CSV
+- UTF-8
+- UTF-8 BOM
+- GB18030
+- quoted comma
+- empty cell
+- invalid encoding
+
+XLSX
+- single sheet
+- multi sheet
+- empty sheet
+- 中文
+- 数字 / 百分比
+- formula
+- empty workbook
+
+OOXML validation
+- valid DOCX
+- valid PPTX
+- valid XLSX
+- suffix / container mismatch
+
+Legacy Office validation
+- DOC
+- XLS
+- PPT
+- invalid OLE container
+
+MinerU Provider Mock
+- DOC / DOCX
+- PPT / PPTX
+- XLS / XLSX
+- Office result page / bbox semantics
+```
+
+阶段 1～10 的现有回归测试必须全部继续通过。
+
+## 人工测试
+
+至少准备并实际上传：
+
+```text
+1 个 CSV
+1 个普通 XLSX
+1 个 DOC
+1 个 DOCX
+1 个 XLS
+1 个 XLSX
+1 个 PPT
+1 个 PPTX
+```
+
+分别验证 Native / 显式 MinerU 路径、Block 类型、section、逻辑页语义、错误信息和幂等。
+
+## 本阶段禁止事项
+
+不要实现：
+
+```text
+自动 Parser Router
+Parse Cache
+Chunk
+Embedding
+Retrieval
+RAG
+```
+
+不要为 DOC/XLS/PPT 引入 LibreOffice 自动转换链路；旧格式第一版统一交 MinerU。
+
+## 完成标准
+
+- CSV 与 XLSX Native Parser 可独立运行并输出统一 Block。
+- DOC/DOCX/PPT/PPTX/XLS/XLSX 可通过显式 MinerU 路径处理。
+- 上传与 FileType 契约已扩展并有格式真实性校验。
+- Office 的 page / bbox 语义不被伪造。
+- 阶段 1～10 回归全部通过。
+
+---
+
+# 17B. 阶段 11B：Parser Router 与混合文档路由
+
+## 目标
+
+在阶段 11A 格式能力稳定后，实现基于“文件格式 + 内部内容”的自动路由，而不是只按后缀选择 Parser。
+
+## 第一版总体路由
+
+```text
+TXT / Markdown / CSV
+→ Native
+
+DOC / XLS / PPT / PPTX
+→ MinerU Cloud
+
+图片
+→ MinerU Cloud
+
+DOCX
+→ 简单文本 / 原生表格：Native
+→ 图片、截图、公式图片等复杂视觉内容：MinerU Cloud
+
+XLSX
+→ 单元格 / 公式为主：Native
+→ 图表、图片、复杂绘图：MinerU Cloud
+
+PDF
+→ 简单文本型：Native
+→ 扫描、混合页、复杂版式 / 表格 / 公式 / 图表：MinerU Cloud
+```
+
+内部接口继续保留：
 
 ```text
 parse_mode = auto | native | mineru
 ```
 
-默认 `auto`。
+默认 `auto`；管理员必须能显式覆盖，以便人工验收与问题排查。
 
-## 原则
-- 不重写阶段 9 已通过的 Parser。
-- 文本型 PDF 优先 Native，降低云 API 消耗。
-- 图片 / 扫描 PDF 默认 MinerU。
-- 路由失败必须有明确原因。
+## 混合文档测试优先于复杂路由规则
+
+在确定启发式前，至少建立以下真实测试文件：
+
+```text
+mixed.docx
+- Native 标题 / 正文
+- Native 表格
+- 图片中的文字
+- 图片公式
+- Native 正文继续
+
+mixed.xlsx
+- 单元格数据
+- 公式
+- 图表
+- 图片 / 截图
+
+mixed_page.pdf
+- Page 1 文本型
+- Page 2 扫描型
+- Page 3 文本型
+
+mixed_same_page.pdf
+- 同一页原生文本
+- 同页截图 / 图片文字
+
+mixed.pptx
+- 文本框
+- 表格
+- 图表
+- 图片文字
+```
+
+先比较 Native 与 MinerU 实际结果，再确定最终 auto 路由阈值。
+
+## 第一版路由原则
+
+- 不修改阶段 9 已通过的 Native Parser 内容语义。
+- 不能因为“文件有文本层”就断言没有视觉信息需要解析。
+- 不能因为 PDF 存在一张 logo 就无条件路由 MinerU；复杂度判断要可解释、可测试。
+- 无法可靠判断时，优先提供 `parse_mode=mineru` 明确覆盖；不要做高风险自动合并。
+- 第一版遇到复杂 / 混合 PDF 可整份交 MinerU，不要求逐页 Native + MinerU 合并。
+- 不简单按 bbox 的 y 坐标全局排序来修 Reading Order；多栏、表格和图文混排必须保守处理。
+- Route 决策结果应可记录 / 可观察，便于 Admin 和后续评测解释。
 
 ## 完成标准
-阶段 9 回归继续通过，图片 / 扫描 PDF 自动进入 MinerU Cloud。
+
+- 所有阶段 11A 新格式都能得到明确路由结果。
+- Native 简单文档不额外消耗 MinerU API。
+- 扫描 / 复杂 / 混合文档不会因 Native 文本存在而静默漏掉主要视觉内容。
+- `parse_mode` 显式覆盖有效。
+- 混合 DOCX、XLSX、PDF、PPTX 的真实测试结果有记录。
 
 ---
 
@@ -1097,10 +1451,25 @@ Parse Cache
 
 ## 第一版策略
 
+输入 Block 可能包含：
+
+```text
+title
+text
+table
+formula
+image_text
+```
+
+切分优先级：
+
 ```text
 标题边界优先
+→ 标题与后续正文尽量保持上下文
 → 段落边界优先
-→ 超长段落按长度切分
+→ 表格尽量整体保留
+→ 公式与相邻解释尽量不切断
+→ 超长内容再按长度切分
 ```
 
 初始参数：
@@ -1210,8 +1579,10 @@ scripts/import_knowledge_base.py
 
 要求：
 - 10+ 文档。
-- 多格式。
-- 包含普通 PDF 和扫描文档。
+- 覆盖多种后缀与内容形态，而不是同一种 PDF 重复凑数。
+- 至少包含 TXT / MD / CSV / DOCX / XLSX / PPTX / PDF / 图片中的多类格式。
+- 至少包含普通文本 PDF、扫描 PDF、混合文档、表格、公式、图表和 Reading Order 测试。
+- 旧 Office（DOC / XLS / PPT）至少各保留 1 个兼容性样本，用于验证 MinerU 路径。
 
 流程：
 
@@ -1794,12 +2165,32 @@ Faithfulness >= 90%
 Document Parsing / MinerU：
 
 ```text
+Plain Text
+Table
+Formula
+Chart
+Reading Order
 普通扫描 PDF
 模糊扫描件
-复杂表格
-公式页面
+多栏 PDF
+混合页 PDF
+同页 Native + Image
+混合 DOCX
+混合 XLSX
+PPTX 图文混排
 中英文混合
 数字 / 百分比
+```
+
+格式覆盖至少记录：
+
+```text
+TXT / MD / CSV
+DOC / DOCX
+XLS / XLSX
+PPT / PPTX
+PDF
+JPG / JPEG / PNG
 ```
 
 至少记录：
@@ -1894,6 +2285,15 @@ Demo 4：
 → 展示公式和参数来源
 ```
 
+Demo 5：
+
+```text
+上传 CSV / XLSX / PPTX / DOC 等多格式文档
+→ Native 或 MinerU 自动路由
+→ READY
+→ 跨格式知识库统一问答与 Evidence
+```
+
 ---
 
 # 44. 阶段 38：Knowledge Service 独立验收
@@ -1902,7 +2302,7 @@ Demo 4：
 
 ```text
 启动 PostgreSQL 17 / pgvector
-→ 启动 WSL2 Redis
+→ 启动 Windows Redis 服务
 → FastAPI
 → Celery CPU Worker
 → Celery GPU Worker
@@ -1914,15 +2314,17 @@ Demo 4：
 验收清单：
 
 ```text
-[ ] 10+ 多格式知识库文档
+[ ] 10+ 多格式知识库文档（含 Office / CSV / PDF / 图片）
 [ ] 单文档 RAG
 [ ] 全知识库 RAG
-[ ] MinerU Cloud 图片 / 扫描 PDF 解析
+[ ] MinerU Cloud 图片 / 扫描 PDF / Office 解析
 [ ] Dense Retrieval
 [ ] BM25
 [ ] Hybrid
 [ ] Reranker
 [ ] Citation
+[ ] Parser Router 与混合文档路由
+[ ] CSV / XLSX Native Parser
 [ ] 动态上传
 [ ] Celery
 [ ] 公式识别
@@ -1991,8 +2393,40 @@ Codex 必须遵守：
 19. 不实现 MinerU Token 到期时间跟踪、自动续期或刷新逻辑；仅保证 Token 安全读取和错误可解释。
 20. Reindex 必须优先复用 Parse Cache；重新调用 MinerU 必须使用明确的 Reparse 语义。
 21. 当前不部署 MinerU 本地模型，不新增 MinerU 本地推理依赖。
-22. 阶段 1～9 已完成。阶段 10 之后若需修改前置实现，必须先说明兼容性原因，并保证已有回归测试继续通过。
+22. 阶段 1～10 已完成并作为冻结基线。阶段 11A 及之后若因新增格式需要修改上传白名单、统一 FileType、格式校验等前置公共代码，属于兼容性扩展，不视为“重做旧阶段”；但必须先说明原因并保证阶段 1～10 回归测试继续通过。
+23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
+24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
+25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
 
+
+---
+
+
+# 46.1 当前工程基线（V0.4）
+
+```text
+阶段 1～9：已完成并回归通过
+阶段 10：MinerU Cloud Provider 已完成真实 API 人工验收
+阶段 11A：当前开发阶段
+阶段 11B：等待 11A 和多格式真实样本验收后开始
+阶段 12+：未开始
+```
+
+当前已确认解析基线：
+
+```text
+Native：TXT / Markdown / DOCX / 文本型 PDF
+MinerU：图片 / 扫描 PDF / 表格 PDF / 公式 PDF
+```
+
+阶段 11A 扩展目标：
+
+```text
+Native 新增：CSV / XLSX
+MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
+```
+
+已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并执行完整回归。
 
 ---
 
@@ -2011,3 +2445,13 @@ Codex 必须遵守：
 ```
 
 每个阶段以“能运行、能测试、能解释”为完成标准，不以“代码写完”为完成标准。
+
+
+---
+
+# 48. 外部参考
+
+- MinerU 精准解析 API：`https://mineru.net/apiManage/docs`
+- OHR-Bench：`https://github.com/opendatalab/OHR-Bench`
+
+外部服务能力、限流与支持格式可能变化；实现时以官方当前文档和账号后台为准。

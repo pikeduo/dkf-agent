@@ -3,6 +3,8 @@
 import json
 import math
 from io import BytesIO
+from itertools import pairwise
+from operator import itemgetter
 from pathlib import Path, PurePosixPath
 from uuid import UUID, uuid5
 from zipfile import BadZipFile, ZipFile
@@ -77,6 +79,206 @@ def joined_text(value: object) -> str:
     raise MinerUError("CONTENT_LIST", "MinerU 文本字段格式不受支持")
 
 
+def read_layout_pages(archive: bytes) -> dict[int, dict]:
+    """内存读取可选的旧版 layout 顺序证据；缺失、歧义或未知结构时不用它改序。
+
+    调用前必须由 read_content_list 完成 ZIP 路径和总解压规模校验。
+    layout 不替代正文契约，不读取 V2、Markdown，也不持久化解析缓存。
+    """
+
+    try:
+        with ZipFile(BytesIO(archive)) as zipped:
+            candidates = [
+                info
+                for info in zipped.infolist()
+                if PurePosixPath(info.filename.replace("\\", "/")).name == "layout.json"
+            ]
+            if len(candidates) != 1 or candidates[0].file_size > 64 * 1024**2:
+                return {}
+            value = json.loads(zipped.read(candidates[0]).decode("utf-8-sig"))
+        pages = value.get("pdf_info") if isinstance(value, dict) else None
+        if not isinstance(pages, list):
+            return {}
+        result = {}
+        for page in pages:
+            if not isinstance(page, dict):
+                return {}
+            index = page.get("page_idx")
+            if type(index) is not int or index < 0 or index in result:
+                return {}
+            result[index] = page
+        return result
+    except (BadZipFile, UnicodeError, ValueError, RuntimeError, NotImplementedError):
+        # 正文已经独立校验；可选顺序信息损坏只能退回原序，不能伪造正文或索引。
+        return {}
+
+
+def layout_bbox(block: dict, size: object) -> list[float] | None:
+    """将 layout 的页面坐标归一化，仅用于唯一关联，不用于推断阅读顺序。"""
+
+    bbox = block.get("bbox")
+    if (
+        not isinstance(size, list)
+        or len(size) != 2
+        or any(
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+            or number <= 0
+            for number in size
+        )
+        or not isinstance(bbox, list)
+        or len(bbox) != 4
+        or any(
+            isinstance(number, bool)
+            or not isinstance(number, (int, float))
+            or not math.isfinite(number)
+            or not 0 <= number <= size[index % 2]
+            for index, number in enumerate(bbox)
+        )
+        or bbox[2] <= bbox[0]
+        or bbox[3] <= bbox[1]
+    ):
+        return None
+    return [number * 1000 / size[index % 2] for index, number in enumerate(bbox)]
+
+
+def order_page_margins(
+    entries: list[tuple[int, dict]], page: dict
+) -> list[tuple[int, dict]]:
+    """只恢复官方索引明确的页眉/页脚，任何正文重排、复杂版式或歧义均保留原序。
+
+    页内所有原始项必须与 layout 父块按类型和 bbox 唯一对应；坐标容差 2/1000
+    仅兼容官方整数取整，不构成按 y 排序。结构块作为整体参与校验，绝不拆分。
+    """
+
+    if not any(item.get("type") in {"header", "footer"} for _, item in entries):
+        return entries
+    groups = [page.get("para_blocks"), page.get("discarded_blocks")]
+    if any(not isinstance(group, list) for group in groups):
+        return entries
+    layout = [block for group in groups for block in group]
+    # 复杂或超量页不做启发式关联，限制最坏情况下的两两匹配成本。
+    if len(layout) != len(entries) or not 2 <= len(entries) <= 512:
+        return entries
+    aliases = {"title": "text", "interline_equation": "equation", "formula": "equation"}
+    candidates, indices = [], set()
+    for block in layout:
+        if not isinstance(block, dict):
+            return entries
+        index = block.get("index")
+        bbox = layout_bbox(block, page.get("page_size"))
+        kind = block.get("type")
+        if (
+            type(index) is not int
+            or index < 0
+            or index in indices
+            or bbox is None
+            or not isinstance(kind, str)
+        ):
+            return entries
+        indices.add(index)
+        candidates.append((index, aliases.get(kind, kind), bbox))
+    matched, used, boxes = [], set(), {}
+    for position, item in entries:
+        try:
+            bbox = convert_bbox(item.get("bbox"), (1000, 1000))
+        except MinerUError:
+            return entries
+        kind = item.get("type")
+        if bbox is None or not isinstance(kind, str):
+            return entries
+        matches = [
+            index
+            for index, candidate_kind, candidate_bbox in candidates
+            if candidate_kind == aliases.get(kind, kind)
+            and all(abs(a - b) <= 2 for a, b in zip(bbox, candidate_bbox))
+        ]
+        if len(matches) != 1 or matches[0] in used:
+            return entries
+        used.add(matches[0])
+        matched.append((matches[0], position, item))
+        boxes[position] = bbox
+    body = [
+        (position, item)
+        for position, item in entries
+        if item.get("type") not in {"header", "footer"}
+    ]
+    if not body:
+        return entries
+    # 空图片仍参与唯一关联和页边界检查；版式检测只看实际输出的正文，不能补 OCR。
+    visible_boxes = [
+        boxes[position]
+        for position, item in body
+        if item.get("type") not in {"image", "chart"}
+        or item.get("content")
+        or item.get("image_caption")
+        or item.get("image_footnote")
+    ]
+    for offset, box in enumerate(visible_boxes):
+        for other in visible_boxes[offset + 1 :]:
+            vertical_overlap = min(box[3], other[3]) - max(box[1], other[1])
+            horizontal_gap = max(box[0], other[0]) - min(box[2], other[2])
+            if vertical_overlap > 0 and horizontal_gap >= 0:
+                return entries
+    # 正文发生纵向回跳可能是按栏阅读；即使存在 index，也不改其原始序列。
+    if any(left[1] > right[1] for left, right in pairwise(visible_boxes)):
+        return entries
+    for position, item in entries:
+        bbox = boxes[position]
+        if item.get("type") == "header" and (
+            bbox[3] > 150 or bbox[3] > min(boxes[p][1] for p, _ in body)
+        ):
+            return entries
+        if item.get("type") == "footer" and (
+            bbox[1] < 850 or bbox[1] < max(boxes[p][3] for p, _ in body)
+        ):
+            return entries
+    # 使用供应商 index 而非几何位置排序；校验候选结果不能改变任何正文项的相对顺序。
+    proposed = [
+        (position, item) for _, position, item in sorted(matched, key=itemgetter(0))
+    ]
+    if [p for p, item in proposed if item.get("type") not in {"header", "footer"}] != [
+        p for p, _ in body
+    ]:
+        return entries
+    body_slots = [
+        slot
+        for slot, (_, item) in enumerate(proposed)
+        if item.get("type") not in {"header", "footer"}
+    ]
+    if any(
+        item.get("type") == "header"
+        and slot > body_slots[0]
+        or item.get("type") == "footer"
+        and slot < body_slots[-1]
+        for slot, (_, item) in enumerate(proposed)
+    ):
+        return entries
+    return proposed
+
+
+def ordered_content_items(archive: bytes, items: list[dict]) -> list[tuple[int, dict]]:
+    """按页恢复经过验证的页边界项，并携带原始数组位置保证 Block ID 不变。
+
+    不改变原有 page_idx 序列，交错页面也只替换该页自己的槽位；不做全局排序。
+    """
+
+    ordered = list(enumerate(items, start=1))
+    pages = read_layout_pages(archive)
+    slots = {}
+    for slot, (_, item) in enumerate(ordered):
+        index = item.get("page_idx")
+        if type(index) is int and index in pages:
+            slots.setdefault(index, []).append(slot)
+    for index, positions in slots.items():
+        entries = [ordered[position] for position in positions]
+        proposed = order_page_margins(entries, pages[index])
+        for slot, entry in zip(positions, proposed):
+            ordered[slot] = entry
+    return ordered
+
+
 def convert_bbox(value: object, size: tuple[float, float]) -> list[float] | None:
     """将官方 content_list 的 0～1000 坐标转换为原件点数 / 像素；未知位置保持空值。"""
 
@@ -102,7 +304,7 @@ def convert_bbox(value: object, size: tuple[float, float]) -> list[float] | None
 
 
 class MinerUResultAdapter:
-    """保留阅读顺序、实际标题章节、表格和公式；没有置信度时不伪造高分。"""
+    """保留正文原序并恢复有证据的页边界项；不改写表格、公式或伪造置信度。"""
 
     def normalize(
         self,
@@ -118,7 +320,8 @@ class MinerUResultAdapter:
 
         items = read_content_list(archive)
         blocks, headings, title = [], {}, ""
-        for position, item in enumerate(items, start=1):
+        # ID 使用原始 position，block_index 使用最终列表顺序；改序不能换掉既有块身份。
+        for position, item in ordered_content_items(archive, items):
             page_idx = item.get("page_idx")
             if type(page_idx) is not int or page_idx not in geometry:
                 raise MinerUError("PAGE", "MinerU 页码与原件物理页数不一致")

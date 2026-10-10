@@ -428,7 +428,9 @@ concurrency = 1
 - `submit_mineru_parse / check_mineru_result` 是 CPU 短任务。只查一次，未完成通过 countdown 再投递；禁止 while/sleep 等待。已确认临时错误有限指数退避加抖动，并尊重 Retry-After；永久错误立即记录 FAILED，总等待时间有上限。
 - `document_parse_jobs` 保存外部六种状态、batch / data / trace 标识、参数快照、重试、错误及提交检查点；Document 保持供应商无关状态。`task_id` 为本地处理代次，不是外部单文件 task_id，也不表示整份文档的 Celery 执行结果。
 - 文档行锁、活动解析身份部分唯一索引、当前代次检查和稳定 Block ID 共同保证幂等。POST 前保存申请意图、PUT 前保存 batch，上传恢复沿用同一 batch；已确认远端失败后才自动申请新 batch。POST 响应丢失时安全失败，禁止盲目重复申请；官方接口无已确认的幂等请求键，不得宣称跨数据库与云端绝对 exactly-once。
-- 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留顺序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
+- 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留正文原序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
+- 阅读顺序仅允许按可选旧版 `layout.json` 的父块 `index` 恢复明确的 `header / footer`：同页类型与 bbox 必须全量唯一关联、索引唯一且非负、位置符合页边界，候选结果不能改变任何正文项的相对顺序。bbox 仅用于关联与保护条件，禁止按 y 全局排序。缺少 bbox / 可信索引、关联歧义、多栏并排、纵向回跳或超量页保留整页原序；不宣称能够可靠重建任意多栏布局。结构块保持整体，原 page / bbox / block_type / source 不变；ID 始终基于原数组位置，最终顺序写入 block_index。可选顺序元数据失败不能替代或绕过正文校验。
+- 上游漏识别、公式名称误识别及普通正文被归入 table_footnote 属于解析质量边界；不得按文件名、验收标记或具体字符串补 OCR、修公式名称、强行拆表。公式语义标准化留待阶段 27。旧 CHUNKING 结果不因更新 Adapter 自动重写；终态失败任务也不自动恢复，重新提交非活动 FAILED 文档可能创建新批次并消耗额度。
 - Block 替换与 Document=CHUNKING、job=done 在同一事务内提交；失败回滚所有块修改，再独立记录安全错误。full.md 仅供供应商平台人工核对，当前未新增 Admin Markdown 预览接口。
 - 阶段 10 使用显式 MinerU 上传 / 已有文档提交入口，不改变阶段 9 原生接口的行为；重复活动请求仅恢复同一任务，完成文档拒绝重解析。没有 Router、Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
 - 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
@@ -467,7 +469,7 @@ text
 
 ```text
 01～09. 已有 FastAPI、基础服务、数据模型、管理员 API、上传、异步入口与原生 Parser
-10. MinerU Cloud Provider（当前代码阶段；真实 API 待人工验收）
+10. MinerU Cloud Provider（当前人工验收收尾；图片落库与顺序修复仍待人工确认）
 11. Parser Router
 12. Parse Cache
 13. Chunk
@@ -508,7 +510,7 @@ text
 | 7：异步入口 | `0002_document_tasks` 增加可空且唯一的任务标识；已建立提交、状态查询、重新投递及重试幂等框架，具体处理步骤由后续 Parser 扩展。 |
 | 8：统一解析结构 | 已建立 `ParsedDocument / ParsedBlock`、Parser 公共校验入口及独立契约测试；契约不耦合数据库、Celery、RAG 或模型部署。 |
 | 9：原生文本解析 | TXT、Markdown、DOCX、文本型 PDF 输出统一 Block，PDF 保留物理页码，其他格式使用逻辑页 1；`0003_block_order` 增加块顺序及约束。任务事务性落库后停在 `CHUNKING / awaiting_chunk`；不执行 OCR、Chunk、Embedding 或 RAG。 |
-| 10：MinerU Cloud | 增加 `0004_mineru_jobs`、官方 V4 Provider、Redis 共享频控、提交 / 检查短任务、结果 Adapter 和显式管理入口；云解析事务写块后停在 CHUNKING。配置 Token 并真实验收后才可确认云端可用。 |
+| 10：MinerU Cloud | 已有官方 V4 主链路及 `0004_mineru_jobs`；云解析事务写块后停在 CHUNKING。扫描、表格、公式真实结果已存在，图片历史网络失败尚未落库；新增经过校验的页边界顺序恢复，已用现有真实 ZIP 在内存核对，仍需人工完成新 Worker 的上传到落库验收。 |
 
 当前只实施阶段 10；人工验收通过并经用户确认后，下一开发范围为阶段 11 Parser Router。阶段 12 Parse Cache、Chunk、Embedding、RAG 和其他成员模块均不得提前开发。
 

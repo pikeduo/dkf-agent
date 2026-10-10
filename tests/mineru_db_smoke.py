@@ -241,6 +241,91 @@ def test_pending_state_schedules_one_short_check(cloud_context, state):
     assert cloud_context.messages[-1]["countdown"] == 15
 
 
+def test_layout_order_is_persisted_once_with_stable_ids(cloud_context):
+    """官方页眉索引恢复后按新顺序事务入库；重复短消息不改 ID、不增加块或 Chunk。"""
+
+    items = [
+        {"type": "text", "text": "正文", "bbox": [80, 200, 650, 230], "page_idx": 0},
+        {"type": "text", "text": "页底", "bbox": [80, 900, 500, 920], "page_idx": 0},
+        {"type": "header", "text": "页眉", "bbox": [80, 50, 650, 80], "page_idx": 0},
+    ]
+    layout = {
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "page_size": [1000, 1000],
+                "para_blocks": [
+                    dict(value, index=index) for value, index in zip(items[:2], [1, 2])
+                ],
+                "discarded_blocks": [dict(items[2], index=0)],
+            }
+        ]
+    }
+    cloud_context.provider.archive = result_zip(items, layout=layout)
+    job = upload(cloud_context)
+    assert execute(job).state == "SUCCESS"
+    cloud_context.provider.state = "done"
+    assert execute(job, "check").result["block_count"] == 3
+    with cloud_context.session() as session:
+        blocks = session.scalars(
+            select(DocumentBlock).order_by(DocumentBlock.block_index)
+        ).all()
+        identities = [block.block_id for block in blocks]
+        assert [block.text for block in blocks] == ["页眉", "正文", "页底"]
+        assert [block.block_index for block in blocks] == [1, 2, 3]
+        assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 0
+    assert execute(job, "check").result["status"] == "skipped"
+    with cloud_context.session() as session:
+        assert (
+            session.scalars(
+                select(DocumentBlock.block_id).order_by(DocumentBlock.block_index)
+            ).all()
+            == identities
+        )
+    assert detail(cloud_context, job)[0]["status"] == "CHUNKING"
+
+
+def test_image_network_exhaustion_has_no_blocks_and_requires_explicit_new_job(
+    cloud_context,
+):
+    """图片上传完成但查询重试耗尽时无块；远端后来成功也不能自动复活已终止的任务。"""
+
+    job = upload(cloud_context, "图片.png", png_bytes())
+    execute(job)
+    cloud_context.provider.query_error = MinerUError(
+        "NETWORK", "网络暂时无法连接", retryable=True
+    )
+    for _ in range(cloud_context.settings.mineru_max_retries):
+        with pytest.raises(Retry):
+            tasks.execute_step(RetryTask(), job["job_id"], "check")
+    assert execute(job, "check").state == "FAILURE"
+    document, current = detail(cloud_context, job)
+    assert document["status"] == "FAILED" and current["state"] == "failed"
+    assert current["retry_count"] == 5 and current["error_code"] == "NETWORK"
+    with cloud_context.session() as session:
+        row = session.get(DocumentParseJob, UUID(job["job_id"]))
+        assert row.upload_complete and row.batch_id and not row.is_active
+        assert session.scalar(select(func.count()).select_from(DocumentBlock)) == 0
+    cloud_context.provider.query_error = None
+    cloud_context.provider.state = "done"
+    assert execute(job, "check").result["status"] == "skipped"
+    assert detail(cloud_context, job)[0]["status"] == "FAILED"
+    response = cloud_context.api(
+        "POST", f"{PREFIX}/{cloud_context.kb_id}/documents/{job['doc_id']}/mineru"
+    )
+    assert response.status_code == 202
+    new = response.json()
+    assert new["job_id"] != job["job_id"] and new["doc_id"] == job["doc_id"]
+    with cloud_context.session() as session:
+        assert session.scalar(select(func.count()).select_from(Document)) == 1
+        assert session.scalar(select(func.count()).select_from(DocumentParseJob)) == 2
+    assert execute(new).state == "SUCCESS"
+    assert (
+        cloud_context.provider.submissions == 2
+    )  # 显式重试新建批次，不宣称仅重新下载旧 ZIP。
+    assert execute(new, "check").result["block_count"] == 5
+
+
 def test_active_identity_reused_and_completed_reparse_rejected(cloud_context):
     """重复提交沿用同一活动身份；文档完成后不提供阶段 12 的缓存或 Reparse。"""
 

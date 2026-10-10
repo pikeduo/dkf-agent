@@ -54,11 +54,13 @@ def content_items():
     ]
 
 
-def result_zip(items=None, name="result/sample_content_list.json"):
-    """生成只有结构化内容和预览 Markdown 的 ZIP，所有字节仅供测试使用。"""
+def result_zip(items=None, name="result/sample_content_list.json", layout=None):
+    """生成结构化 ZIP，可附带官方旧版 layout 顺序证据；字节仅供离线测试使用。"""
 
     buffer = BytesIO()
     with ZipFile(buffer, "w") as archive:
         archive.writestr(name, json.dumps(content_items() if items is None else items))
         archive.writestr("result/full.md", "不把此预览作为唯一解析输入")
+        if layout is not None:
+            archive.writestr("result/layout.json", json.dumps(layout))
     return buffer.getvalue()
