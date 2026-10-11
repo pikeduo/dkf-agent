@@ -1,597 +1,114 @@
 # AGENTS.md
 
-## 1. 项目身份
+## 1. 项目范围与当前阶段
 
-- 项目名称：数知融问智能体
-- English：Data-Knowledge Fusion Agent
-- 简称：DKF-Agent
-- 项目目录：`dkf-agent`
-- 当前负责模块：`knowledge-service`
-- 当前开发范围：**非结构化知识问答**
+DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独立运行、测试和演示的非结构化 Knowledge Base Service。未经用户要求，不开发 NL2SQL、Schema Linking、Coordinator、Fusion 或其他成员模块。
 
-除非用户明确要求，不优先开发 NL2SQL、Schema Linking、Coordinator、Fusion 或其他成员负责的模块。
+- 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.7）；历史计划仅供参考，不重新实现阶段 1～11A。
+- 当前为 **11B.1：整份文档 Router v1**，代码已建立，真实路由验收与 XLSX Native/MinerU A/B 仍待完成。
+- 已有 FastAPI、数据库模型与迁移、管理员接口、多选上传、Celery、六类 Native Parser、MinerU Cloud 和业务日志。迁移 head 为 `0004_mineru_jobs`；阶段 10 图片、扫描、表格、公式与顺序已完成真实 API 人工验收。
+- 成功解析只写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`，不等于可检索或 `READY`。
+- 未经用户确认，不进入 11B.2 Selective Hybrid、Parse Cache、Chunk、Embedding、Retrieval、RAG；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 
----
+最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
 
-## 2. 当前开发目标
+## 2. 技术与本地环境约束
 
-当前目标是完成一个**可独立运行、可独立测试、可独立演示**的 Knowledge Base Service。
+- 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
+- 后续按计划使用 DeepSeek、BAAI/bge-m3、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
+- 新增技术或依赖须先说明原因和替代方案并等待确认；不得自行引入 Elasticsearch、知识图谱、本地大型视觉模型、新 Agent、Kubernetes、微调或无关大型依赖。
 
-核心链路：
+Windows 基础服务由用户手动管理，本节优先于其他文档中的旧部署说明：
 
-```text
-Knowledge Ingestion
-知识库文档
-→ Native Parser / MinerU Cloud（复杂文档精准解析）
-→ Chunk
-→ BGE-M3
-→ pgvector
-→ READY
-
-Knowledge Query
-Query
-→ Dense Retrieval + BM25
-→ bge-reranker-v2-m3
-→ DeepSeek RAG
-→ Answer + Evidence
-```
-
-预置知识库是主要比赛模式；管理员动态上传是知识库增量入库能力。
-
----
-
-## 3. 赛题目标：仅包含非结构化问答相关部分
-
-以下要求来自赛题文档，开发时必须优先满足。
-
-### 3.1 基础任务
-
-必须完成：
-
-- 搭建一个可交互的 Demo，非结构化模块至少能够独立完成知识库问答演示。
-- 实现**单文档简单检索问答（RAG）**。
-- 系统回答必须进行基本来源展示，例如展示 / 高亮引用的文档片段。
-- 单文档 RAG 需要准备不少于 **10 个测试用例**进行客观评估。
-
-### 3.2 RAG 技术实现要求
-
-技术实现需要覆盖：
-
-- 文档解析。
-- 文档切片策略。
-- 向量检索方案。
-- 生成融合机制。
-- 数据来源标注。
-- 系统测试与性能评估。
-
-知识库提交样本应：
-
-- 不少于 **10 份文档**。
-- 覆盖不同文档格式。
-
-### 3.3 RAG 质量目标
-
-需要评估生成答案与检索内容之间的相关性和事实准确性。
-
-开发目标：
-
-- RAG 答案忠实度优先达到 **90% 及以上**。
-- 对检索、重排、生成分别记录耗时。
-- 后续技术文档应能够说明核心链路复杂度、不同数据规模下的性能，以及瓶颈和优化策略。
-
-### 3.4 中级任务 6：文档公式识别与计算
-
-本模块重点攻克：
-
-**6a：公式输入参数识别**
-
-- 从 PDF 等非结构化文档中识别计算公式所需要的输入参数。
-- 参数需要能够关联到原始文档证据。
-
-**6b：公式结构解析与计算**
-
-- 正确识别公式本身的结构和计算逻辑。
-- 将公式标准化为可安全执行的表达式。
-- 使用 SymPy 等安全计算方式得到结果。
-- 结果必须能够追溯公式来源和参数来源。
-
-参数不足时不得猜测，应返回类似：
-
-```json
-{
-  "status": "need_variables",
-  "required_variables": ["revenue", "cost"]
-}
-```
-
-禁止使用 `eval()` 执行模型生成的公式。
-
----
-
-## 4. 当前工程目标
-
-### 4.1 Knowledge Base
-
-需要支持：
-
-- 预置知识库。
-- 不少于 10 份多格式知识文档。
-- PDF。
-- DOC / DOCX、XLS / XLSX、PPT / PPTX。
-- TXT / Markdown / CSV。
-- JPG / PNG。
-- 扫描 PDF。
-- 文档状态管理。
-- Hash 去重。
-- Delete。
-- Reindex。
-
-### 4.2 Admin Module
-
-管理员侧负责知识库建设和维护：
-
-```text
-上传 / 批量上传
-→ Celery
-→ Native Parse / MinerU Cloud
-→ 查看解析结果
-→ Chunk
-→ Embedding
-→ Index
-→ READY
-```
-
-管理员应能够查看：
-
-- 文档名称。
-- 文档格式。
-- 处理状态。
-- 解析结果。
-- Chunk 结果。
-- Chunk 数量。
-- 索引状态。
-- 失败原因。
-
-### 4.3 Knowledge Query
-
-至少支持：
-
-- 全知识库检索。
-- 单文档检索。
-- Dense Retrieval。
-- BM25。
-- Hybrid Retrieval。
-- Reranker。
-- DeepSeek RAG。
-- Evidence。
-- 文件名引用。
-- 页码引用。
-- 证据不足判断。
-
----
-
-## 5. 技术约束
-
-固定技术栈：
-
-```text
-Python 3.11
-FastAPI
-PostgreSQL + pgvector
-Celery + Redis
-DeepSeek API
-BAAI/bge-m3
-BAAI/bge-reranker-v2-m3
-PyMuPDF
-python-docx
-openpyxl（XLSX 单元格）
-olefile（旧 Office 容器识别）
-MinerU Cloud 官方精准解析 API V4（默认 vlm）
-SymPy
-LangChain
-LangGraph
-Docker Compose
-```
-
-开发阶段不要自行引入：
-
-- Elasticsearch。
-- 知识图谱。
-- 本地大型视觉语言模型。
-- 新的 Agent 类型。
-- Kubernetes。
-- 模型微调。
-- 与当前赛题目标无关的大型依赖。
-
-如确实需要新增技术或依赖，必须先说明原因和替代方案，再等待确认。
-
-### 5.1 Windows 本地开发环境固定约束
-
-当前基础服务由开发者手动部署和管理：
-
-- PostgreSQL 17 原生安装于 Windows，默认地址 `127.0.0.1:5432`；项目数据库为 `dkf_agent`，项目用户为 `dkf_user`，应用通过 `DATABASE_URL` 连接。
-- pgvector 在 Windows 原生编译安装；必须使用 Visual Studio 2022 Build Tools 的 **x64 C++ 工具链**，禁止使用 x86 工具链。`PGROOT` 指向 `C:\Program Files\PostgreSQL\17`。由开发者在 `dkf_agent` 数据库中执行 `CREATE EXTENSION vector;`，通过 `pg_extension` 查询验证启用状态。
-- Redis 运行于 Windows 本地，沿用已有原生安装，作为 Windows 服务后台运行；默认地址 `127.0.0.1:6379`、`REDIS_URL=redis://127.0.0.1:6379/0`，不通过 WSL 部署。当前已有 Redis 5.0.14.1 仅作为本机开发环境，不作为生产推荐；服务器或 Python 客户端升级需先核对兼容性，不自行替换安装方案。
-
-Codex 必须遵守：
-
-1. 不自动创建 `docker-compose.yml` 来部署 PostgreSQL 或 Redis。
-2. 不自动修改、安装 PostgreSQL / Redis 系统软件，不自动编译安装 pgvector，不修改系统服务。
-3. 应用代码只负责通过环境变量连接现有基础服务，不承担服务安装或启动工作。
-4. 测试 Redis 前，先通过 `Get-Service Redis` 确认本地服务为 `Running`（服务名以实际安装为准）；Redis 不依赖 WSL 状态，不要求开启 Ubuntu。
-5. Redis 连接失败时，不直接修改 Python 代码；先依次检查 Windows 服务状态、服务配置中的绑定地址与端口、6379 是否监听、本地 `redis-cli ping` 是否返回 `PONG`，再核对 `REDIS_URL`、Celery Broker 与 Result Backend 的 URL 是否指向同一本地服务。需要调整服务时交由用户手动处理。
-6. Docker Compose 保留为未来整体部署方案，当前 Windows 开发环境不使用 Docker 部署 PostgreSQL 或 Redis；除非用户明确要求，不恢复 Docker 基础服务或 WSL Redis 部署。
-
-本节优先于开发计划或其他文档中遗留的 Docker 基础服务或 WSL Redis 部署说明。开发顺序不变，但当前 PostgreSQL、pgvector 和 Redis 的部署方式以上述约束为准。
-
----
-
-## 6. 开发规则
-
-### 6.1 中文注释和可解释性
-
-每次新增或修改代码时，必须保留适量中文注释，并为每个函数提供中文说明，不得遗漏。
-
-函数说明要求：
-
-- Python 函数在函数体开头使用中文文档字符串（docstring）；其他语言使用对应的函数注释形式。
-- 适用于普通函数、异步函数、类方法、私有辅助函数、嵌套函数、测试函数和数据库迁移函数。
-- 至少说明函数用途；根据实际复杂度补充关键参数、返回值、事务或其他副作用、异常与边界条件，避免只复述函数名。
-- 新增或修改函数时，同步新增或更新中文说明，确保说明与实现一致。
-- 生成代码的模板也必须包含函数中文说明，避免后续生成的代码遗漏注释。
-
-重点注释：
-
-- 为什么采用该实现。
-- 关键业务流程。
-- 非显而易见的算法逻辑。
-- 数据结构字段意义。
-- 异常处理和边界条件。
-
-不要对显而易见的单行代码进行无意义注释。
-
-系统设计必须保证可解释性：
-
-```text
-Answer
-→ Evidence
-→ Chunk
-→ Page
-→ Document
-```
-
-### 6.2 Git 规则
-
-每次代码发生实际变动后：
-
-1. 不自动执行 `git push`。
-2. 除非用户明确要求，也不要自行提交 Git Commit。
-3. 回答结尾必须提供一条适合本次修改的**中文 Commit Message**，供用户手动提交和推送。
-
-格式示例：
-
-```text
-feat: 完成知识库文档异步解析与索引构建
-```
-
-或：
-
-```text
-fix: 修复扫描 PDF OCR 结果重复入库问题
-```
-
-### 6.3 每次回答必须给出下一步建议
-
-每次完成回答后，必须增加：
-
-```text
-下一步建议：...
-```
-
-建议必须和当前开发顺序直接相关，不泛泛而谈。
-
-### 6.4 每个任务完成后必须提醒人工测试
-
-完成任何功能后，必须明确提醒用户进行手动测试。
-
-例如完成 OCR API 接入后，需要提醒测试：
-
-- API Key 是否有效。
-- 是否能成功调用 OCR API。
-- JPG / PNG 是否能正常识别。
-- 扫描 PDF 是否能逐页处理。
-- 异常或超时是否能正确 Retry。
-- OCR 结果是否能正常进入后续 Chunk / RAG。
-
-完成接口后应给出具体测试命令或测试步骤，不允许只说“请测试一下”。
-
-### 6.5 API 接入规则
-
-每接入一个外部 API，至少验证：
-
-```text
-连接成功
-↓
-鉴权成功
-↓
-最小请求成功
-↓
-返回格式正确
-↓
-业务功能正确
-↓
-异常处理正确
-```
-
-如果没有实际完成测试，不得声称“API 已验证可用”，只能说明“代码已接入，等待人工测试”。
-
-### 6.5.1 环境变量维护规则
-
-每次新增、修改或废弃环境变量时，必须同步维护：
-
-- 本地运行使用的 `.env`。
-- 可提交到仓库的 `.env.example`。
-- 使用说明中涉及该变量的配置文档（例如 `README.md`）。
-
-`.env.example` 不得包含真实密钥、密码或生产连接串；`.env` 必须保持在 Git 忽略规则中。
-
-环境变量文件必须按用途分组并保持固定顺序，而不是在文件末尾零散追加变量。推荐分组顺序：
-
-```text
-应用运行配置
-数据库与缓存
-异步任务
-模型与 LLM
-OCR / 外部服务
-存储与可选功能
-```
-
-每个分组使用简短中文注释说明用途；新增变量应放入对应分组，并在 `.env` 与 `.env.example` 中保持相同的变量名和排列顺序。若变量仅用于某一环境，也应在 `.env.example` 中以空值或安全示例值明确保留，避免部署遗漏。
-
-### 6.5.2 部署与接口文档同步规则
-
-每次变更会影响项目启动、部署、调用或模型运行方式时，必须在同一次修改中同步更新 `README.md`；未同步 README 的变更不得视为完成。
-
-至少包括以下情形：
-
-- 前端或后端的启动命令、启动顺序、端口、环境要求与 Docker Compose 服务。
-- 新增、修改或废弃 API 的路径、方法、请求参数、响应结构、鉴权方式与错误处理。
-- Celery Worker、队列、并发限制、数据库迁移、缓存或其他基础服务的运行方式。
-- Embedding、Reranker、OCR、LLM 等模型或外部服务的下载、加载、部署、配置与硬件要求。
-
-README 中应提供当前可执行的命令、访问地址或调用示例、预期结果，以及使用者需要知道的支持范围和限制；不得把计划中的命令描述为已可用能力。只更新受影响的使用说明，不因完成一个开发阶段而追加阶段总结。
-
-### 6.5.3 文档职责与内容边界
-
-按读者和用途维护文档，不将 README 当作开发记录：
-
-- `README.md` 面向部署者和使用者，是项目说明书：说明项目用途、运行环境、配置、安装部署、启动顺序、接口使用、必要限制及部署故障排查。
-- `AGENTS.md` 面向开发智能体：保存开发规则、模块范围、阶段边界、当前工程基线，以及需要后续开发遵守的实现约定。
-- `docs/DEVELOPMENT_PLAN_CODEX.md` 保存开发路线、阶段目标和验收标准；专题契约或设计文档保存详细技术说明，测试代码维护在 `tests/` 中。
-- 根目录的项目说明文档只保留 `AGENTS.md` 和 `README.md`；开发计划、契约、设计和人工验收文档统一放入 `docs/`，旧计划放入 `docs/archive/` 并标明仅供历史参考。移动文档时同步维护相对链接，不覆盖最新计划；源代码、配置和环境文件不因本规则迁出根目录。
-- 新增或移动文件、目录时，判断是否需要同步 `.gitignore`。`docs/` 中的工程文档必须纳入版本控制，赛题附件、验收素材和本地资料按需忽略，不能使用整目录忽略导致开发规则或验收文档无法提交。
-- 每个阶段做了什么、内部类与字段设计、事务及幂等实现、后续开发计划，不写入 README。需要持续保留的阶段信息简要更新本文件第 7.1 节，不逐次堆积修改日志。
-- README 不包含业务测试脚本、pytest 命令、测试结果统计或开发验收记录；可以保留用于确认服务部署成功的检查，以及必要的 API 调用说明。
-- 当前能力的简短限制仍需在 README 说明，例如“上传成功不代表可检索”，避免误导使用者；不要展开对应阶段的开发过程。
-- 部署与接口发生实际变化时，仍必须遵守第 6.5.2 节同步 README；仅增加内部契约、单元测试或开发约定，且不影响使用方式时，不向 README 追加实现总结。
-
-### 6.6 异步任务规则
-
-耗时入库任务使用 Celery：
-
-- Parser。
-- OCR。
-- Chunk。
-- Embedding。
-- Index。
-- Reindex。
-- 批量评测。
-
-普通在线 RAG 默认同步执行。
-
-Celery 任务要求：
-
-- 可重试。
-- 幂等。
-- 不重复产生 Chunk / Embedding。
-- 失败时记录错误原因。
-
-GPU Worker 默认：
-
-```text
-concurrency = 1
-```
-
-避免 RTX 4060 8GB 环境中多个进程重复加载模型。
-
-### 6.6.1 当前文档任务框架的实现约定
-
-以下约定来自现有框架，扩展 Parser 或后续处理时必须保留；它们不是完整入库能力：
-
-- 原件与 Document 提交后才投递 `process_document` 到 `default_queue`。任务使用晚确认、文档行锁和当前 `processing_task_id` 检查，重复或过期消息不能回退状态、覆盖新任务或重复生成数据。
-- 临时数据库或文件访问错误最多自动重试 3 次，含首次共 4 次，退避为 5、10、20 秒；原件缺失或为空立即失败。失败记录 `error_message`，成功重试清除旧错误。数据库不可用时可能无法持久化失败原因，仍需保留安全的 Worker 日志和任务失败状态，不泄露凭据。
-- 重新投递只接收 `UPLOADED / FAILED`，提交新任务标识并清除旧错误；不能绕过状态限制将其当作 Reindex。旧消息与失败回调不得覆盖新一轮任务。
-- 省略 `parse_mode` 的旧原生任务解析 TXT、Markdown、CSV、DOCX、XLSX、文本型 PDF；图片、旧 Office、演示文稿与需要 OCR 的 PDF 明确要求 MinerU。新调用只有显式选择 `auto` 才按第 6.6.4 节路由。所有成功解析写入 `document_blocks` 后停在 `CHUNKING / awaiting_chunk`，不生成 Chunk、Embedding 或 `READY`。
-- 解析、该文档旧 Block 的整体替换和状态推进在同一文档行锁与数据库事务内完成；失败必须回滚全部写入，再以独立事务记录安全原因。长事务中的 `PARSING` 不保证实时可见。当前代次完成后的重复消息跳过，结果可能为 `skipped`，业务状态以 Document 为准。
-- 同一原件和 Parser 版本使用稳定 Block ID，入库将块列表映射为从 1 开始的 `block_index`；保持文档内序号唯一和正数约束。历史块序号允许空值，不伪造历史阅读顺序；后续查询新解析结果应按 `block_index` 排序。
-- 当前没有事务 Outbox、自动扫描或后台补投器；数据库提交与消息投递并非原子操作。进程中断可能留下已有原件和记录但未投递的文档，应使用已有重新投递入口处理，不能宣称系统会自动补投。
-- 文件系统与数据库也非同一事务。普通写盘或入库失败清理本次文件；提交结果不确定时保留原件，避免误删可能已提交的数据。异常和崩溃恢复不得假设文件与记录天然保持原子一致。
-- 上传按实际内容计算 SHA256、检查大小和基本格式标识，不依赖客户端大小或 MIME 声明；这些检查不是完整格式解析或恶意文件扫描，文本编码留待 Parser 判断。
-- 普通与显式 MinerU 上传均在原 `/documents`、`/mineru/documents` 路径支持多选，保留 multipart `file` 文件数组，不另建 `/batch`。每次最多 50 份，单份原 201/202、多份 200 逐项报告语义不变，每份独立 Document/doc_id、事务及任务，不云端合批。普通入口的可选 Form `parse_mode` 对每份分别生效；省略保持旧 Native。单项失败不撤销其他已提交文件，已知时保留可恢复 doc_id/job_id。提交结果不确定先查已有记录，不盲目重传；数量限制不替代网关总请求体限制。
-- Swagger 文件数组使用本地插件替换为一个原生 `input[type=file][multiple]`，打开窗口后支持单选或一次多选，不允许把逐行 `Add string item` 当作已实现窗口多选。仅包装显式标记的上传数组，普通数组行为不变，固定 Swagger UI 版本并保留 root_path 支持。选择后的名称/大小初检不读取内容、不自动上传、不静默删掉失败文件；服务端仍负责实际内容和去重校验。插件必须保留原生 File 对象与输入顺序，并以实际页面/文件选择事件验收，不能只检查 OpenAPI。
-- CPU Worker 在 Windows 使用线程池仅作开发验证，正式 Linux 环境使用 prefork 并发 2～4；GPU Worker 单进程串行，当前不加载模型。不能把线程池等同于 CPU 密集任务的多进程加速。
-
-### 6.6.2 MinerU Cloud 实现约定与阶段边界
-
-- 仅使用 [MinerU 官方精准解析 API V4](https://mineru.net/apiManage/docs)，不使用轻量 Agent API、不部署本地 MinerU 模型；复杂 PDF、扫描件、图片的 OCR、表格与公式识别统一由 MinerU 承担，不继续接入火山 / 百度 OCR。
-- HTTP 只能放在 `MinerUCloudProvider`；本地原件采用申请批量上传 URL、签名 PUT、批次 GET 流程。对象存储请求不携带 API Token，不设置上传 Content-Type、不跟随重定向。只接受官方 HTTPS 签名资源域名。
-- MinerU 默认 HTTP 客户端固定 `trust_env=False`：API、签名上传及结果下载统一直连，不读取环境或 Windows 系统代理，不自动回退代理。保持 HTTPS 证书校验；该设置不绕过系统 VPN / TUN 路由，不自动修改系统网络。注入客户端仅用于离线测试；不将环境代理可用视为 CDN 已直连可用。
-- Token 只读取本地 `MINERU_API_TOKEN`，使用 SecretStr 遮盖表示；不进入日志、前端、Celery 消息或异常详情，不实现到期跟踪、续期或刷新。上游错误原文和签名链接不得透传。
-- 提交前校验实际签名、OOXML/CFB 主部件、Hash 和 200 MB 大小；PDF 可提前验证 200 页，Office 无可靠本地页数，交由平台最终校验。未知页数返回空值，不计入优先页估计，不伪造为 1 或 Sheet/Slide 数；按文件数限流不变。批量申请最多 50 文件，应用上传限制取更小值。
-- Redis Lua 原子共享频控：提交按文件数计量、查询按次数计量；默认平台上限为 50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9。日额度使用保守的滚动 24 小时；1000 优先页按 UTC 日估计，只观测不硬拒绝。相同账户的所有 Worker 必须使用同一 Redis 与命名空间，Redis 故障时关闭云端调用。
-- `submit_mineru_parse / check_mineru_result` 是 CPU 短任务。只查一次，未完成通过 countdown 再投递；禁止 while/sleep 等待。已确认临时错误有限指数退避加抖动，并尊重 Retry-After；永久错误立即记录 FAILED，总等待时间有上限。
-- `document_parse_jobs` 保存外部六种状态、batch / data / trace 标识、参数快照、重试、错误及提交检查点；Document 保持供应商无关状态。`task_id` 为本地处理代次，不是外部单文件 task_id，也不表示整份文档的 Celery 执行结果。
-- 文档行锁、活动解析身份部分唯一索引、当前代次检查和稳定 Block ID 共同保证幂等。POST 前保存申请意图、PUT 前保存 batch，上传恢复沿用同一 batch。旧显式入口保留已确认远端临时失败后重建 batch 的规则；11B.1 路由任务即使远端明确临时失败也不自动追加批次，由管理员决定。POST 响应丢失安全失败，不盲目重复申请，不宣称跨数据库与云端绝对 exactly-once。
-- 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留正文原序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
-- 阅读顺序仅允许按可选旧版 `layout.json` 的父块 `index` 恢复明确的 `header / footer`：同页类型与 bbox 必须全量唯一关联、索引唯一且非负、位置符合页边界，候选结果不能改变任何正文项的相对顺序。bbox 仅用于关联与保护条件，禁止按 y 全局排序。缺少 bbox / 可信索引、关联歧义、多栏并排、纵向回跳或超量页保留整页原序；不宣称能够可靠重建任意多栏布局。结构块保持整体，原 page / bbox / block_type / source 不变；ID 始终基于原数组位置，最终顺序写入 block_index。可选顺序元数据失败不能替代或绕过正文校验。
-- 上游漏识别、公式名称误识别及普通正文被归入 table_footnote 属于解析质量边界；不得按文件名、验收标记或具体字符串补 OCR、修公式名称、强行拆表。公式语义标准化留待阶段 27。旧 CHUNKING 结果不因更新 Adapter 自动重写；终态失败任务也不自动恢复，重新提交非活动 FAILED 文档可能创建新批次并消耗额度。
-- Block 替换与 Document=CHUNKING、job=done 在同一事务内提交；失败回滚所有块修改，再独立记录安全错误。full.md 仅供供应商平台人工核对，当前未新增 Admin Markdown 预览接口。
-- 阶段 10 显式 MinerU 上传 / 已有文档提交入口保持兼容；重复活动请求仅恢复同一任务，完成文档拒绝重解析。11B.1 可在普通上传选择路由，但仍没有 Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
-- 六种 Office 的云解析可由显式入口或 11B.1 路由提交；page_idx+1 为转换后的逻辑页，bbox 固定为空，不套用原件页几何。Office 保留 content_list 原序与原数组位置 ID，不使用 PDF 页边界顺序恢复。限流、Token、短任务、事务幂等设计不变。
-- 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
-
-### 6.6.3 业务日志约定
-
-- 每次新增或修改业务接口、服务及异步任务时，必须在同一次修改中同步新增或更新关键运行过程和结果日志，不能只实现业务功能而遗漏日志。复用现有业务日志设施，记录资源标识、状态、结果摘要及耗时，覆盖适用的成功、跳过、重试和失败分支；不得泄露敏感信息或记录文件及结果正文，不得影响业务执行结果，并补充必要的日志测试。仅修改文档、注释或测试且不改变业务行为时，无需新增运行日志。
-- 现有接口、上传及解析链路使用标准库 `dkf.business` Logger 输出 UTF-8 中文可读白名单摘要，不输出整行 JSON；终端与每日合并文件并行，API 与 Worker 共用 `knowledge-service-YYYY-MM-DD.log`，每个本机日期一份，不按 PID、角色或大小拆文件。时间与文件日期均为事件发生时的本机时区，时间保留毫秒及 UTC 偏移；保留 API/Worker 来源、pid、事件码和关联编号，摘要字段使用固定顺序与中文标签，字符串需转义分隔符并清理控制字符，不能伪造日志行或字段。重启追加当天文件，不预建空日志，不改写历史 JSON、不自动删除/合并历史文件。不接管 Uvicorn、Celery 或 HTTP 库原始日志；`LOG_*` 按环境规则同步维护，日志不提交。旧容量/备份变量已废弃。
-- HTTP 日志使用路由模板、状态码、耗时和服务生成的 request_id，不记录查询串、请求头或正文；Celery 消息仅额外传递请求编号。线程/任务结束恢复 ContextVar，prefork 子进程重建处理器；同目录固定锁文件串行化整行追加，锁描述符每次独立打开/关闭。锁等待最多 1 秒，失败安全降级终端；不可共享普通多进程 RotatingFileHandler，不在运行中删除锁文件，不宣称网络共享盘或跨主机安全。
-- 上传、投递、解析、校验、结果下载、落库、重试/失败分开记录；只在数据库事务提交后记 `parse.persisted / mineru.blocks_persisted`，日志不得新增事务、改变任务结果或吞掉业务异常。解析落库不代表 OCR 内容质量正确。
-- 禁止记录 Token、密码、连接串、签名 URL、上游错误原文、文件及结果正文；错误以安全分类码/类型记录，不传任意异常对象。日志含文件名和资源标识，需限制目录访问；旧消息无 request_id 时仍按 doc_id/job_id 关联。日志不是数据库审计、补投器或结果缓存。
-- 运维配置见 README；事件契约与人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。这项可观测性补充不推进阶段 11B 或后续阶段。
-
-### 6.6.4 完整性优先 Router v1（11B.1）
-
-- 外部只接收 `auto / native / mineru`；普通上传 Form、重新投递 Query 可选，省略保留旧 Native 行为，不能让旧调用突然付费。显式 MinerU 旧入口不变，内部 `hybrid_bundle` 只预留名字，不实现或返回该策略。
-- 预检与路由在 Worker 中只读执行。TXT/CSV、无附件引用 MD、简单 DOCX/XLSX/PDF走 Native；复杂 DOCX/PDF、图片、旧 Office、PPT/PPTX 整份 MinerU。复杂 XLSX 未有真实 A/B 结论先 review，MD 缺附件也 review，不抓 URL、不把 MD/CSV 发送 MinerU。显式 Native 对照结果只能声称 Native 范围，不证明视觉完整。
-- DOCX 检查 OOXML 图片、绘图、数学、文本框、图表、嵌入对象、辅助内容和已知未覆盖正文结构；XLSX 检查媒体、绘图、图表、嵌入、VML 和外链。PDF 按页检查文本、图片面积、绘图、批注、多栏/公式风险；小 logo 阈值配置化。超预检资源上限 review，坏原件安全失败，不以部分预检放行。
-- RouteDecision 固定版本、模式、格式、策略、白名单理由、结构计数/物理页摘要和 fallback_count；禁止正文、地址、密钥或虚构 Router confidence。完整决策进入任务结果，云任务复用 parse_options 内 `_route_decision` 元数据，不参与原供应商参数 Hash、不透传官方请求，不新增业务 Schema。
-- auto Native 仅在明确 OCRRequiredError/CompletenessError 时、受支持云格式最多回退一次；非法编码/损坏/普通 ParserError 不回退。云失败不得降 Native，不自动为路由任务追加第二批。预检和 Guard 是结构风险保护，不能证明任意版式、OCR、公式语义全部正确。
-- Guard 在任何块替换前检查有效正文、非空 PDF 物理页覆盖、XLSX 有效 Sheet 数、来源、逻辑页及 Office 空 bbox；不得改页码、排序、拆表/公式或补 Marker。现有 Parser、Adapter、Block ID 算法与阅读顺序规则保持不变。
-- Native 解析、Guard、整体替换和 CHUNKING 同事务。云交接仅当前文档行锁和 Native 代次可从 PARSING 创建检查点，分配新云代次使旧消息/失败回调失效，提交后才投递现有 MinerU 短任务。队列确认失败保留活动 Job，已有 `/mineru` 恢复；不宣称数据库与 Broker 原子或自动补投。
-- review 不新增数据库状态：Document=FAILED、安全原因前缀 ROUTER_REVIEW，任务结果 status=review，不写新块、不调云。记录最初 Celery task_id；云代次 task_id 不等同短任务结果 ID。路由成功交接不是解析成功，最终仍查 Document 与 Parse Job。
-- 费用摘要以 doc_id/job_id 关联：初始计划为 1 份源文件、尚未提交为 0；确认 batch 后记录一次云文件提交。重试/重复日志不应直接累加为真实配额，提交不确定仍以平台核对。真实 XLSX 对照和路由人工验收见 [Router 验收说明](docs/PARSER_ROUTER.md)。不开发 11B.2、Parse Cache 或后续阶段。
-
-### 6.7 数据和证据规则
-
-每个 Chunk 必须至少保留：
-
-```text
-kb_id
-doc_id
-chunk_id
-page_start
-page_end
-section
-text
-```
-
-回答不得生成无法追溯的来源。
-
-证据不足时应明确返回不足状态，不允许让模型自行补全事实。
-
-### 6.7.1 统一 Parser 契约
-
-- 所有原生 Parser 使用 `ParsedDocument / ParsedBlock`，继承 `BaseParser` 并实现 `_parse`；调用方通过公共 `parse` 入口校验结果，文档 ID、原始文件名和文件类型必须与输入一致。异步云端 Provider 使用 ResultAdapter 输出同一契约，不伪装为同步本地 Parser。
-- 数据契约独立于数据库、Celery 和 RAG，不写库、不调度任务、不生成 Chunk、向量或答案；详细字段、序列化和验收步骤见 [Parser 契约说明](docs/PARSER_CONTRACT.md)，无需在 README 重复说明内部模型。
-- 块 ID 必须由 Parser 显式提供且在同一文档内唯一，不在契约中随机生成；当前原生 Parser 共用基于文档、版本及块位置的 UUID5 标识。后续 Parser 继续保留稳定标识、原文顺序及持久化事务幂等。
-- `page` 与数据库非空约束一致，从 1 开始；Native TXT/MD/CSV/DOCX/XLSX 使用逻辑页 1，Cloud Office 使用转换后的逻辑页，均不得当作 Office 原件排版页码。PDF 使用物理页码，证据展示必须区分页码语义。
-- FileType 统一为十三种格式，上传与响应共用定义。OOXML 检查对应主部件且无类型混淆，旧 DOC/XLS/PPT 检查 OLE 主流。CSV 使用标准库严格读取等宽行；XLSX 使用 openpyxl 只读提取，每个非空 Sheet 一块，section 为名称，保留公式不执行。Native 不声称已解析 XLSX 图片、图表、SmartArt 或绘图，也不自动转云端。
-- `bbox` 为原始页面坐标数组 `[x0, y0, x1, y1]` 或空值，PDF 使用点数、图片使用像素；未知位置或置信度不能伪造。空块集合不代表解析、OCR 或知识库入库成功。
-
----
-
-## 7. 开发顺序
-
-以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.7 · 完整性优先路由）为最新路线；历史计划不作为开发依据，不覆盖第 5.1 节 Windows 服务约束。阶段 1～11A 现有代码作为回归基线，不重新实现；依用户本次指令只实施 11B.1，复杂 XLSX 云解析完整性仍需专项真实对照：
-
-```text
-01～09. 已有 FastAPI、基础服务、数据模型、管理员 API、上传、异步入口与原生 Parser
-10. MinerU Cloud Provider（已完成真实 API 人工验收）
-11A. 多格式文档支持扩展（已有工程基线）
-11B.1. Whole-document Router v1（当前；等待真实路由验收）
-11B.2. Selective Hybrid（仅真实对照证明必要后另行确认）
-12. Parse Cache
-13. Chunk
-14. BGE-M3 Embedding
-15. pgvector 索引入库
-16. 预置知识库批量导入
-17. Dense Retrieval
-18. 单文档 Retrieval
-19. BM25
-20. Hybrid Retrieval
-21. Reranker
-22. DeepSeek RAG
-23. Citation / Evidence
-24. Knowledge Query API
-25. Admin 文档管理完善
-26. 动态增量入库
-27. 公式语义结构化
-28. 公式参数识别与绑定
-29. 公式安全计算
-30. Knowledge Agent
-31～36. 自动测试、正式评测与性能记录
-37. 独立 Demo
-38. Knowledge Service 独立验收
-```
-
-不得为了提前展示 Agent 而跳过底层 Knowledge Base 能力。
-
-### 7.1 当前工程基线与阶段边界
-
-以下阶段编号沿用用户任务及开发计划，不替换上面的总体开发优先级。仅记录后续开发需要的当前基线，不是基础服务已安装、外部 API 已验证或人工验收已通过的声明；有变化时更新对应条目，不追加逐次开发日志。
-
-| 阶段 | 当前工程基线 |
+| 服务 | 固定环境 |
 |---|---|
-| 0～3：基础设施 | Python 3.11 工程、FastAPI 健康接口、基础服务连接配置、Celery 双队列和加法任务已建立；系统软件由用户手动管理。 |
-| 4：数据模型 | 已有知识库、文档、解析块和 Chunk 模型及迁移；Embedding 列为 `vector(1024)`。应用启动不自动迁移、安装扩展或创建业务数据。 |
-| 5：管理员接口 | 已有知识库创建、列表、详情及文档列表；当前不实现复杂 RBAC，也未提供管理员鉴权。 |
-| 6：上传与存储 | 保留上传事务与 Hash 去重；11A 兼容扩展为十三种文件类型。原始文件名入库，磁盘使用文档 UUID 和小写扩展名，上传不等于解析完成。 |
-| 7：异步入口 | `0002_document_tasks` 增加可空且唯一的任务标识；已建立提交、状态查询、重新投递及重试幂等框架，具体处理步骤由后续 Parser 扩展。 |
-| 8：统一解析结构 | 已建立 `ParsedDocument / ParsedBlock`、Parser 公共校验入口及独立契约测试；契约不耦合数据库、Celery、RAG 或模型部署。 |
-| 9：原生文本解析 | TXT、Markdown、DOCX、文本型 PDF 输出统一 Block，PDF 保留物理页码，其他格式使用逻辑页 1；`0003_block_order` 增加块顺序及约束。任务事务性落库后停在 `CHUNKING / awaiting_chunk`；不执行 OCR、Chunk、Embedding 或 RAG。 |
-| 10：MinerU Cloud | 官方 V4 主链路及 `0004_mineru_jobs` 已完成图片、扫描、表格、公式与页边界顺序的真实 API 人工验收；事务写块后停在 CHUNKING，仍保留供应商解析质量边界。 |
-| 11A：多格式扩展 | CSV/XLSX Native、十三种 FileType、OOXML/OLE 校验及六种 Office 显式 MinerU 支持已建立；Office 使用逻辑页与空 bbox。最新计划已有真实 Office 质量记录，XLSX 云解析仍需独立 A/B，不从 XLS 类推。 |
-| 11B.1：整份路由 | 已有只读预检、可解释整份 Native/MinerU/review 决策、一次明确完整性回退及落库 Guard；普通接口可选 parse_mode，旧默认 Native 不变。复杂 XLSX 保守 review，无 Hybrid；真实路由验收仍待用户完成。 |
+| PostgreSQL | Windows 原生 17，`127.0.0.1:5432`，数据库 `dkf_agent`、用户 `dkf_user`，通过 `DATABASE_URL` 连接 |
+| pgvector | VS 2022 Build Tools **x64 C++** 编译，禁止 x86；`PGROOT=C:\Program Files\PostgreSQL\17`，用户在项目库启用 `CREATE EXTENSION vector;` 并查询 `pg_extension` |
+| Redis | Windows 本地后台服务，`127.0.0.1:6379`、`REDIS_URL=redis://127.0.0.1:6379/0`；已有 5.0.14.1 仅用于开发，升级须核对兼容性 |
 
-当前只实施阶段 11B.1；真实 XLSX A/B 和整份路由人工验收后再由用户决定是否需要 11B.2，不自动启动 Hybrid。阶段 12 及以后编号不变，不提前开发 Parse Cache、Chunk、Embedding、RAG，不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+不得自动安装、升级、编译基础服务或修改系统服务，不自动创建 PostgreSQL/Redis 的 `docker-compose.yml`，不恢复 Docker/WSL 部署；应用只连接现有服务。测试 Redis 前先 `Get-Service Redis` 确认 Running（按实际服务名）；连接失败先查服务、绑定地址/端口、6379 监听、`redis-cli ping` 的 PONG，最后核对应用/Broker/Backend URL，不直接改 Python 代码。
 
----
+## 3. 开发与维护规则
 
-## 8. Knowledge Agent 对外协议
+### 中文说明与安全
 
-最终向其他 Agent 暴露稳定结构化接口：
+- 新增或修改代码必须有适量中文注释；**每个函数都要中文说明**。Python 使用函数体开头的 docstring，其他语言使用函数注释；包含异步函数、方法、辅助/嵌套函数、测试、迁移及代码模板。
+- 说明用途，并按复杂度补充参数、返回值、副作用、事务、异常及边界；修改实现同步更新说明，不写无意义逐行注释。
+- 保留用户已有修改，不擅自扩大范围。真实密钥、密码、连接串、签名 URL、文档正文和上游错误原文不得进入日志、前端、Celery 消息或异常详情。
 
-```json
-{
-  "status": "success",
-  "answer": "...",
-  "entities": {},
-  "evidence": [
-    {
-      "doc_id": "...",
-      "file_name": "...",
-      "page": 1,
-      "chunk_id": "...",
-      "text": "...",
-      "score": 0.0
-    }
-  ],
-  "formula_results": []
-}
-```
+### 配置、文档与 Git
 
-Knowledge Service 的内部实现变化不应影响上层 Agent。
+- 新增、修改或废弃环境变量，必须同步 `.env`、`.env.example` 及相关使用文档。`.env` 保持忽略，示例只含安全值；两份文件变量名、顺序一致，按用途分组并加中文说明，不零散追加。
+- 分组顺序：应用运行 → 数据库与缓存 → 异步任务 → 模型与 LLM → OCR/外部服务 → 存储与可选功能。
+- 启动、部署、API 路径/参数/响应/错误、Worker/迁移、模型下载/加载或配置变化时，**同次更新 README**；给出可执行命令、地址和必要限制，不把计划当成已实现。
+- README 是用户说明书，只保留用途、环境、配置、部署、启动、接口和故障排查；不放阶段总结、内部设计、业务测试脚本、pytest 命令或验收统计。
+- AGENTS 只保留开发规则、关键约束与简短当前基线，不追加逐次开发记录。详细路线、契约、设计与人工验收放 `docs/`，测试代码放 `tests/`；根目录说明文档仅保留 README/AGENTS，旧计划放 `docs/archive/`。
+- 新增或移动文件/目录时判断是否更新 `.gitignore`；工程文档必须可提交，素材和本地资料按需忽略，移动文档同步修复链接。源代码与配置不因文档规则迁出根目录。
+- 不自动提交或 `git push`，除非用户明确要求；实际变更后提供中文 Commit Message。
+- 用户可见的本地文件必须用可点击 Markdown 链接：正斜杠绝对路径以 `/D:/` 等驱动器开头，含空格的目标用尖括号包裹，不使用反斜杠或裸路径。
 
----
+### 日志与测试
 
-## 9. 任务完成后的回答格式要求
+- 每次新增/修改业务接口、服务、异步任务，同次维护关键过程和结果日志及必要测试，覆盖成功、跳过、重试、失败；仅改文档/注释/测试且业务不变时无需新增运行日志。
+- 复用 `dkf.business` 的 UTF-8 中文可读白名单摘要，记录资源标识、状态、数量与耗时；API/Worker 共用本地 `LOG_DIR`，每天仅一份 `knowledge-service-YYYY-MM-DD.log`，不输出整行 JSON，不按 PID/角色/大小拆分。
+- HTTP 只记录路由模板，不记请求头、查询串或正文；恢复请求/任务上下文。落库成功日志必须在事务提交后记录；日志失败安全降级，不改变业务结果。
+- 保留同目录固定锁文件、多进程整行追加与最多 1 秒锁等待；运行中不删锁，不用普通多进程 RotatingFileHandler，不保证共享盘/跨主机安全，不自动删除或合并历史日志。
+- 修改前检查现有实现和测试，修改后做相应自动验证，保持阶段 1～11A 回归；明确未运行或未真实验证的部分。
+- 外部 API 必须区分 Mock 与真实验收，逐项验证连接、鉴权、最小请求、返回结构、业务及异常处理；未经真实测试不得声称 API 可用。
 
-完成代码任务后，回复至少包含：
+## 4. 核心实现约束
 
-```text
-已完成：
-- ...
+以下为必须保留的底线；修改对应模块前，必须阅读第 5 节的专题文档。
 
-需要你手动测试：
-1. ...
-2. ...
-3. ...
+### 上传、任务与持久化
 
-建议 Commit Message：
-feat: ...
+- 按实际内容验证大小、SHA256 和格式，OOXML 校验对应主部件、旧 Office 校验 OLE 主流，不只看后缀/MIME；这些检查不等于完整解析或恶意文件扫描。
+- 原上传接口的 multipart `file` 支持 1～50 份，每份独立 doc_id、原件、事务和任务；单份保留 201/202，多份 200 返回逐项报告，不新增 `/batch` 或自动云端合批。单项失败不撤销其他成功项。
+- Swagger 使用一个原生 multiple 文件控件，窗口内单选/多选，不用 Add string item 冒充；保留 File 对象、输入顺序、固定 UI 版本及 root_path。选择后只初检，不读正文、不自动上传、不静默删文件，服务端最终校验。
+- 原件与 Document 提交后再投递 `default_queue`。耗时入库走 Celery，晚确认、文档行锁、当前 `processing_task_id` 和稳定 ID 保证幂等；旧消息/回调不能覆盖新代次或重复写块。
+- Native 临时数据库/文件错误最多重试 3 次（总共 4 次），退避 5/10/20 秒；原件缺失/空文件立即失败，记录安全原因，成功重试清旧错误。
+- 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
+- `/process` 仅重投 UPLOADED/FAILED，不作为 Reindex；活动云任务通过已有 `/mineru` 恢复，完成状态拒绝重解析。数据库/文件/消息/云端非原子，无 Outbox、后台扫描或自动补投；提交不确定先查记录并保留原件，不盲目重传或宣称 exactly-once。
+- Windows CPU threads 仅用于开发；正式 Linux CPU prefork 并发 2～4，GPU 单进程并发 1（当前不加载模型），在线 RAG 默认同步。
 
-下一步建议：
-...
-```
+### Parser、证据与质量
 
-如果当前任务只是分析或设计、不涉及代码变更，则可以省略 Commit Message，但仍需给出下一步建议。
+- Native 继承 BaseParser，通过公共 `parse` 校验 ParsedDocument/ParsedBlock 及输入身份；契约独立于数据库、Celery、RAG，云 Provider 通过 Adapter 输出同一结构。
+- FileType 共十三种；CSV 使用标准 csv 与严格解码，XLSX 按 Sheet/单元格原序、section=Sheet 名、保留公式不执行。Native 不宣称包含 Office 图片/图表/绘图，也不实现旧 Office/PPTX Native。
+- 稳定 Block ID 由 Parser 显式提供，文档内唯一；新 `block_index` 从 1 开始且唯一，历史空序号不伪造，查询显式按序号排序。空结果不能认定成功。
+- PDF 物理页码从 1 开始，bbox 为点数；图片第 1 页、像素 bbox。Native TXT/MD/CSV/DOCX/XLSX 为逻辑页 1，Cloud Office 为转换后逻辑页、bbox=NULL；未知页数、位置或置信度不伪造。
+- 不按文件名、验收标记或具体字符串补 OCR、改公式名称或拆表；质量差异记录为边界，公式语义标准化留至阶段 27。
+- 后续 Evidence 必须可追溯 `Answer → Evidence → Chunk → Page → Document`；Chunk 至少保留 kb_id/doc_id/chunk_id/page_start/page_end/section/text。缺证据明确返回不足，缺公式参数返回 need_variables，不猜测、不用 `eval()`，计算使用 SymPy 等安全方式。最终对外协议按开发计划，内部变更不破坏上层接口。
+
+### MinerU Cloud
+
+- 仅官方精准解析 API V4，不用轻量 Agent API、本地 MinerU、火山/百度 OCR；HTTP 只在 MinerUCloudProvider，申请链接 → 签名 PUT → 批次 GET。
+- 固定 `trust_env=False` 直连 API/上传/下载，无代理回退、保持 TLS 校验，不绕过 VPN/TUN 或修改系统网络。对象存储不带 API Token、不设上传 Content-Type、不跟随重定向，只接受官方 HTTPS 签名域名。
+- Token 仅本地 `MINERU_API_TOKEN`，SecretStr 遮盖、不自动刷新。校验 Hash、实际格式及大小：平台 200 MB/200 页，应用取更小限制，Office 未知页数由平台检查，不猜 Sheet/Slide 页数。
+- 保留 Redis Lua 共享原子限流：50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9；滚动 24 小时日额度，1000 优先页仅按 UTC 日观测。按文件/查询数计量，同账户共用 Redis/命名空间，Redis 故障关闭云调用。
+- submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
+- POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
+- 唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
+
+### 整份 Router v1
+
+- 外部仅 `auto / native / mineru`；普通上传 Form、重投 Query 可选，省略仍旧 Native，显式 MinerU 旧入口兼容，不让旧调用突然付费。不实现/返回 hybrid_bundle。
+- Worker 只读预检：简单文档 Native；复杂 DOCX/PDF、图片、旧 Office、PPT/PPTX 整份 MinerU。复杂 XLSX 未有真实 A/B 结论先 review，MD 缺附件 review，不抓 URL、不把 MD/CSV 发云；超预检上限 review，坏原件安全失败。
+- RouteDecision 版本固定，只含模式/格式/策略、白名单理由、结构计数、页摘要和回退次数，不含正文、地址、凭据或虚构置信度；任务结果与 job 的 `_route_decision` 保存，不参与供应商参数 Hash、不透传 API。
+- auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。云失败不降 Native，路由任务不追加第二批；旧显式入口的已确认临时失败重建规则保持兼容。
+- Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
+- 云交接在当前行锁/代次下分配新云代次，提交后投递；review 为 FAILED + 安全 ROUTER_REVIEW，结果 status=review，无新 Block/云调用。交接成功不等于解析成功，保存最初 Celery ID并查 Document/Parse Job。
+- 云费用按 doc_id/job_id/batch_id 去重：提交前实际 0、计划 1，确认 batch 后计 1；不直接累加重复日志，提交不确定以平台核对。
+
+## 5. 专题文档与交付要求
+
+| 修改范围 | 必须阅读 |
+|---|---|
+| 路线、阶段验收、最终协议 | [开发计划](docs/DEVELOPMENT_PLAN_CODEX.md) |
+| Parser、页码/坐标、持久化与回归 | [Parser 契约](docs/PARSER_CONTRACT.md) |
+| 云接口、限流、检查点、顺序与真实验收 | [MinerU Cloud](docs/MINERU_CLOUD.md) |
+| 预检、决策、Guard、XLSX 对照 | [Parser Router](docs/PARSER_ROUTER.md) |
+| 日志事件、脱敏、并发写入与验收 | [业务日志](docs/BUSINESS_LOGGING.md) |
+| 部署与接口使用 | [README](README.md) |
+
+完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

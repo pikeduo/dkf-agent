@@ -1,14 +1,15 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.7 · 完整性优先 Router + Selective Hybrid Visual + LlamaIndex）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.8 · 完整性优先 Router + Selective Hybrid Visual + LlamaIndex + LangGraph）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度：**阶段 1～11A 工程基线保留；依用户当前指令实施 11B.1 整份路由，真实路由及 XLSX A/B 验收仍待完成。**
+> 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
-> 当前新增目标：保留多格式与混合内容测试基线，只实施 11B.1 整份文档路由；11B.2 仅在真实对照证明必要时另行确认，对 XLSX 等少数格式评估“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不提前推进当前 11B.1。
+> Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
+> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -179,8 +180,9 @@ Response Synthesis / 生成融合
 | MinerU Model | `vlm`（默认） |
 | Sparse Retrieval | BM25 |
 | RAG Orchestration | LlamaIndex（Retriever / Query Fusion / Node Postprocessor / Response Synthesis） |
+| Agent Workflow | LangGraph |
+| LLM / Tool Integration | LangChain（按需：Prompt / Tool / Runnable / Message / Model Adapter） |
 | Formula | SymPy |
-| Agent / Workflow | LangGraph / LangChain |
 | Test | pytest |
 | Local Infrastructure | PostgreSQL 17 + pgvector（Windows 原生）/ Redis（Windows 本地服务） |
 
@@ -248,6 +250,12 @@ dkf-agent/
 │   │   └── formula/
 │   ├── tasks/
 │   └── agents/
+│       └── knowledge/             # 阶段 30 正式建立
+│           ├── state.py           # LangGraph AgentState
+│           ├── graph.py           # StateGraph / conditional edges
+│           ├── nodes.py           # 节点实现，调用稳定 Service / Tool
+│           ├── tools.py           # LangChain StructuredTool 等按需适配
+│           └── prompts.py         # 受控 Prompt 模板
 │
 ├── alembic/
 ├── scripts/
@@ -1051,7 +1059,7 @@ Block 入库
 
 ---
 
-# 17A. 阶段 11A：多格式文档支持扩展（已有基线）
+# 17A. 阶段 11A：多格式文档支持扩展（当前阶段）
 
 ## 目标
 
@@ -2995,12 +3003,19 @@ variable_sources
 
 ---
 
-# 36. 阶段 30：Knowledge Agent
+# 36. 阶段 30：Knowledge Agent（LangGraph）
 
 ## 目标
-底层稳定后再封装 Agent。
 
-Tool：
+在 Retrieval、RAG、Citation 和 Formula Service 已稳定后，使用 **LangGraph** 正式封装 Knowledge Agent。
+
+LangGraph 只负责任务状态、条件分支、节点编排、错误传播和可观察工作流；不得重新实现 Parse / Chunk / Embedding / Retrieval。
+
+LangChain 仅作为辅助集成层，按需使用 Prompt、Tool、Runnable、Message、Model Adapter 等组件；**不单独建立 LangChain Agent Runtime，不再维护第二套 Retriever / Vector Store / RAG Chain。**
+
+## Tool
+
+Knowledge Agent 只调用已经稳定的业务 Tool / Service：
 
 ```text
 search_knowledge_base
@@ -3009,7 +3024,118 @@ extract_formula
 calculate_formula
 ```
 
-统一输出：
+Tool 必须是薄适配层：
+
+```text
+LangGraph Node
+→ LangChain StructuredTool / 项目 Tool Adapter（按需）
+→ Knowledge Search / Query / Formula Service
+→ 项目内部统一结果
+```
+
+禁止 Tool 内再次直接实现 pgvector SQL、BM25、MinerU HTTP、DeepSeek HTTP 或公式计算逻辑。
+
+## Agent State
+
+建议第一版保持显式、可序列化状态，例如：
+
+```text
+question
+kb_id
+doc_ids
+intent
+evidence
+answer
+formula_results
+insufficient_evidence
+status
+error_code
+step_count
+```
+
+要求：
+
+- `evidence` 继续使用项目已有 Citation / Evidence 契约，不替换成 LangGraph / LangChain 私有对象。
+- `kb_id / doc_ids` 必须贯穿 Tool 调用，避免跨知识库污染。
+- `step_count` / 最大步数必须配置化，禁止无限 Agent 循环。
+- Tool 异常转换为结构化 Agent 状态，不把原始异常堆栈、密钥或敏感参数暴露给前端。
+
+## 第一版 Graph
+
+第一版保持确定、可测试，不追求开放式自主循环：
+
+```text
+START
+  ↓
+validate_input
+  ↓
+route_request
+  ├─ knowledge_search / knowledge_query
+  │        ↓
+  │   synthesize_or_return
+  │
+  └─ formula_request
+           ↓
+      extract_formula
+           ↓
+      calculate_formula
+           ↓
+      synthesize_or_return
+  ↓
+finalize_response
+  ↓
+END
+```
+
+`route_request` 可以使用受控 LLM 结构化输出或显式规则，但必须：
+
+- 输出固定枚举，不允许自由生成节点名。
+- 有默认安全分支。
+- 不因为模型一次判断失败进入无限重试。
+- 对“只需要知识检索”的普通问答，不额外执行公式节点。
+
+## LangChain 边界
+
+允许按需使用：
+
+```text
+PromptTemplate / ChatPromptTemplate
+StructuredTool / BaseTool
+Runnable
+Message 类型
+LLM / ChatModel Adapter
+结构化输出辅助
+```
+
+不允许为了“接入 LangChain”而新增：
+
+```text
+第二套 VectorStore
+第二套 Retriever
+第二套 Chunk / Embedding Pipeline
+LangChain AgentExecutor 与 LangGraph 双 Agent Runtime
+独立的 LangChain RAG Chain 覆盖 LlamaIndex 主链路
+```
+
+## 与 LlamaIndex 的职责边界
+
+```text
+LangGraph
+= Agent State / Workflow / Conditional Routing / Tool Orchestration
+
+LlamaIndex
+= Knowledge RAG Retrieval / Fusion / Rerank / Response Synthesis
+
+LangChain
+= Prompt / Tool / Runnable / Message / Model Adapter 辅助层
+
+DKF-Agent Service
+= Parse / Chunk / Embedding / DB / Evidence / Formula 的业务真相来源
+```
+
+LangGraph Node 可以调用 `query_knowledge_base`，而该接口内部可以由 LlamaIndex 组织 RAG；LangGraph 不直接操作 LlamaIndex Node、pgvector 表或 Retriever 细节。
+
+## 统一输出
 
 ```json
 {
@@ -3017,12 +3143,54 @@ calculate_formula
   "answer": "...",
   "entities": {},
   "evidence": [],
-  "formula_results": []
+  "formula_results": [],
+  "insufficient_evidence": false
 }
 ```
 
+未来 Coordinator 只依赖这一稳定协议，不依赖 LangGraph / LangChain / LlamaIndex 内部类型。
+
+## 可观察性
+
+至少记录：
+
+```text
+agent_run_id
+selected_route
+tool_name
+tool_duration_ms
+step_count
+final_status
+```
+
+日志不得记录 API Key、MinerU Token、签名 URL 或完整敏感请求。
+
+## 自动测试
+
+至少覆盖：
+
+```text
+普通知识问答路径
+指定 doc_ids 路径
+公式识别 + 计算路径
+证据不足路径
+Tool 异常路径
+非法 route 输出安全兜底
+最大步数保护
+Evidence / Citation 不丢失
+LangGraph State 可序列化
+LangChain Tool Adapter 不绕过业务 Service
+```
+
+所有 Graph 测试优先使用 Stub / Mock Service，不能为了测试 Agent 重复调用真实 MinerU 或大量外部 LLM。
+
 ## 完成标准
-未来 Coordinator 只依赖这一稳定协议。
+
+- Knowledge Agent 使用 LangGraph StateGraph 跑通稳定工作流。
+- 普通知识问答、公式任务、证据不足与 Tool 异常都有确定路径。
+- LangChain 仅作为辅助适配组件，没有产生第二套 RAG / Agent Runtime。
+- Evidence / Citation / Formula 来源保持项目原始可追溯语义。
+- 未来 Coordinator 只依赖 Knowledge Agent 的稳定输入输出协议。
 
 ---
 
@@ -3039,6 +3207,8 @@ Retrieval Test
 Query Fusion Test
 Citation Test
 Formula Test
+LangGraph Knowledge Agent Test
+LangChain Tool / Prompt Adapter Test
 ```
 
 不追求一开始高覆盖率，优先保证关键链路。
@@ -3327,6 +3497,8 @@ Demo 5：
 [ ] 公式识别
 [ ] 参数识别
 [ ] SymPy 计算
+[ ] LangGraph Knowledge Agent（状态机 / 条件路由 / Tool 编排）
+[ ] LangChain 辅助集成（不建立第二套 RAG / Agent Runtime）
 [ ] 10+ 正式 RAG 测试
 [ ] 性能数据
 [ ] Demo 可运行
@@ -3350,11 +3522,18 @@ Knowledge Agent
 未来：
 
 ```text
-Coordinator Agent
+Coordinator Agent（未来）
         │
-        │ LangGraph / Workflow
+        │ LangGraph Workflow
         ↓
-Knowledge Agent
+Knowledge Agent（阶段 30）
+        │
+        ├─ LangGraph State / Conditional Routing / Tool Orchestration
+        │
+        ├─ LangChain 辅助组件（按需）
+        │   ├─ PromptTemplate
+        │   ├─ StructuredTool
+        │   └─ Runnable / Message / Model Adapter
         │
         ↓
 Knowledge Base Service
@@ -3366,15 +3545,18 @@ Knowledge Base Service
         │   ├─ BGE Reranker Adapter
         │   └─ DeepSeek Response Synthesis
         │
+        ├─ Formula Service
+        │
         └─ PostgreSQL + pgvector + document_chunks
 ```
 
 职责边界固定为：
 
 ```text
-LangGraph = Agent / Workflow 层
+LangGraph = Agent State / Workflow / Tool Orchestration 层
 LlamaIndex = Knowledge RAG 编排层
-DKF-Agent Service = 解析、切片、Embedding、持久化、Evidence 真相来源
+LangChain = Prompt / Tool / Runnable / Message / Model Adapter 辅助层
+DKF-Agent Service = 解析、切片、Embedding、持久化、Evidence、Formula 真相来源
 ```
 
 当前阶段不要为了其他 Agent 提前改变底层实现。
@@ -3411,7 +3593,7 @@ Codex 必须遵守：
 20. Reindex 必须优先复用 Parse Cache；重新调用 MinerU 必须使用明确的 Reparse 语义。
 21. 当前不部署 MinerU 本地模型，不新增 MinerU 本地推理依赖。
 22. 阶段 1～10 已完成并作为冻结基线。阶段 11A 及之后若因新增格式需要修改上传白名单、统一 FileType、格式校验等前置公共代码，属于兼容性扩展，不视为“重做旧阶段”；但必须先说明原因并保证阶段 1～10 回归测试继续通过。
-23. 依用户最新阶段指令当前仅实施 11B.1；真实 XLSX A/B 与路由验收未完成，不进入 11B.2 或阶段 12。
+23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
 26. 阶段 11B 的 Router 必须遵循“完整性优先”：只有能合理证明 Native 完整覆盖主要信息时才走 Native；复杂 / 不确定内容不得因为 Native 能抽到部分文本就判成功。
@@ -3424,29 +3606,36 @@ Codex 必须遵守：
 33. Hybrid 失败不得逐元素补发 MinerU，也不得自动再提交 Whole-MinerU 造成不可控额度翻倍；失败后由显式重试 / 管理员决策处理。
 34. PDF 与 PPT/PPTX 第一版继续 Whole-MinerU，不因 Hybrid 能力存在就提前做逐页 / 逐元素拼接；DOCX Hybrid 只在 XLSX Hybrid 验证稳定后再评估。
 35. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
-36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11B.1 不安装、不实现、不提前改造 Retrieval。
+36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
 37. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
 38. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
 39. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
 40. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
 41. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
-42. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
+42. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent State / Workflow / Tool Orchestration，LlamaIndex 用于 Knowledge RAG。
+43. LangChain 只作为辅助集成层，按需提供 Prompt / Tool / Runnable / Message / Model Adapter；不得为了框架统一再建立第二套 RAG、Vector Store、Retriever 或 Agent Runtime。
+44. 阶段 30 才正式接入 LangGraph Knowledge Agent；在 Retrieval / RAG / Citation / Formula Service 稳定前不得提前实现 Agent 工作流。
+45. Knowledge Agent 的 Tool 必须调用已稳定的 Knowledge Search / Query / Formula Service，不得在 Tool 内直接复制 pgvector SQL、BM25、MinerU HTTP、DeepSeek HTTP 或 SymPy 业务逻辑。
+46. 第一版 LangGraph 必须使用有限状态、明确条件边和最大步数保护；禁止开放式无限循环 Agent。
+47. LangGraph / LangChain / LlamaIndex 内部对象不得泄漏到对外 API；Coordinator 只依赖稳定业务协议。
+48. Agent 日志只记录 route / tool / duration / status 等可观察信息，不记录 API Key、Token、签名 URL 或敏感完整请求。
 
 
 ---
 
 
-# 46.1 当前工程基线（V0.7）
+# 46.1 当前工程基线（V0.8）
 
 ```text
 阶段 1～9：已完成并回归通过
 阶段 10：MinerU Cloud Provider 已完成真实 API 人工验收
-阶段 11A：已有多格式工程基线与真实样本质量记录，XLSX 云解析仍需单独对照
-阶段 11B.1：当前范围；只做整份文档路由、review 与 Guard，等待真实路由人工验收
+阶段 11A：当前开发阶段
+阶段 11B.1：等待 11A 和多格式真实样本验收后开始；先做 Whole-document Conservative Router
 阶段 11B.2：仅在真实对照证明必要时，评估 Selective Hybrid Visual Bundle
 阶段 12～15：未开始
 阶段 15A：计划中的 LlamaIndex Adapter，等待 pgvector 基线完成后开始
-阶段 16+：未开始
+阶段 16～29：未开始
+阶段 30：计划正式接入 LangGraph Knowledge Agent；LangChain 仅按需作为辅助集成层
 ```
 
 当前已确认解析基线：
@@ -3484,9 +3673,11 @@ XLSX MinerU：必须单独真实测试，不能用 XLS 结果推断。
 同一源文档多个视觉元素 → 默认最多 1 个 MinerU Bundle 文件任务，而不是 N 个元素 N 次提交
 ```
 
-因此阶段 11B 已明确分两步：11B.1 只做整份 Native / MinerU / Review、预检和 Guard；复杂 XLSX 未有真实 A/B 结论先 Review。11B.2 仍未启动，必须以真实互补性、锚点和单 Bundle 收益为前提并由用户另行确认。当前接口兼容性、限制、人工步骤见 [Router 验收说明](PARSER_ROUTER.md)。
+因此阶段 11B 已明确分两步：11B.1 先做“完整性优先”的 Whole-document Conservative Router；11B.2 仅在单一 Provider 确实无法完整覆盖、且 Native 与 MinerU 可稳定互补时，才启用 Selective Hybrid Visual Enhancement。Hybrid 以 XLSX 为首选候选，同一源文档的多个视觉元素通过单个 Visual Bundle 一次 MinerU 提交，禁止逐元素消耗文件额度。11B 尚未开始。
 
 LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：完成 Parse Cache、Chunk、BGE-M3 和 pgvector 后，在阶段 15A 建立 `DocumentChunk ↔ TextNode / NodeWithScore` 适配边界，再进入 Dense / BM25 / Query Fusion / Reranker / DeepSeek RAG。
+
+LangGraph / LangChain 同样不改变当前阶段：只有在 Knowledge Search / Query API、Citation、Formula Service 已稳定后，阶段 30 才引入 LangGraph StateGraph 封装 Knowledge Agent；LangChain 仅在该阶段及其后按需提供 Prompt、StructuredTool、Runnable、Message、Model Adapter，不承担核心 RAG 和 Agent Runtime。
 
 已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并执行完整回归。
 
@@ -3510,6 +3701,8 @@ LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：�
 
 LlamaIndex 相关开发同样遵循阶段闸门：未完成阶段 15 的 pgvector 真相表前，不提前进入阶段 15A；阶段 15A 只验证 Adapter，不直接跳到完整 RAG。
 
+LangGraph / LangChain 也遵循阶段闸门：阶段 30 之前不为了“先接框架”改写现有 Service；阶段 30 只在稳定 API / Tool 之上建立有限状态 Agent 工作流，并通过自动测试验证普通问答、公式路径、证据不足、Tool 异常和最大步数保护。
+
 
 ---
 
@@ -3518,5 +3711,6 @@ LlamaIndex 相关开发同样遵循阶段闸门：未完成阶段 15 的 pgvecto
 - MinerU 精准解析 API：`https://mineru.net/apiManage/docs`
 - OHR-Bench：`https://github.com/opendatalab/OHR-Bench`
 - LlamaIndex Framework：`https://developers.llamaindex.ai/`
+- LangGraph / LangChain：实现时以 LangChain 官方当前文档为准。
 
 外部服务能力、限流与支持格式可能变化；实现时以官方当前文档和账号后台为准。
