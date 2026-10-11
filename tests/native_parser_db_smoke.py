@@ -7,6 +7,7 @@ from zipfile import ZipFile
 import pymupdf
 import pytest
 from docx import Document as WordDocument
+from office_samples import office_bytes
 from sqlalchemy import func, inspect, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
@@ -47,8 +48,12 @@ def pdf_content(kind="native"):
 
 
 def native_sample(file_type):
-    """生成四种真实原生样本及预期阅读顺序，不将上传签名样本当作完整文档。"""
+    """生成六种真实原生样本及预期阅读顺序，不将上传签名样本当作完整文档。"""
 
+    if file_type == "csv":
+        return "项目,值,占比\n销售,123,25%".encode(), ["项目", "销售", "123", "25%"]
+    if file_type == "xlsx":
+        return office_bytes("xlsx"), ["项目", "销售", "123", "25%", "=B2*2"]
     if file_type == "txt":
         return "第一段正文。\n\n第二段正文。".encode(), ["第一段正文", "第二段正文"]
     if file_type == "md":
@@ -138,11 +143,11 @@ def assert_no_chunks(migrated_connection, document):
         )
 
 
-@pytest.mark.parametrize("file_type", ["txt", "md", "docx", "pdf"])
+@pytest.mark.parametrize("file_type", ["txt", "md", "csv", "docx", "xlsx", "pdf"])
 def test_native_upload_task_persists_ordered_uniform_blocks(
     processing_context, migrated_connection, monkeypatch, file_type
 ):
-    """四种原生文档经真实上传和任务生成统一块，保留阅读顺序、标题和物理页码。"""
+    """六种原生文档经真实上传和任务生成统一块，保留阅读顺序，重复任务不增块。"""
 
     content, expected = native_sample(file_type)
     document = upload_sample(processing_context, f"原生参考.{file_type}", content)
@@ -261,13 +266,14 @@ def test_failed_block_write_rolls_back_everything_and_can_resubmit(
     assert block_snapshot(migrated_connection, current) == blocks
 
 
+@pytest.mark.parametrize("file_type", ["txt", "csv", "xlsx"])
 def test_transient_block_write_retries_without_partial_or_duplicate_rows(
-    processing_context, migrated_connection, monkeypatch
+    processing_context, migrated_connection, monkeypatch, file_type
 ):
-    """数据库临时故障在真实写入后触发重试，回滚后恢复且块标识稳定、无重复。"""
+    """文本/CSV/XLSX 写入故障后回滚重试，恢复时块身份稳定且无重复行。"""
 
-    content, _ = native_sample("txt")
-    document = upload_sample(processing_context, "数据库重试.txt", content)
+    content, _ = native_sample(file_type)
+    document = upload_sample(processing_context, f"数据库重试.{file_type}", content)
     original = processing.persist_blocks
     attempts = []
 
@@ -284,9 +290,24 @@ def test_transient_block_write_retries_without_partial_or_duplicate_rows(
     assert result.state == "SUCCESS", str(result.result)
     assert len(attempts) == 2 and attempts[0] == attempts[1]
     blocks = block_snapshot(migrated_connection, document)
-    assert len(blocks) == 2
+    assert len(blocks) == (2 if file_type == "txt" else 1)
     assert [block["block_id"] for block in blocks] == attempts[1]
     assert document_state(processing_context, document)["error_message"] is None
+    assert_no_chunks(migrated_connection, document)
+
+
+@pytest.mark.parametrize("file_type", ["doc", "xls", "ppt", "pptx"])
+def test_office_native_failure_keeps_original_without_blocks(
+    processing_context, migrated_connection, file_type
+):
+    """旧 Office 和 PPTX 普通上传后明确失败并保留原件，不能隐式投递云任务或空成功。"""
+
+    document = upload_sample(
+        processing_context, f"显式云需求.{file_type}", office_bytes(file_type)
+    )
+    assert execute_document(document).state == "FAILURE"
+    assert "MinerU" in document_state(processing_context, document)["error_message"]
+    assert block_snapshot(migrated_connection, document) == []
     assert_no_chunks(migrated_connection, document)
 
 
@@ -365,19 +386,22 @@ def test_block_index_rejects_nonpositive_values(
 
     document = upload_sample(processing_context, "顺序约束.txt", b"block index fixture")
     connection, _, _ = migrated_connection
-    with Session(connection, join_transaction_mode="create_savepoint") as session:
-        with pytest.raises(IntegrityError), session.begin_nested():
-            session.add(
-                DocumentBlock(
-                    doc_id=UUID(document["doc_id"]),
-                    block_index=block_index,
-                    page=1,
-                    block_type="text",
-                    text="非法顺序",
-                    source="native_parser",
-                )
+    with (
+        Session(connection, join_transaction_mode="create_savepoint") as session,
+        pytest.raises(IntegrityError),
+        session.begin_nested(),
+    ):
+        session.add(
+            DocumentBlock(
+                doc_id=UUID(document["doc_id"]),
+                block_index=block_index,
+                page=1,
+                block_type="text",
+                text="非法顺序",
+                source="native_parser",
             )
-            session.flush()
+        )
+        session.flush()
 
 
 def test_block_index_is_unique_per_document_and_allows_legacy_nulls(

@@ -169,7 +169,12 @@ def list_knowledge_base_documents(
 def upload_knowledge_base_document(
     kb_id: UUID,
     session: AdminSession,
-    file: Annotated[UploadFile, File(description="单个 PDF、DOCX、TXT、MD 或图片文件")],
+    file: Annotated[
+        UploadFile,
+        File(
+            description="单个 PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX、CSV、TXT、MD 或图片；此入口只投递 Native"
+        ),
+    ],
 ) -> DocumentResponse:
     """文档与原件提交成功后才投递 Celery，投递失败保留原件并返回持久化失败状态。"""
 

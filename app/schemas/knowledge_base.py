@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from app.core.file_formats import FileType
+
 Item = TypeVar("Item")
 
 
@@ -45,7 +47,7 @@ class DocumentResponse(BaseModel):
     doc_id: UUID
     kb_id: UUID
     file_name: str
-    file_type: str
+    file_type: FileType
     file_hash: str
     source_type: Literal["preset", "uploaded"]
     status: Literal[

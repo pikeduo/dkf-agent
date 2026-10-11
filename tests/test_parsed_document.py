@@ -52,7 +52,7 @@ def document_payload(**changes) -> dict:
 @pytest.mark.parametrize("file_type", get_args(FileType))
 @pytest.mark.parametrize("block_type", get_args(BlockType))
 def test_all_format_and_block_labels_share_the_contract(file_type, block_type):
-    """七种文件标识和五种块类型都使用同一模型，不代表真实 Parser 已实现。"""
+    """十三种文件标识和五种块类型使用同一模型，不把可上传等同于 Native 已实现。"""
 
     parsed = ParsedDocument.model_validate(
         document_payload(

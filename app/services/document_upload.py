@@ -4,7 +4,6 @@ import hashlib
 import logging
 from pathlib import Path
 from uuid import UUID, uuid4
-from zipfile import BadZipFile, ZipFile
 
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import select
@@ -12,11 +11,12 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import PROJECT_ROOT, Settings
+from app.core.file_formats import FILE_TYPES, FileFormatError, validate_file_content
 from app.models import Document
 from app.schemas.knowledge_base import DocumentResponse
 
 logger = logging.getLogger(__name__)
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png"}
+ALLOWED_EXTENSIONS = {f".{file_type}" for file_type in FILE_TYPES}
 READ_CHUNK_SIZE = 64 * 1024
 
 
@@ -37,7 +37,8 @@ def validate_filename(filename: str | None) -> tuple[str, str]:
     extension = Path(filename).suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
-            status_code=415, detail="仅支持 PDF、DOCX、TXT、MD、JPG、JPEG、PNG"
+            status_code=415,
+            detail="仅支持 PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX、CSV、TXT、MD、JPG、JPEG、PNG",
         )
     return filename, extension
 
@@ -62,29 +63,14 @@ def hash_upload(upload: UploadFile, max_bytes: int) -> str:
 
 
 def validate_content(upload: UploadFile, extension: str) -> None:
-    """校验二进制格式的基本标识及 DOCX 容器结构，不解压、不解析正文或限制文本编码。"""
+    """复用统一内容校验区分 OOXML/OLE 类型；文本编码和正文可读性由 Parser 判断。"""
 
-    upload.file.seek(0)
-    header = upload.file.read(1024)
-    valid = True
-    if extension == ".pdf":
-        valid = b"%PDF-" in header
-    elif extension == ".png":
-        valid = header.startswith(b"\x89PNG\r\n\x1a\n")
-    elif extension in {".jpg", ".jpeg"}:
-        valid = header.startswith(b"\xff\xd8\xff")
-    elif extension == ".docx":
-        try:
-            upload.file.seek(0)
-            with ZipFile(upload.file) as archive:
-                valid = {"[Content_Types].xml", "word/document.xml"}.issubset(
-                    archive.namelist()
-                )
-        except (BadZipFile, UnicodeDecodeError, ValueError):
-            valid = False
-    upload.file.seek(0)
-    if not valid:
-        raise HTTPException(status_code=415, detail="文件内容与扩展名不匹配或格式损坏")
+    try:
+        validate_file_content(upload.file, extension[1:])
+    except FileFormatError:
+        raise HTTPException(
+            status_code=415, detail="文件内容与扩展名不匹配或格式损坏"
+        ) from None
 
 
 def remove_owned_file(path: Path) -> None:

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from zipfile import ZipFile
 
 import pytest
+from office_samples import office_bytes
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
@@ -23,8 +24,10 @@ PREFIX = "/api/admin/knowledge-bases"
 
 
 def sample_content(extension):
-    """生成足以通过首版格式标识校验的样本，DOCX 使用不解压的最小 ZIP 容器。"""
+    """生成上传校验样本；新增 Office 使用独立 ZIP/CFB，正文解析另行测试。"""
 
+    if extension in {".doc", ".ppt", ".pptx", ".xls", ".xlsx"}:
+        return office_bytes(extension[1:])
     if extension == ".pdf":
         return b"%PDF-1.4\nminimal upload fixture\n%%EOF"
     if extension in {".jpg", ".jpeg"}:
@@ -83,12 +86,27 @@ def assert_no_uploads(api, kb_id, directory):
 
 
 @pytest.mark.parametrize(
-    "extension", [".pdf", ".docx", ".txt", ".md", ".jpg", ".jpeg", ".png"]
+    "extension",
+    [
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".ppt",
+        ".pptx",
+        ".xls",
+        ".xlsx",
+        ".csv",
+        ".txt",
+        ".md",
+        ".jpg",
+        ".jpeg",
+        ".png",
+    ],
 )
 def test_upload_creates_exact_file_and_document(
     upload_context, migrated_connection, extension
 ):
-    """验证七种格式的原名、哈希、磁盘字节、状态和文档记录逐一对应。"""
+    """验证十三种格式的原名、哈希、磁盘字节、状态和响应契约逐一对应。"""
 
     api, kb_id, directory = upload_context
     content = sample_content(extension)
@@ -154,7 +172,7 @@ def test_invalid_filename_is_rejected(upload_context, name):
     assert_no_uploads(api, kb_id, directory)
 
 
-@pytest.mark.parametrize("name", ["file.exe", "file.zip", "file", "file.csv"])
+@pytest.mark.parametrize("name", ["file.exe", "file.zip", "file", "file.rtf"])
 def test_unsupported_extension_is_415(upload_context, name):
     """验证扩展名白名单拒绝未支持文件，失败请求不创建存储目录或记录。"""
 
@@ -163,7 +181,21 @@ def test_unsupported_extension_is_415(upload_context, name):
     assert_no_uploads(api, kb_id, directory)
 
 
-@pytest.mark.parametrize("extension", [".pdf", ".docx", ".png", ".jpg", ".jpeg"])
+@pytest.mark.parametrize(
+    "extension",
+    [
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".png",
+        ".jpg",
+        ".jpeg",
+    ],
+)
 def test_mismatched_content_is_415(upload_context, extension):
     """验证二进制格式不能仅靠改扩展名冒充有效类型。"""
 
@@ -185,6 +217,28 @@ def test_generic_zip_is_not_docx(upload_context):
         archive.writestr("../escape.txt", "not docx")
     api, kb_id, directory = upload_context
     assert post_file(api, kb_id, "fake.docx", buffer.getvalue()).status_code == 415
+    assert_no_uploads(api, kb_id, directory)
+
+
+@pytest.mark.parametrize(
+    "actual,claimed",
+    [
+        ("docx", "pptx"),
+        ("pptx", "xlsx"),
+        ("xlsx", "docx"),
+        ("doc", "xls"),
+        ("xls", "ppt"),
+        ("ppt", "doc"),
+    ],
+)
+def test_office_type_mismatch_creates_no_document(upload_context, actual, claimed):
+    """上传真实不同主容器并改后缀应 415，失败不创建文件或记录。"""
+
+    api, kb_id, directory = upload_context
+    assert (
+        post_file(api, kb_id, f"错误类型.{claimed}", office_bytes(actual)).status_code
+        == 415
+    )
     assert_no_uploads(api, kb_id, directory)
 
 

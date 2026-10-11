@@ -169,6 +169,7 @@ OHR-Bench 可作为文档解析质量维度参考，其公开任务重点覆盖 
 | DOCX Parser | python-docx |
 | CSV Parser | Python `csv` |
 | XLSX Parser | openpyxl |
+| Legacy Office 格式校验 | olefile（仅 CFB/OLE 容器与主流识别，不解析正文） |
 | Complex / Legacy Office Parser | MinerU Cloud 精准解析 API（V4） |
 | MinerU Model | `vlm`（默认） |
 | Sparse Retrieval | BM25 |
@@ -1161,6 +1162,8 @@ openpyxl
 - 如果存在视觉对象，不得声称 Native Parser 已完整解析这些视觉信息。
 
 ## 扩展 MinerU Office 支持
+
+阶段 10 的图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收；此处的 Office 扩展仍须单独人工验收，不撤销已完成基线。
 
 显式 MinerU Cloud 路径增加：
 
@@ -2425,6 +2428,8 @@ MinerU：图片 / 扫描 PDF / 表格 PDF / 公式 PDF
 Native 新增：CSV / XLSX
 MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
 ```
+
+阶段 11A 工程实现已扩展以上能力：统一十三种 FileType，上传和 MinerU 共用 OOXML/OLE 校验；CSV/XLSX 原生表格与 Office 云转换输出统一 Block。Office 本地页数保持未知、云页为逻辑页、bbox 为空。当前等待新增 CSV/XLSX 用户原件和六种真实 Office 云 API 的人工验收；11B 尚未开始。
 
 已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并执行完整回归。
 

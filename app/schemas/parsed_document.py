@@ -13,7 +13,8 @@ from pydantic import (
     model_validator,
 )
 
-FileType = Literal["pdf", "docx", "txt", "md", "jpg", "jpeg", "png"]
+from app.core.file_formats import FileType
+
 BlockType = Literal["title", "text", "table", "formula", "image_text"]
 
 # 不接受布尔值、数字字符串、NaN 或无穷值，避免无效坐标和置信度进入后续链路。

@@ -12,12 +12,18 @@ from zipfile import BadZipFile, ZipFile
 import pymupdf
 from pydantic import ValidationError
 
+from app.core.file_formats import MINERU_TYPES, OFFICE_TYPES
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.mineru.errors import MinerUError
 
 
-def page_geometry(path: Path, file_type: str) -> dict[int, tuple[float, float]]:
-    """获取原件的真实页面尺寸，用于归一化坐标转点数 / 像素，不猜测尺寸。"""
+def page_geometry(path: Path, file_type: str) -> dict[int, tuple[float, float]] | None:
+    """PDF/图片取得真实尺寸；Office 无可靠原件分页与坐标映射，明确返回空值。"""
+
+    if file_type in OFFICE_TYPES:
+        return None
+    if file_type not in MINERU_TYPES:
+        raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
 
     try:
         with pymupdf.open(path) as document:
@@ -313,18 +319,31 @@ class MinerUResultAdapter:
         doc_id: UUID,
         file_name: str,
         file_type: str,
-        geometry: dict[int, tuple[float, float]],
+        geometry: dict[int, tuple[float, float]] | None,
         identity: str,
     ) -> ParsedDocument:
-        """将 V4 内容列表统一为 Block；页码转为 1 基，格式未知时安全失败而非丢正文。"""
+        """统一 V4 Block；Office 使用云端转换逻辑页和空坐标，PDF/图片保留原件几何校验。"""
 
+        if file_type not in MINERU_TYPES:
+            raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
+        office = file_type in OFFICE_TYPES
         items = read_content_list(archive)
         blocks, headings, title = [], {}, ""
         # ID 使用原始 position，block_index 使用最终列表顺序；改序不能换掉既有块身份。
-        for position, item in ordered_content_items(archive, items):
+        ordered = (
+            list(enumerate(items, start=1))
+            if office
+            else ordered_content_items(archive, items)
+        )
+        for position, item in ordered:
             page_idx = item.get("page_idx")
-            if type(page_idx) is not int or page_idx not in geometry:
-                raise MinerUError("PAGE", "MinerU 页码与原件物理页数不一致")
+            if (
+                type(page_idx) is not int
+                or page_idx < 0
+                or (office and page_idx >= 200)
+                or (not office and (geometry is None or page_idx not in geometry))
+            ):
+                raise MinerUError("PAGE", "MinerU 页码无效或与已知原件页面范围不一致")
             kind = item.get("type")
             if kind in {
                 "text",
@@ -415,7 +434,9 @@ class MinerUResultAdapter:
                         block_type=block_type,
                         text=content,
                         section=" / ".join(headings[key] for key in sorted(headings)),
-                        bbox=convert_bbox(item.get("bbox"), geometry[page_idx]),
+                        bbox=None
+                        if office
+                        else convert_bbox(item.get("bbox"), geometry[page_idx]),
                         source="mineru_cloud",
                         confidence=item.get("confidence"),
                     )

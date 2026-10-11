@@ -2,6 +2,8 @@
 
 本文件供开发与验收使用；部署说明和日常调用入口见 [README](../README.md)，开发路线见 [最新开发计划](DEVELOPMENT_PLAN_CODEX.md)，不把测试记录写入 README。
 
+当前基线：阶段 1～10 已完成；阶段 10 的图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收。当前只扩展阶段 11A 的六种 Office 显式支持；新增 Office 真实 API 仍需单独验收，不进入 11B Router。
+
 ## 1. 官方契约与实现边界
 
 - 官方协议依据：[精准解析 API 文档](https://mineru.net/apiManage/docs)。采用 V4 本地批量申请上传链接、签名 PUT、批次 GET；不使用轻量 Agent API。
@@ -24,7 +26,15 @@
 4. 横向分离且纵向重叠的并排块、正文纵向回跳、无 bbox、索引或关联歧义均保留该页原序。检测只是保护条件，不是可靠的通用单栏/多栏分类器；绝不依靠 bbox 重建多栏顺序。
 5. 只替换该页已有槽位，不跨页、不给页面重新编号。table/formula 的完整内容、page、bbox、block_type、source、confidence 不变；原始数组位置仍生成稳定 Block ID，最终列表顺序由现有事务写入 block_index。重试和重复消息的幂等机制不变。
 
-现有真实扫描 ZIP 在内存重新转换后，两页都成为顶部页眉 → 正文 → 页底，块数仍为 17，ID 与原始顺序转换一致；图片、表格、公式分别转换为 12、5、16 块，原文和结构没有改写。这是已有结果的 Adapter 核对，不等于新 Worker 已完成真实上传和落库验收，也没有修改历史数据。
+阶段 10 已完成真实上传和落库人工验收，扫描页边界顺序与图片落库问题已确认修复。旧 CHUNKING 数据仍不会因更新 Adapter 自动改写；保留上述保护条件，不承诺任意复杂版式恢复。
+
+### 阶段 11A：Office 格式与页面语义
+
+- [官方批量上传文档](https://mineru.net/apiManage/docs)的 file.name 支持 DOC/DOCX/PPT/PPTX/XLS/XLSX，复用原 POST→PUT→GET 流程；不发送 CSV/TXT/MD。
+- 申请前与上传共用 OOXML/OLE 内容校验，继续检查大小、Hash 和安全标识。现代 Office 校验对应主部件，旧格式用 olefile 检查 CFB 与对应主流；这不是旧 Office 正文 Native 解析。
+- Office 的本地页数未知返回 None；提交按文件数限流不变，优先页观察只累计已知 PDF/图片页数，未知不伪造为 1。云端最终执行 200 页限制，错误走已有安全分类，不修改限流、Token 或 Celery 整体设计。
+- page_geometry 对 Office 返回 None，不尝试 PyMuPDF。Adapter 保留转换逻辑 page_idx+1，bbox 始终为 NULL，即便有供应商坐标也不伪造原件对应位置。逻辑页在 1～200 内；PDF/图片仍验证真实原件范围和尺寸。
+- Office 保留 V1 原数组顺序，不套用 PDF 页边界修复；table/formula 块完整不拆分，原位置生成稳定 ID。写块、Document=CHUNKING、job=done 使用已有单事务及代次检查，重复消息不增块。
 
 ## 2. 持久化、幂等和恢复
 
@@ -54,11 +64,11 @@ python -m pytest tests/test_mineru_provider.py tests/test_mineru_order.py tests/
 python -m pytest tests/mineru_redis_smoke.py -q
 ```
 
-回归测试保持前九阶段接口、原生解析、迁移和事务语义。基础迁移夹具仅更新 head 与新增表清单，避免误把新增结构当旧阶段回归失败。
+回归测试保持阶段 1～10 接口、迁移和事务语义；11A 没有新数据库迁移。新增 `tests/test_office_formats.py` 覆盖六种格式 Mock HTTP、Office 逻辑页与空 bbox；数据库测试覆盖 Office 上传、重复消息和 PUT 重试的批次复用。
 
 顺序测试覆盖单页、两页及交错页不跨页、同 y 稳定顺序、表格/公式整体保留、空图片不补 OCR、无 bbox、多栏/纵向回跳、未知/歧义 layout、稳定 ID；数据库测试覆盖新顺序事务落库、重复消息不增块，以及图片查询网络重试耗尽后必须显式建立新任务。
 
-## 4. 真实 API 人工验收（必须由你执行）
+## 4. 已验收 PDF/图片链路的真实 API 复验步骤（按需）
 
 ### 准备与启动
 
@@ -165,7 +175,7 @@ WHERE d.file_name = '01_mineru_image_ocr.png'
 ORDER BY d.created_at, j.created_at;
 ```
 
-本次同 Hash 图片存在两份 Document：旧知识库的原生 Parser 明确拒绝图片且没有 parse job；云端验收库的图片 job 为 failed、upload_complete=true、batch_id 已保存、retry_count=5、error_code=NETWORK、is_active=false，块数为 0。只读查询原有云批次为 done，结果 ZIP 当前能下载，使用原件 1600×1100 像素 geometry 转换成功且有 12 个块；没有发现 file_type、geometry 或 content_list 类型导致 Adapter 拒绝。历史失败码只定位到网络连接阶段，不能据此确定最后一次失败究竟在查询 API 还是 ZIP 下载；本次没有重新申请或上传。
+历史诊断曾发现：原生入口图片无 parse job，云入口图片因 NETWORK 重试耗尽而零块，并非 Adapter 格式拒绝。阶段 10 后续真实人工验收已确认图片成功落库；历史失败记录不代表当前仍未验收。上述 SQL 继续用于排查未来零块文档，不通过删除旧失败记录掩盖错误。
 
 API 检查（把 UUID 替换为上面 SQL 查出的云端记录）：
 
@@ -184,9 +194,9 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/docu
 
 返回 202、新 job_id；完成后该 job=done、Document=CHUNKING 且 block_count>0。它可能重新申请、PUT 并解析，不是复用旧 ZIP；若收到 409，先查询当前状态，不直接改数据库状态或删除旧记录。
 
-### 修复后的真实落库复验与导出
+### 回归抽检与导出
 
-重启 API 和 CPU Worker。已 CHUNKING 的扫描件不会自动重排，现有接口也不支持完成文档 Reparse。请在新的验收知识库上传扫描 PDF（建议同库再次覆盖四类样本），或对原 FAILED 图片使用上述显式入口；真实提交会消耗云端额度。使用显式 `/mineru/documents`，不要误用原生 `/documents`。
+阶段 10 已验收，无需为本次扩展重做付费主链路。需要额外抽检时重启 API/Worker，在独立知识库使用显式 `/mineru/documents`；已 CHUNKING 不支持 Reparse。新增 Office 应按下一节单独验收，真实提交消耗额度。
 
 等待 job=done、Document=CHUNKING 后执行以下 SQL，将知识库 UUID 替换为本次验收库。用 LEFT JOIN 同时显示尚无块的文档，再按 block_index 验收；不要用 `ORDER BY bbox` 掩盖持久化顺序问题：
 
@@ -218,8 +228,33 @@ ORDER BY d.file_name;
 - 表格后 `TABLE-AFTER-TEXT-7B21` 在真实 V1 的 `table_footnote` 中，不是 Adapter 把独立正文吞掉。Adapter 按 caption → body → footnote 合成一个 table 块；目前没有足够独立位置与语义证据稳定拆分，故保留并记录为阶段 10 边界。
 - 本版不承诺修复所有标题顺序、双栏/多栏布局、左右图文、OCR、表格归属或公式语义。边界回退意味着保留供应商原序，不代表已经验证该原序正确。
 
-## 5. 当前验证边界
+## 5. 六种真实 Office 人工验收（阶段 11A）
 
-已有四类真实 ZIP 已核对；扫描、表格、公式已经有真实数据库结果，图片仍为历史失败且未落库。本次顺序修复已通过已有真实 ZIP 的内存转换检查，未代替人工重启 Worker 后的新上传到落库复验。仍须人工确认图片成功入库、两页新 block_index、结构质量以及新运行代次的端到端链路。Mock 通过不等于真实 429、所有网络故障、多栏布局或 OCR 质量全部验证，不能宣称所有验收项已完成。
+1. 同步 environment.yml 依赖并重启 API/CPU Worker，确认 Windows Redis 服务 Running、Token 和额度有效；无需 WSL、Docker 或 LibreOffice。
+2. 准备允许外传的真实 DOC、DOCX、XLS、XLSX、PPT、PPTX，每种一份；使用 Word/Excel/PowerPoint 真正保存为对应格式，不能改后缀或使用自动测试的最小容器冒充真实文件。
+3. 创建独立云验收知识库，在 Swagger 逐份调用 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents`，multipart 字段 file；预期 202，记录 doc_id/job_id。DOCX/XLSX 与 Native 比较使用不同知识库，避免 Hash 去重与完成状态限制。
+4. 查询文档详情和 `/documents/{doc_id}/parse-jobs`，核对 batch_id、upload_complete（可用下面 SQL）、state、错误；任务最终 job=done、Document=CHUNKING、Block 非空。中间 converting 状态可能很快结束，不要求必然观察到。
+5. 执行下面 SQL，核对类型、章节、原文顺序、table/formula、逻辑页与空坐标。Office 页码只和平台转换结果比较，不与 Office 打印预览页数硬对齐。若上游返回未知结构，应安全失败，不能以 full.md 替代。
 
-未实现 Parser Router、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或自动 Token 续期；本阶段验收后停止，等待用户确认阶段 11。
+```sql
+SELECT d.file_name, d.file_type, d.status, j.job_id, j.state,
+       j.batch_id, j.upload_complete, j.retry_count, j.error_code, j.error_message
+FROM documents d LEFT JOIN document_parse_jobs j ON j.doc_id = d.doc_id
+WHERE d.kb_id = '替换为云验收知识库UUID'
+ORDER BY d.file_name, j.created_at;
+
+SELECT d.file_name, b.block_id, b.block_index, b.page, b.section,
+       b.block_type, b.text, b.bbox, b.source
+FROM documents d LEFT JOIN document_blocks b ON b.doc_id = d.doc_id
+WHERE d.kb_id = '替换为云验收知识库UUID'
+ORDER BY d.file_name, b.block_index;
+```
+
+6. 活动请求重复提交应返回同一 job_id，完成文档再提交应 409；核对 Block ID/序号不重复。不要为压测耗尽云额度；网络/PUT 重试、重复消息和事务回滚优先使用 Mock 验证。
+7. CSV 调用云上传入口应 415，不创建云任务；OOXML 类型不匹配或伪造 OLE 应 415，已有原件异常通过显式提交返回安全错误。Office 本地不估计页数，云端页数超限应安全失败，无部分 Block。
+
+## 6. 当前验证边界
+
+根据用户确认，阶段 10 已完成真实 API 人工验收，包括图片入库与扫描顺序。11A 六种 Office 仅完成代码、Mock 和隔离数据库验证，尚未用真实云 API 上传真实 Office 文件；CSV/XLSX 用户原件仍需人工核对。Mock 不能替代真实鉴权、格式转换、页面语义和供应商视觉质量验收，也不等于真实 429 或所有网络故障均已验证。
+
+未实现 11B Parser Router、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或自动 Token 续期。本阶段停在 11A，真实多格式人工验收并经用户确认后才进入 11B。

@@ -11,6 +11,12 @@ import httpx
 import pymupdf
 
 from app.core.config import Settings
+from app.core.file_formats import (
+    MINERU_TYPES,
+    OFFICE_TYPES,
+    FileFormatError,
+    validate_file_content,
+)
 from app.services.mineru.errors import MinerUError, api_error
 from app.services.mineru.rate_limit import MinerURateLimiter
 
@@ -78,11 +84,15 @@ def validate_signed_url(url: object) -> str:
     return url
 
 
-def validate_local_file(source: LocalFile) -> int:
-    """检查类型、大小、实际可读性与 Hash；PDF 读取页数，返回优先级计数估计。"""
+def validate_local_file(source: LocalFile) -> int | None:
+    """校验类型、大小、容器及 Hash；PDF/图片返回已知页数，Office 未知页数返回空值。"""
 
-    if Path(source.name).suffix.lower() not in {".pdf", ".jpg", ".jpeg", ".png"}:
-        raise MinerUError("FILE_TYPE", "当前 MinerU 入口仅接受 PDF、JPG、JPEG、PNG")
+    file_type = Path(source.name).suffix.lower().lstrip(".")
+    if file_type not in MINERU_TYPES:
+        raise MinerUError(
+            "FILE_TYPE",
+            "MinerU 仅接受 PDF、图片和 DOC/DOCX/PPT/PPTX/XLS/XLSX，不接受 CSV",
+        )
     safe_identifier(source.data_id)
     try:
         size = source.path.stat().st_size
@@ -92,24 +102,19 @@ def validate_local_file(source: LocalFile) -> int:
             raise MinerUError("FILE_SIZE", "MinerU 文件大小超过 200 MB")
         digest = hashlib.sha256()
         with source.path.open("rb") as stream:
+            validate_file_content(stream, file_type)
             header = stream.read(16)
             digest.update(header)
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
-        extension = Path(source.name).suffix.lower()
-        signatures = {
-            ".pdf": header.startswith(b"%PDF-"),
-            ".png": header.startswith(b"\x89PNG\r\n\x1a\n"),
-            ".jpg": header.startswith(b"\xff\xd8\xff"),
-            ".jpeg": header.startswith(b"\xff\xd8\xff"),
-        }
-        if not signatures[extension]:
-            raise MinerUError("FILE_FORMAT", "MinerU 原件标识与文件类型不匹配")
         if source.file_hash and digest.hexdigest() != source.file_hash:
             raise MinerUError(
                 "FILE_CHANGED", "原件内容与上传 Hash 不一致，停止云端提交"
             )
-        if extension == ".pdf":
+        if file_type in OFFICE_TYPES:
+            # 本地没有云端转换后的分页信息，不能按 Sheet/Slide 数伪造优先页消耗。
+            return None
+        if file_type == "pdf":
             with pymupdf.open(source.path) as pdf:
                 if pdf.needs_pass or pdf.is_repaired:
                     raise MinerUError("FILE_DAMAGED", "MinerU 原件为加密或损坏 PDF")
@@ -122,6 +127,10 @@ def validate_local_file(source: LocalFile) -> int:
         return 1
     except FileNotFoundError:
         raise MinerUError("FILE_MISSING", "MinerU 原件不存在，请检查存储目录") from None
+    except FileFormatError:
+        raise MinerUError(
+            "FILE_FORMAT", "MinerU 原件标识或容器与文件类型不匹配"
+        ) from None
     except (pymupdf.FileDataError, ValueError, RuntimeError):
         raise MinerUError("FILE_DAMAGED", "MinerU PDF 原件无法读取") from None
     except OSError:
@@ -172,7 +181,7 @@ class MinerUCloudProvider:
             raise MinerUError("BATCH_LIMIT", "MinerU 上传批次必须包含 1～50 个文件")
         if len({source.data_id for source in files}) != len(files):
             raise MinerUError("DATA_ID", "同一 MinerU 批次的 data_id 不能重复")
-        pages = sum(validate_local_file(source) for source in files)
+        pages = sum(validate_local_file(source) or 0 for source in files)
         self.limiter.reserve("submit", files=len(files), pages=pages)
         data = self._api(
             "POST",

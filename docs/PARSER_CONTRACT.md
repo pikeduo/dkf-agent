@@ -4,7 +4,7 @@
 
 `ParsedDocument`、`ParsedBlock` 与 `BaseParser` 使用已有 Pydantic，契约及具体 Parser 均不依赖 SQLAlchemy、Celery、Redis、Embedding 或 RAG。任务服务负责状态机和数据库持久化，Parser 只读取原件并返回统一结构。
 
-已实现 TXT、Markdown、DOCX 和文本型 PDF 原生解析。Worker 校验原件、解析并保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。本文描述原生解析路径，该路径不调用 OCR 或外部 API，不生成 Chunk、Embedding、索引或 `READY`。独立的云端精准解析入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)。
+已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。该路径不调用 OCR 或外部 API，不生成 Chunk、Embedding、索引或 `READY`。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，六种 Office 可以显式提交，不自动路由。
 
 ## 统一结构
 
@@ -30,7 +30,7 @@
 ```
 
 - `doc_id`、`block_id` 使用 UUID，JSON 中输出 UUID 字符串。`doc_id` 来自已有 Document，不在 Parser 中重新创建。
-- `file_name` 保留原始文件名，非空且不超过 255 字符；`file_type` 使用小写 `pdf / docx / txt / md / jpg / jpeg / png`。这里仅约束格式标识，不表示对应解析器已经实现。
+- `file_name` 保留原始文件名，非空且不超过 255 字符；`file_type` 为 `pdf / doc / docx / ppt / pptx / xls / xlsx / csv / txt / md / jpg / jpeg / png`，上传和 DocumentResponse 共用此定义。格式标识不表示 Native Parser 已实现；数据库现有 String(32) 无格式枚举约束，无需新迁移。
 - `title`、`section` 未识别时使用空字符串，不由模型补写标题或章节。
 - `blocks` 必须显式提供，按原文阅读顺序排列。契约允许空列表，但当前原生 Parser 对空文本或需要 OCR 的页面明确抛出错误，任务不能把空结果当作成功。
 - `block_type` 仅允许 `title / text / table / formula / image_text`。表格和公式本阶段仍以 `text` 字段承载原始文本，不计算公式，也不做切片。
@@ -45,9 +45,9 @@
 
 - PDF 使用真实物理页码，不能用逻辑页替代已知物理页。
 - 单张图片使用第 1 页。
-- TXT / Markdown 无固定分页，使用逻辑页 1。DOCX 未经分页渲染时也仅能使用逻辑页 1，不能声称它是 Word 排版中的真实页码。后续证据展示需按文件格式区分“逻辑页”和“物理页”；如需表达未知页码，再单独设计并迁移数据库，本阶段不更改约束。
+- Native TXT/MD/CSV/DOCX/XLSX 使用逻辑页 1，Sheet 名放 section，不能以工作表序号冒充打印页码。六种 Office 云结果保留 MinerU 转换后的 `page_idx + 1`，是云端逻辑页，不是原始 Office 排版页。后续 Evidence 必须区分页码语义。
 - `bbox` 为 `null` 或四个有限数值组成的数组 `[x0, y0, x1, y1]`，左上角到右下角，要求 `x1 >= x0`、`y1 >= y0`。
-- 坐标是原始页面坐标，不是归一化比例：PDF 使用未旋转页面的点数坐标，后续叠加到旋转页面时需进行旋转变换；图片使用像素。TXT、Markdown 和 DOCX 无可靠位置时返回 `null`，不要伪造坐标。
+- Native PDF 使用未旋转页面点数坐标；MinerU PDF 使用对应实际渲染视口的点数坐标，图片使用像素。Native TXT/MD/CSV/DOCX/XLSX 及全部云端 Office 无可靠原件坐标映射，bbox 为 `null`。Office 不套用 PDF geometry，即便云端返回归一化 bbox 也不伪造原件尺寸。
 
 ### 标识、序列化与后续入库
 
@@ -65,13 +65,15 @@
 
 公共入口校验输出结构，并确认返回的文档 ID、原始文件名和类型与输入一致。原件读取、格式检测、解析错误由具体 Parser 实现，异常交给上层任务处理；基类不选择格式、不读取文件、不写数据库、不调用 RAG，也不接管 Celery 重试和状态机。
 
-## 四类原生解析的范围
+## 六类原生解析的范围
 
 | 格式 | 当前行为 | 页码与限制 |
 |---|---|---|
 | TXT | 严格解码，按空行分段，保留段内换行与缩进 | 逻辑页 1，无标题猜测 |
 | Markdown | 识别 ATX / Setext 常用标题及章节层级，保留代码围栏及其余正文语法 | 逻辑页 1，标题块去除标题标记；不是完整 CommonMark AST |
+| CSV | 标准 csv 模块严格读取逗号分隔、引号、空字段，整份一个 table | 逻辑页 1，bbox=null；字段序列化为带引号规则的 TSV |
 | DOCX | python-docx 按正文顺序提取段落、标题及表格，章节关联正文 | 逻辑页 1，无 Word 分页渲染；表格列用制表符、行用换行表示 |
+| XLSX | openpyxl 只读读取非空 Sheet，每个一个 table，section=Sheet 名 | 逻辑页 1，bbox=null；按行列原序输出 TSV，保留原式不执行 |
 | PDF | PyMuPDF 按页面及文本块读取原生文本，保留坐标 | 真实物理页码，从 1 开始；不猜测标题、表格或公式类型 |
 
 TXT / Markdown 优先识别 UTF-32、UTF-16、UTF-8 的 BOM；无 BOM 时严格尝试 UTF-8，再尝试 GB18030，不使用替换字符掩盖解码失败。空白文件、非法编码和不支持的控制字符返回安全中文错误；不能可靠判断无 BOM 的所有编码，其他编码应由上传者先转换。
@@ -80,7 +82,16 @@ DOCX 支持正文标题样式、标题层级和表格，保留段落及单元格
 
 PDF 跳过真正空白页但保留其后文本页的原始页码。无原生文本且有图片、绘图或批注的页面视为需要 OCR，纯扫描或含此类页面的混合 PDF 整体失败，不保存半份结果。有原生文本的页面仅提取该文本，不识别同页图片中的文字。加密文件、PyMuPDF 标记为修复过的损坏文件，以及整份文件无可用文本的情况明确失败。
 
-四类原生块使用 `source=native_parser`、`confidence=1.0`；该值仅表示原生提取来源，不是版面还原质量或回答准确率。图片仍可上传，但当前 Parser 选择器会报告需要 OCR，不伪造 `image_text`。
+六类原生块使用 `source=native_parser`、`confidence=1.0`，不表示版面还原质量或回答准确率。DOC/XLS/PPT/PPTX 和图片在 Native Registry 明确要求显式 MinerU，不注册空解析器、不自动转云端。
+
+### CSV/XLSX 细节与安全边界
+
+- CSV 复用严格文本解码（包括 UTF-8、BOM、GB18030），保留中文、空字段、quoted comma/换行、数字与百分比字符串；不猜测分隔符，不执行以 `=` 开头的内容。空/控制字符/解码失败、列数不一致、引号结构错误或超过标准 csv 单字段上限时安全失败。不能可靠识别所有无 BOM 编码的乱码，上传者应核对原文。
+- XLSX `read_only=True / data_only=False / keep_links=False`，不执行宏、公式或外部链接；公式文本保留，未知特殊公式明确失败。空 Sheet 跳过、全空失败；Sheet ID 位置基于原工作表顺序（含跳过的空表），持久化 block_index 仍连续。
+- 保留内部空行空列，剔除末尾无值单元格范围；普通 `0% / 0.00%` 等格式输出百分比，复杂自定义格式不模拟 Excel 渲染，日期使用 ISO 格式。单元格数据不是视觉布局还原。
+- 第一版不解析 XLSX 图片、图表、SmartArt、复杂绘图，DOCX 原有限制不变。存在视觉对象也不自动检测/路由；显式 MinerU 对比使用独立知识库，完成 Native 文档不能借云入口 Reparse。
+- CSV/XLSX 最多 10 万行、1024 列、100 万单元格（XLSX 累计），XLSX 最多 1000 Sheet；OOXML 最多 10000 ZIP 项、256 MiB 总展开大小、单主部件 64 MiB。拒绝加密、重复项、不安全路径及类型混淆。这是基础保护，不是完整恶意文件扫描。
+- 统一校验 DOCX/PPTX/XLSX 的 `[Content_Types].xml` 和对应 `word/document.xml / ppt/presentation.xml / xl/workbook.xml`；olefile 严格打开 CFB 并识别根级 WordDocument / Workbook或Book / PowerPoint Document 主流。容器检查不等于旧 Office 正文已成功解析，最终可读性由 MinerU 判断。
 
 ## 任务持久化与失败恢复
 
@@ -94,11 +105,11 @@ PDF 跳过真正空白页但保留其后文本页的原始页码。无原生文�
 
 ## 人工验收
 
-在项目根目录同步环境、激活环境并运行契约与四类 Parser 单元测试，无需启动 PostgreSQL、Redis、FastAPI 或 Worker：
+在项目根目录同步环境、激活环境并运行契约与 Parser 单元测试，无需启动基础服务或 Worker：
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_parsed_document.py tests/test_text_parser.py tests/test_docx_parser.py tests/test_pdf_parser.py -q
+python -m pytest tests/test_parsed_document.py tests/test_text_parser.py tests/test_docx_parser.py tests/test_pdf_parser.py tests/test_tabular_parsers.py tests/test_office_formats.py -q
 ```
 
 检查测试全部通过，并人工确认：
@@ -117,7 +128,7 @@ python -m pytest tests/native_parser_db_smoke.py tests/document_processing_smoke
 真实上传验收：
 
 1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0004_mineru_jobs`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
-2. 先确认 Windows Redis 服务为 `Running`，再在 Swagger 向测试知识库分别上传中文 TXT、含标题和代码围栏的 MD、含标题/段落/表格的 DOCX、多页文本 PDF；不同文件内容需不同以避免去重。
+2. 先确认 Windows Redis 服务为 `Running`，再在 Swagger 向测试知识库通过普通 `/documents` 上传 TXT、MD、DOCX、文本 PDF，以及三种编码（UTF-8/BOM/GB18030）的 CSV、多 Sheet XLSX；不同内容避免去重。CSV 包含中文、引号逗号、空字段、数字和百分比，XLSX 包含空 Sheet、中文、数字、百分比及未执行公式。
 3. 用文档详情和 `/tasks/{task_id}` 查询，预期文档为 `CHUNKING`、无失败原因，首次成功任务结果为 `awaiting_chunk` 且 `block_count > 0`。
 4. 在 pgAdmin 中用实际 `doc_id` 检查有序正文、标题章节及页码：
 
@@ -128,6 +139,6 @@ WHERE doc_id = '实际文档 UUID'::uuid
 ORDER BY block_index;
 ```
 
-5. 上传扫描 PDF 或图片，预期文档为 `FAILED`、原因明确需要 OCR、原件保留且不生成部分 Block；再检查空文本及损坏文件的安全错误。文件名、正文、物理 / 逻辑页码应与原件人工对照。
+5. 核对 CSV table 的空字段/引号/数值；XLSX table 的 Sheet 原序、section、原式、百分比及空 Sheet 跳过；两者 page=1、bbox=NULL、source=native_parser。零字节文件在上传时返回 400，其他全空或畸形正文解析为 FAILED，不落部分块。上传旧 Office/PPTX/图片走 Native 应明确要求 MinerU，原件保留；不要把此入口当自动 Router。
 
-以上自动测试不等于真实 Redis、Worker 或用户样本文档已人工验证。复杂文档的云端解析采用 MinerU，验收要求见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，不继续接入火山 / 百度 OCR。
+阶段 1～10 已按用户确认完成人工验收；新增 CSV/XLSX 的自动测试不代替真实 Worker 与用户原件测试。新增 Office 云端验收见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，不继续接入火山 / 百度 OCR。

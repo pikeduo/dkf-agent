@@ -2,7 +2,7 @@
 
 DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结构化知识库建设与问答。本文说明安装、配置、启动和接口使用。
 
-当前提供知识库管理、上传、原生文本解析与显式 MinerU Cloud 解析入口。TXT、Markdown、DOCX 和文本型 PDF 使用原生解析；图片、扫描件、表格与公式 PDF 可显式提交 MinerU 官方云端精准解析 API V4（需配置 Token 并完成人工验证）。尚无自动 Parser 路由、切片、索引或问答，上传和解析成功不代表可以检索。
+当前提供知识库管理、上传、原生解析与显式 MinerU Cloud 解析入口。TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 支持原生解析；DOC/DOCX、PPT/PPTX、XLS/XLSX、图片及扫描/复杂 PDF 可显式提交 MinerU 官方精准解析 API V4（需配置 Token）。PDF/图片主链路已完成人工验收，新增 Office 云解析仍需用真实文件验证。尚无自动 Parser 路由、切片、索引或问答，上传和解析成功不代表可以检索。
 
 开发与验收文档统一放在 `docs/`：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)、[Parser 契约](docs/PARSER_CONTRACT.md)、[MinerU Cloud 人工验收](docs/MINERU_CLOUD.md)。本文仅保留部署和使用说明。
 
@@ -30,7 +30,7 @@ conda activate dkf-agent
 
 已有环境需要同步依赖时，使用 `conda env update -n dkf-agent -f environment.yml`。
 
-原生解析需要环境文件中的 [python-docx](https://python-docx.readthedocs.io/en/latest/api/document.html)（1.2 及以上）和 [PyMuPDF](https://pymupdf.readthedocs.io/en/latest/changes.html#changes-in-version-1-24-3)（1.24.3 及以上）。更新依赖后重启 CPU Worker；只更新 API 不会更新 Worker 中已加载的解析代码。
+原生解析需要环境文件中的 [python-docx](https://python-docx.readthedocs.io/en/latest/api/document.html)（1.2 及以上）、[PyMuPDF](https://pymupdf.readthedocs.io/en/latest/changes.html#changes-in-version-1-24-3)（1.24.3 及以上）和 [openpyxl](https://openpyxl.readthedocs.io/en/stable/tutorial.html)（3.1.5～3.x）。旧 Office 容器检查使用 [olefile](https://olefile.readthedocs.io/en/latest/Howto.html) 0.47；CSV 使用标准库，无需 LibreOffice。更新依赖后重启 API 和 CPU Worker；只更新 API 不会更新 Worker 中已加载的解析代码。
 
 仅在尚无本地配置时复制模板：
 
@@ -247,7 +247,7 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传单个文件，成功创建返回 201 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、失败原因及任务 ID |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递任务，无请求体，成功返回 202 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份 PDF / 图片至 MinerU，multipart `file`，返回 202 与 Parse Job |
+| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份 PDF / 图片 / Office 至 MinerU，multipart `file`，返回 202 与 Parse Job |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 显式提交已有待处理 / 失败文档，或恢复同代次云任务；无请求体，返回 202 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 最近 20 条云端任务、安全错误及外部状态；无签名 URL 或 Token |
 | POST | `/tasks/add` | 提交加法任务；JSON 参数为整数 `x`、`y` 和可选 `queue`，返回 202 |
@@ -269,9 +269,19 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 在 Swagger 中选择上传接口，填写已有 `kb_id`，选择文件并提交。请求类型为 `multipart/form-data`，文件字段名为 `file`，不使用 JSON 或 Base64。
 
-支持 PDF、DOCX、TXT、MD、JPG、JPEG、PNG；不接受空文件、含路径或控制字符的文件名，文件名最多 255 字符。相同知识库中内容相同的文件返回 409，错误信息包含已有 `doc_id`，无需再次上传。
+支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、CSV、TXT、MD、JPG、JPEG、PNG；不接受空文件、含路径或控制字符的文件名，文件名最多 255 字符。OOXML 检查对应 ZIP 主部件，旧 Office 检查 OLE 容器和对应主流，不能只改后缀冒充。相同知识库中内容相同的文件返回 409，错误信息包含已有 `doc_id`，无需再次上传。
 
-可自动解析 TXT、Markdown、DOCX 正文及文本型 PDF。TXT/Markdown 支持 UTF-8、带 BOM 的 UTF-16/32 和 GB18030；无法识别的编码需先转换为 UTF-8。DOCX 提取正文段落、标题及表格，不包含页眉、页脚、文本框或图片文字。PDF 保留真实页码；TXT、Markdown 与 DOCX 的页码为逻辑页 1，不等同于 Word 排版页码。
+| 文件 | 普通 `/documents` 的 Native 能力 | 显式 `/mineru/documents` |
+|---|---|---|
+| TXT / MD / CSV | 文本 / 表格 | 不接受 |
+| DOCX / XLSX | 正文与表格 / 工作表单元格 | 可提交，真实 Office 结果需验收 |
+| DOC / XLS / PPT / PPTX | 记录明确的需要 MinerU 错误，不自动转云端 | 可提交，真实 Office 结果需验收 |
+| 文本型 PDF | 原生文本，物理页码 | 可提交 |
+| 扫描/复杂 PDF、JPG/JPEG/PNG | 不执行 OCR，部分内容可能无法原生解析 | 可提交 |
+
+TXT/Markdown/CSV 支持 UTF-8、带 BOM 的 UTF-16/32 和 GB18030；其他编码需先转换为 UTF-8。CSV 使用逗号分隔，支持带引号的逗号/换行、空字段；列数不一致或引号损坏明确失败。DOCX 提取正文段落、标题及表格，不包含页眉、页脚、文本框或图片文字。XLSX 按工作表原序提取单元格，工作表名保存为章节，跳过空表；公式保留原式、不计算，普通百分比格式可读化，复杂自定义显示格式不保证还原。XLSX 不解析图片、图表、SmartArt 或复杂绘图；需要视觉内容时手动选择 MinerU。
+
+CSV/XLSX 的安全上限为 10 万行、1024 列、100 万单元格（XLSX 累计）；XLSX 最多 1000 个工作表，Office ZIP 总解压规模最多 256 MiB。全空或超限文件解析失败。PDF 保留真实页码；TXT、Markdown、CSV、DOCX 和 XLSX 的 Native 页码为逻辑页 1，不等同于 Office 排版或打印页码，bbox 为空。
 
 此上传入口仍只投递原生 Parser，图片、纯扫描及包含无文本扫描页的混合 PDF 会记录需要云端解析的失败原因并保留原件；不会自动回退 MinerU。文本与图片同页时仅提取已有文本，不识别图片内文字。需要复杂文档解析时使用下方显式 MinerU 入口；加密、损坏、空文本文件也会失败。
 
@@ -289,11 +299,13 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 ### 显式使用 MinerU Cloud
 
-在 Swagger 选择 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents`，填写知识库标识并上传 PDF、JPG、JPEG 或 PNG。云端限制为单文件 200 MB / 200 页，应用默认上传上限仍为 50 MiB，以更小者为准。返回的 `job_id / doc_id / state` 用于后续查询；202 只表示本地任务已建立并投递，不代表云端已经成功。
+在 Swagger 选择 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents`，上传 PDF、JPG/JPEG/PNG 或 DOC/DOCX/PPT/PPTX/XLS/XLSX，不接受 CSV/TXT/MD。[官方接口](https://mineru.net/apiManage/docs)限制单文件 200 MB / 200 页，应用默认上传上限仍为 50 MiB，以更小者为准。Office 无可靠本地转换页数，200 页限制由云端最终校验，不按 Sheet/Slide 数猜测；优先页观测不计入未知 Office 页数，实际额度以平台为准。202 只表示本地任务已建立并投递，不代表云端已成功。
+
+Office 云解析的 `page` 是 MinerU 转换后的逻辑 `page_idx + 1`，不是原始 Office 物理页码；无法可靠映射原件页面尺寸，所以 bbox 始终为空。PDF 和图片继续分别使用物理页码/点数坐标和像素坐标。
 
 查询 `GET /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs`：外部状态为 `waiting-file / pending / running / converting / done / failed`；响应还包含 `batch_id / data_id / trace_id / retry_count / error_code / error_message`、活动标记和时间。`task_id` 是本地处理代次，不是整份云任务的 Celery 结果 ID。云任务应以此列表和文档详情为准，不以单个短任务 SUCCESS 或 `/tasks` 的 PENDING 判断解析成功。
 
-成功时外部任务为 `done`、文档为 `CHUNKING`；仍不能检索。失败时查看安全错误；文件原件保留。已有 `UPLOADED / FAILED` 的 PDF / 图片可通过 `POST .../documents/{doc_id}/mineru` 提交；同代次活动云任务可用该入口恢复投递，重复请求沿用原任务。已经 `CHUNKING` 的文档返回 409，不提供 Reparse / Reindex。
+成功时任务为 `done`、文档为 `CHUNKING`，仍不能检索。失败时查看安全错误，原件保留。已有 `UPLOADED / FAILED` 的 PDF / 图片 / Office 可通过 `POST .../documents/{doc_id}/mineru` 提交；活动云任务可用该入口恢复投递，重复请求沿用原任务。已 `CHUNKING` 返回 409，不提供 Reparse / Reindex。比较同一 DOCX/XLSX 的 Native 与 MinerU 结果时使用两个独立知识库，不能绕过完成状态限制。
 
 网络重试耗尽的非活动失败任务不会因网络恢复自动继续；对它显式提交会创建新批次并可能消耗额度，不是仅下载旧批次。云端解析结果保留原始文字，页眉/页脚只在顺序证据明确时恢复位置；复杂版式、缺少顺序信息或有歧义时保留供应商原序，不保证修复全部阅读顺序、OCR 或公式名称。更新代码后重启 CPU Worker；已有解析结果不会自动改写。
 

@@ -13,6 +13,7 @@ from app.api.admin_knowledge_bases import (
     require_knowledge_base,
 )
 from app.core.config import get_settings
+from app.core.file_formats import MINERU_TYPES
 from app.models import Document, DocumentParseJob
 from app.schemas.parse_job import ParseJobResponse
 from app.services.document_upload import store_document
@@ -90,12 +91,12 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
     "/{kb_id}/mineru/documents",
     response_model=ParseJobResponse,
     status_code=202,
-    summary="上传 PDF 或图片并显式提交 MinerU 云端解析",
+    summary="上传 PDF、图片或 Office 并显式提交 MinerU 云端解析",
     responses={
         404: {"description": "知识库不存在"},
         409: {"description": "内容重复，返回已有 doc_id"},
         413: {"description": "文件或页数超限"},
-        415: {"description": "非 PDF、JPG、JPEG、PNG"},
+        415: {"description": "格式不支持或内容不匹配；不接受 CSV/TXT/MD"},
         422: {"description": "原件无法读取，已保存时返回 doc_id"},
     },
 )
@@ -103,7 +104,10 @@ def upload_mineru_document(
     kb_id: UUID,
     session: AdminSession,
     file: Annotated[
-        UploadFile, File(description="单个 PDF、JPG、JPEG 或 PNG；将传至 MinerU 云端")
+        UploadFile,
+        File(
+            description="单个 PDF、图片或 DOC/DOCX/PPT/PPTX/XLS/XLSX；将传至 MinerU 云端"
+        ),
     ],
 ) -> ParseJobResponse:
     """复用原有文件保存和去重，不投递原生任务；原件留存不表示云端处理成功。"""
@@ -111,14 +115,10 @@ def upload_mineru_document(
     try:
         require_knowledge_base(session, kb_id)
         settings = require_configuration()
-        if Path(file.filename or "").suffix.lower() not in {
-            ".pdf",
-            ".jpg",
-            ".jpeg",
-            ".png",
-        }:
+        if Path(file.filename or "").suffix.lower().lstrip(".") not in MINERU_TYPES:
             raise HTTPException(
-                status_code=415, detail="MinerU 入口仅接受 PDF、JPG、JPEG、PNG"
+                status_code=415,
+                detail="MinerU 仅接受 PDF、图片与 DOC/DOCX/PPT/PPTX/XLS/XLSX",
             )
         saved = store_document(session, kb_id, file, settings)
         return start_job(session, session.get(Document, saved.doc_id), settings)

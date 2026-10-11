@@ -9,6 +9,7 @@ import pytest
 from celery.exceptions import Retry
 from kombu.exceptions import OperationalError as BrokerError
 from mineru_samples import pdf_bytes, png_bytes, result_zip
+from office_samples import office_bytes
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -182,12 +183,18 @@ def execute(job, step="submit"):
 
 
 @pytest.mark.parametrize(
-    "name,content", [("测试.pdf", None), ("图片.png", png_bytes())]
+    "name,content",
+    [("测试.pdf", None), ("图片.png", png_bytes())]
+    + [
+        (f"办公样本.{kind}", office_bytes(kind))
+        for kind in ("doc", "docx", "ppt", "pptx", "xls", "xlsx")
+    ],
+    ids=["pdf", "png", "doc", "docx", "ppt", "pptx", "xls", "xlsx"],
 )
 def test_cloud_pipeline_persists_blocks_and_skips_duplicate(
     cloud_context, name, content
 ):
-    """从上传到五类 Block 事务入库，重复完成消息跳过，不生成 Chunk 或 READY。"""
+    """PDF/图片/六种 Office 事务入库，Office 坐标为空，重复完成消息不增块。"""
 
     context = cloud_context
     job = upload(context, name, content)
@@ -214,6 +221,8 @@ def test_cloud_pipeline_persists_blocks_and_skips_duplicate(
         identities = [block.block_id for block in blocks]
         assert [block.block_index for block in blocks] == [1, 2, 3, 4, 5]
         assert all(block.source == "mineru_cloud" for block in blocks)
+        if name.endswith((".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx")):
+            assert all(block.bbox is None and block.page == 1 for block in blocks)
         assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 0
     assert execute(job, "check").result["status"] == "skipped"
     with context.session() as session:
@@ -363,10 +372,13 @@ def test_database_rejects_duplicate_active_identity(cloud_context):
             session.flush()
 
 
-def test_put_retry_reuses_checkpoint_and_backoff(cloud_context):
-    """PUT 临时失败保留 batch；再次执行仅 PUT，不重复 POST，退避包含抖动。"""
+@pytest.mark.parametrize("kind", ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"])
+def test_put_retry_reuses_checkpoint_and_backoff(cloud_context, kind):
+    """PDF/Office PUT 临时失败沿用 batch，恢复后只写一次 Block，重复消息不增加块。"""
 
-    job = upload(cloud_context)
+    job = upload(
+        cloud_context, f"重试.{kind}", None if kind == "pdf" else office_bytes(kind)
+    )
     cloud_context.provider.upload_error = MinerUError(
         "UPLOAD_NETWORK", "临时上传失败", retryable=True
     )
@@ -381,6 +393,16 @@ def test_put_retry_reuses_checkpoint_and_backoff(cloud_context):
     assert (
         cloud_context.provider.submissions == 1 and cloud_context.provider.uploads == 2
     )
+    cloud_context.provider.state = "done"
+    assert execute(job, "check").state == "SUCCESS"
+    assert execute(job, "check").result["status"] == "skipped"
+    with cloud_context.session() as session:
+        blocks = session.scalars(
+            select(DocumentBlock).where(DocumentBlock.doc_id == UUID(job["doc_id"]))
+        ).all()
+        assert len(blocks) == len({block.block_id for block in blocks}) == 5
+        if kind != "pdf":
+            assert all(block.bbox is None for block in blocks)
 
 
 def test_429_retries_with_retry_after_and_no_raw_token(cloud_context):
