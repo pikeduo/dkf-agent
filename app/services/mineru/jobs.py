@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentParseJob
 from app.services.document_processing import (
@@ -174,8 +175,14 @@ def submit_step(
         job.upload_url = batch.urls[0]
         job.upload_expires_at = datetime.now(UTC) + timedelta(hours=24)
         job.submitted_at = datetime.now(UTC)
+        batch_log = {
+            "doc_id": document.doc_id,
+            "job_id": job_id,
+            "batch_id": job.batch_id,
+        }
         # 申请结果先提交，再开始 PUT；临时上传失败继续使用同一 URL 与 batch。
         session.commit()
+        log_event("mineru.batch_created", **batch_log)
         locked = lock_job(session, job_id)
         if not locked:
             return "skipped", 0
@@ -186,7 +193,9 @@ def submit_step(
     job.upload_complete = True
     job.upload_url = None
     job.error_code = job.error_message = document.error_message = None
+    upload_log = {"doc_id": document.doc_id, "job_id": job_id, "batch_id": job.batch_id}
     session.commit()
+    log_event("mineru.upload_complete", **upload_log, upload_complete=True)
     return "check", settings.mineru_poll_interval_seconds
 
 
@@ -226,6 +235,13 @@ def check_step(
         return "submit", 0
     result = provider.query(job.batch_id, job.data_id)
     job.state, job.trace_id = result["state"], result["trace_id"]
+    log_event(
+        "mineru.remote_state",
+        doc_id=document.doc_id,
+        job_id=job_id,
+        batch_id=job.batch_id,
+        state=job.state,
+    )
     if job.state == "failed":
         error = result_failure(result)
         if error.retryable and job.retry_count < settings.mineru_max_retries:
@@ -241,6 +257,12 @@ def check_step(
         session.commit()
         return "check", settings.mineru_poll_interval_seconds
     archive = provider.download_result(result.get("full_zip_url"))
+    log_event(
+        "mineru.result_downloaded",
+        doc_id=document.doc_id,
+        job_id=job_id,
+        size_bytes=len(archive),
+    )
     source = local_file(document, job)
     validate_local_file(source)
     parsed = MinerUResultAdapter().normalize(
@@ -251,12 +273,27 @@ def check_step(
         geometry=page_geometry(source.path, document.file_type),
         identity=job.file_hash + ":" + job.options_hash,
     )
+    log_event(
+        "mineru.adapter_validated",
+        doc_id=document.doc_id,
+        job_id=job_id,
+        block_count=len(parsed.blocks),
+    )
     persist_blocks(session, document, parsed)
     transition_document(document, "CHUNKING")
     job.state, job.is_active = "done", False
     job.finished_at = datetime.now(UTC)
     job.error_code = job.error_message = None
+    completed_doc_id = document.doc_id
     session.commit()
+    log_event(
+        "mineru.blocks_persisted",
+        doc_id=completed_doc_id,
+        job_id=job_id,
+        block_count=len(parsed.blocks),
+        status="CHUNKING",
+        state="done",
+    )
     return "done", len(parsed.blocks)
 
 

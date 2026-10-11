@@ -18,12 +18,16 @@ data/parsed/
 checkpoints/
 
 *.log
+# 包含轮转备份，不能只忽略 .log 后缀。
+/logs/
+*.log.[0-9]*
 
 # 工程文档需要提交，赛题附件、验收素材和其他本地资料仍保持忽略。
 docs/*
 !docs/DEVELOPMENT_PLAN_CODEX.md
 !docs/MINERU_CLOUD.md
 !docs/PARSER_CONTRACT.md
+!docs/BUSINESS_LOGGING.md
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

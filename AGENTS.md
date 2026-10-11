@@ -438,6 +438,14 @@ concurrency = 1
 - 11A 的六种 Office 仅通过显式 MinerU 入口；page_idx+1 为转换后的逻辑页，bbox 固定为空，不套用 PyMuPDF 原件页几何。Office 保留 content_list 原序与原数组位置 ID，不使用 PDF 页边界顺序恢复。限流、Token、短任务、事务幂等设计不变。
 - 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
 
+### 6.6.3 业务日志约定
+
+- 现有接口、上传及解析链路使用标准库 `dkf.business` Logger 输出白名单 JSON 摘要，终端与每进程独立轮转文件并行；不接管 Uvicorn、Celery 或 HTTP 库的原始日志。`LOG_*` 配置需按环境变量规则同步维护，运行日志及轮转备份不提交。
+- HTTP 日志使用路由模板、状态码、耗时和服务生成的 request_id，不记录查询串、请求头或正文；Celery 消息仅额外传递请求编号。线程/任务结束恢复 ContextVar，prefork 子进程重新配置独立文件，不共享多进程 RotatingFileHandler。
+- 上传、投递、解析、校验、结果下载、落库、重试/失败分开记录；只在数据库事务提交后记 `parse.persisted / mineru.blocks_persisted`，日志不得新增事务、改变任务结果或吞掉业务异常。解析落库不代表 OCR 内容质量正确。
+- 禁止记录 Token、密码、连接串、签名 URL、上游错误原文、文件及结果正文；错误以安全分类码/类型记录，不传任意异常对象。日志含文件名和资源标识，需限制目录访问；旧消息无 request_id 时仍按 doc_id/job_id 关联。日志不是数据库审计、补投器或结果缓存。
+- 运维配置见 README；事件契约与人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。这项可观测性补充不推进阶段 11B 或后续阶段。
+
 ### 6.7 数据和证据规则
 
 每个 Chunk 必须至少保留：

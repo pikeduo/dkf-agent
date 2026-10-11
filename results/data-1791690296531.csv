@@ -1,0 +1,33 @@
+"file_name","file_type","status","block_id","block_index","page","section","block_type","text","bbox","source"
+"01_native_utf8.csv","csv","CHUNKING","a61b1133-6962-5a2d-ba7d-bcc0498bc69d",1,1,"","table","部门	指标	Q1	Q2	Q3	同比变化	备注
+华东区	营业收入	1,250.50	1,318.20	1,420.80	13.62%	""包含逗号字段：""""北京,上海""""""
+华南区	营业成本	875.35	903.10	980.40	12.00%	空字段测试下一列为空
+西南区	毛利率	30.00%	31.20%	31.00%	1.00%	
+CSV-END-MARKER-2026	校验	A-17	B-204	C-999	100.00%	结束标记","null","native_parser"
+"02_native_utf8_bom.csv","csv","CHUNKING","42d922ec-a254-5667-ac06-87135dd36b93",1,1,"","table","部门	指标	Q1	Q2	Q3	同比变化	备注
+华东区	营业收入	1,250.50	1,318.20	1,420.80	13.62%	""包含逗号字段：""""北京,上海""""""
+华南区	营业成本	875.35	903.10	980.40	12.00%	空字段测试下一列为空
+西南区	毛利率	30.00%	31.20%	31.00%	1.00%	
+CSV-END-MARKER-2026	校验	A-17	B-204	C-999	100.00%	结束标记","null","native_parser"
+"03_native_gb18030.csv","csv","CHUNKING","6a2bfca5-2305-5cb2-81ca-6ff9cbdcfd01",1,1,"","table","部门	指标	Q1	Q2	Q3	同比变化	备注
+华东区	营业收入	1,250.50	1,318.20	1,420.80	13.62%	""包含逗号字段：""""北京,上海""""""
+华南区	营业成本	875.35	903.10	980.40	12.00%	空字段测试下一列为空
+西南区	毛利率	30.00%	31.20%	31.00%	1.00%	
+CSV-END-MARKER-2026	校验	A-17	B-204	C-999	100.00%	结束标记","null","native_parser"
+"20_native_multisheet.xlsx","xlsx","CHUNKING","fcbf6251-87c6-5c5c-8b25-d87403a7e08f",1,1,"经营指标","table","部门	Q1收入	Q2收入	Q3收入	Q3成本	毛利率	Marker
+华东区	1250.5	1318.2	1420.8	980.4	=(D2-E2)/D2	XLSX-R1
+华南区	980.2	1010.5	1120.6	760.2	=(D3-E3)/D3	XLSX-R2
+西南区	640	700	820	590	=(D4-E4)/D4	XLSX-R3
+合计	=SUM(B2:B4)	=SUM(C2:C4)	=SUM(D2:D4)	=SUM(E2:E4)	=1-E5/D5	XLSX-TOTAL
+						
+XLSX-END-MARKER-2026						","null","native_parser"
+"20_native_multisheet.xlsx","xlsx","CHUNKING","e2048e7f-44c2-5b37-a74e-1a046904d383",2,1,"多Sheet公式","table","项目	当前值	上期值	增长率	公式Marker
+活跃用户	125000	110000	=(B2-C2)/C2	XLSX-FORMULA-01
+客单价	86.5	80	=(B3-C3)/C3	XLSX-FORMULA-02
+公式保留测试	=SUM(B2:B3)	不计算	公式文本应保留	XLSX-FORMULA-TEXT","null","native_parser"
+"20_native_multisheet.xlsx","xlsx","CHUNKING","ea9a73b3-d84c-5f7b-89ab-c97f2cae1766",3,1,"图片与图表","table","XLSX-VISUAL-SHEET-MARKER-2026							图表数据	
+								
+以下图片内文字需要 OCR，Native XLSX Parser 第一版不识别图片内文字。							季度	收入
+							Q1	1250
+							Q2	1380
+							Q3	1560","null","native_parser"

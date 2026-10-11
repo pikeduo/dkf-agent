@@ -1,4 +1,4 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.4 · 多格式文档与混合解析）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.5 · 多格式文档 + LlamaIndex RAG 编排）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
@@ -7,7 +7,8 @@
 >
 > 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + Parser Router**。  
-> 当前新增目标：扩展 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式，并为混合内容文档建立真实测试基线。  
+> RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
+> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -27,9 +28,11 @@
 → Chunk
 → BGE-M3 Embedding
 → PostgreSQL + pgvector
-→ Dense Retrieval + BM25
+→ LlamaIndex Adapter（DocumentChunk ↔ TextNode / NodeWithScore）
+→ Dense Retriever + BM25 Retriever
+→ Query Fusion / Hybrid Retrieval
 → bge-reranker-v2-m3
-→ DeepSeek RAG
+→ DeepSeek Response Synthesis
 → Answer + Evidence + Citation
 ```
 
@@ -115,10 +118,12 @@ OHR-Bench 可作为文档解析质量维度参考，其公开任务重点覆盖 
 ```text
 文档解析
 文档切片
+LlamaIndex RAG Adapter
 向量检索
 关键词检索
+Query Fusion
 重排
-生成融合
+Response Synthesis / 生成融合
 来源标注
 测试与性能评估
 ```
@@ -173,8 +178,9 @@ OHR-Bench 可作为文档解析质量维度参考，其公开任务重点覆盖 
 | Complex / Legacy Office Parser | MinerU Cloud 精准解析 API（V4） |
 | MinerU Model | `vlm`（默认） |
 | Sparse Retrieval | BM25 |
+| RAG Orchestration | LlamaIndex（Retriever / Query Fusion / Node Postprocessor / Response Synthesis） |
 | Formula | SymPy |
-| Agent | LangGraph / LangChain |
+| Agent / Workflow | LangGraph / LangChain |
 | Test | pytest |
 | Local Infrastructure | PostgreSQL 17 + pgvector（Windows 原生）/ Redis（Windows 本地服务） |
 
@@ -232,6 +238,13 @@ dkf-agent/
 │   │   ├── retrieval/
 │   │   ├── reranker/
 │   │   ├── rag/
+│   │   │   └── llama_index/      # 阶段 15A 起逐步建立
+│   │   │       ├── node_adapter.py
+│   │   │       ├── dense_retriever.py
+│   │   │       ├── bm25_retriever.py
+│   │   │       ├── fusion.py
+│   │   │       ├── reranker.py
+│   │   │       └── query_engine.py
 │   │   └── formula/
 │   ├── tasks/
 │   └── agents/
@@ -1568,6 +1581,113 @@ READY 文档所有 Chunk 均具备向量。
 
 ---
 
+# 21A. 阶段 15A：LlamaIndex RAG Adapter
+
+## 目标
+
+在不改变 DKF-Agent 已有数据模型和索引存储的前提下，引入 LlamaIndex 作为后续 RAG 编排层的统一抽象。
+
+本阶段只建立适配边界，不实现完整 Retrieval / BM25 / Rerank / RAG。
+
+## 核心原则
+
+LlamaIndex **不是**本项目的文档解析器、切片器、Embedding 存储器或数据库真相来源。
+
+继续由 DKF-Agent 自主管理：
+
+```text
+Native Parser / MinerU
+Parse Cache
+DocumentBlock
+Chunk
+BGE-M3 Embedding
+PostgreSQL + pgvector
+document_chunks
+```
+
+LlamaIndex 从本阶段开始只负责：
+
+```text
+Node / NodeWithScore 统一表示
+Retriever 抽象
+Query Fusion
+Node Postprocessor / Reranker 编排
+Response Synthesis
+RAG Query Engine 编排
+```
+
+## 禁止的接入方式
+
+生产主链路不要使用下列方式重新接管已有流程：
+
+```text
+SimpleDirectoryReader → 重新读取原文件
+VectorStoreIndex.from_documents() → 再次自动切片 / Embedding
+IngestionPipeline → 再建一套 Parse / Chunk / Embedding Cache
+PGVectorStore → 再建立一套独立业务真相表
+```
+
+允许在独立实验或测试中使用官方示例验证框架，但不得把其作为生产数据主路径。
+
+## Node Adapter
+
+新增统一适配层，例如：
+
+```text
+app/services/rag/llama_index/node_adapter.py
+```
+
+将已有 `DocumentChunk` 转换为 LlamaIndex `TextNode`，至少保留：
+
+```text
+id_ = chunk_id
+text
+metadata.kb_id
+metadata.doc_id
+metadata.chunk_id
+metadata.file_name
+metadata.page_start
+metadata.page_end
+metadata.section
+```
+
+要求：
+
+- `chunk_id` 是 LlamaIndex Node 的稳定业务标识，不重新随机生成。
+- LlamaIndex metadata 不得丢失 Evidence / Citation 所需字段。
+- Node 转换后可以还原为项目内部检索结果，不把 LlamaIndex 类型泄漏到数据库模型。
+- PostgreSQL `document_chunks` 仍是唯一持久化真相来源。
+
+## Embedding 边界
+
+已有 BGE-M3 `EmbeddingService` 继续是项目正式 Embedding 实现。
+
+如果 LlamaIndex Retriever / Query Engine 需要 Embedding 接口，则增加 Adapter 调用已有服务，不另行加载第二套 BGE-M3 模型，不重复生成文档向量。
+
+## 自动测试
+
+至少覆盖：
+
+```text
+DocumentChunk → TextNode
+TextNode / NodeWithScore → DKF Retrieval Result
+chunk_id 稳定
+metadata 完整
+page / section 不丢失
+同一 Chunk 重复转换结果一致
+不产生第二份数据库记录
+不触发文档重新 Parse / Chunk / Embedding
+```
+
+## 完成标准
+
+- LlamaIndex 可以消费现有 `document_chunks`，不重新读取原文档。
+- Chunk / Page / Section / Document 来源链不丢失。
+- 不新增第二套向量真相表。
+- 不改变阶段 1～15 已完成的数据处理语义。
+
+---
+
 # 22. 阶段 16：预置知识库批量导入
 
 ## 目标
@@ -1605,18 +1725,22 @@ scripts/import_knowledge_base.py
 
 ---
 
-# 23. 阶段 17：Dense Retrieval
+# 23. 阶段 17：Dense Retrieval（LlamaIndex Retriever）
 
 ## 目标
-实现第一版向量检索。
+
+在 LlamaIndex Retriever 抽象下实现第一版向量检索，但底层仍查询项目自己的 PostgreSQL + pgvector。
 
 流程：
 
 ```text
-Query
-→ BGE-M3
-→ pgvector
-→ Top-K Chunks
+Question
+→ BGE-M3 embed_query()
+→ Custom DenseRetriever
+→ PostgreSQL / pgvector
+→ DocumentChunk
+→ TextNode / NodeWithScore
+→ Top-K
 ```
 
 初始：
@@ -1625,26 +1749,36 @@ Query
 top_k = 20
 ```
 
-返回至少：
+Retriever 至少返回 / 保留：
 
 ```text
 chunk_id
 doc_id
+kb_id
 file_name
-page
+page_start
+page_end
+section
 text
-score
+retrieval_score
 ```
 
+## 原则
+
+- 第一版优先使用自定义 LlamaIndex Retriever 包装现有 SQLAlchemy / pgvector 查询。
+- 不要求使用 LlamaIndex `PGVectorStore`；避免生成第二套向量表和 metadata 表。
+- Query Embedding 必须调用已有 BGE-M3 服务。
+- LlamaIndex Node 只是运行时表示，不是新的持久化真相来源。
+
 ## 完成标准
-问题可以检索出相关 Chunk。
+问题可以通过 LlamaIndex Retriever 抽象检索出正确的项目 Chunk，并完整保留 Citation metadata。
 
 ---
 
 # 24. 阶段 18：单文档 Retrieval
 
 ## 目标
-满足赛题单文档 RAG。
+满足赛题单文档 RAG，并验证 LlamaIndex Retriever 的业务过滤能力。
 
 检索支持：
 
@@ -1659,62 +1793,76 @@ doc_ids
 doc_ids = ["xxx"]
 ```
 
-则只能从该文档检索。
+过滤应尽量下推到 PostgreSQL 查询，而不是先全库检索再在 Python 中删除其他文档。
 
 ## 完成标准
-指定文档检索不会混入其他文档证据。
+指定文档检索不会混入其他文档 Evidence；Node metadata 中仍保留原始 `doc_id / chunk_id / page`。
 
 ---
 
-# 25. 阶段 19：BM25
-
-## 目标
-补充关键词检索。
-
-当前使用本地 BM25，不引入 Elasticsearch。
-
-流程：
-
-```text
-Query
-→ BM25
-→ Top-K
-```
-
-## 完成标准
-数字、专有名词和精确关键词有合理结果。
-
----
-
-# 26. 阶段 20：Hybrid Retrieval
+# 25. 阶段 19：BM25 Retriever
 
 ## 目标
 
-```text
-Dense
-+
-BM25
-→ Candidate Merge
-```
+补充关键词检索，并统一到 LlamaIndex Retriever 接口。
 
-第一版：
+当前仍使用本地 BM25，不引入 Elasticsearch。可以使用 LlamaIndex 的 BM25 Retriever / 对应集成，也可以在其 Retriever 抽象下包装现有 BM25 实现。
+
+数据来源只能是当前 READY 文档的 `document_chunks` 派生 Node：
 
 ```text
-Dense Top 20
-BM25 Top 20
-→ 去重
-→ Rank Fusion
-→ Top 20~30
+DocumentChunk
+→ TextNode
+→ BM25 Index
+→ BM25 Retriever
 ```
 
-不需要一开始做复杂融合算法。
+BM25 索引属于**可重建的派生索引 / 缓存**，不是第二套业务真相。
+
+重点验证：
+
+```text
+数字
+型号
+专有名词
+英文缩写
+精确关键词
+```
 
 ## 完成标准
-得到统一候选集。
+BM25 Retriever 能返回统一 `NodeWithScore`，并保持 Chunk / Document / Page metadata。
 
 ---
 
-# 27. 阶段 21：Reranker
+# 26. 阶段 20：Hybrid Retrieval / Query Fusion
+
+## 目标
+
+使用 LlamaIndex 的 Retriever 组合能力统一 Dense + BM25。
+
+推荐第一版：
+
+```text
+Dense Retriever Top 20
+          \
+           → QueryFusionRetriever / RRF → 去重 → Top 20~30
+          /
+BM25 Retriever Top 20
+```
+
+原则：
+
+- 第一版优先使用 Reciprocal Rank Fusion / 等价稳定融合策略。
+- 不把复杂 Query Rewrite、Multi-Query Expansion 作为第一版必选项。
+- 融合去重以稳定 `chunk_id` 为主，不以纯文本相等作为唯一标识。
+- 保留 dense score、bm25 score、fusion score 或可解释的排序来源。
+
+## 完成标准
+得到统一候选 `NodeWithScore` 集合；相同 Chunk 不重复；能解释候选来自 Dense、BM25 或两者。
+
+---
+
+# 27. 阶段 21：BGE Reranker（LlamaIndex Node Postprocessor）
 
 ## 目标
 
@@ -1728,48 +1876,64 @@ BAAI/bge-reranker-v2-m3
 
 ```text
 Hybrid Candidates
-→ Reranker
+→ LlamaIndex Node Postprocessor / 自定义 BGE Reranker Adapter
 → Top 5 Evidence
 ```
 
-保留：
+要求：
 
-```text
-retrieval_score
-rerank_score
-```
+- 复用项目自己的 `bge-reranker-v2-m3` 服务，不因接入 LlamaIndex 再加载另一套同模型。
+- 输入输出保持 `NodeWithScore` / DKF Retrieval Result 可互转。
+- 保留至少 `retrieval_score / fusion_score / rerank_score`。
+- Rerank 不能修改原始 `chunk_id / doc_id / page / section / text`。
 
 在线查询默认同步执行。
 
 ## 完成标准
-最终 Evidence 排序明显优于未重排候选。
+最终 Top 5 Evidence 排序明显优于未重排候选，且 Evidence metadata 全部可追溯。
 
 ---
 
-# 28. 阶段 22：DeepSeek RAG
+# 28. 阶段 22：DeepSeek RAG / Response Synthesis
 
 ## 目标
-完成核心问答闭环。
+完成核心问答闭环，并使用 LlamaIndex 组织 Retrieval → Evidence → Response Synthesis。
+
+边界：
+
+```text
+LlamaIndex
+= RAG orchestration / Query Engine / Response Synthesis
+
+DeepSeekService
+= 项目正式 LLM 边界
+```
+
+如果 LlamaIndex 需要 LLM 对象，增加适配器包装已有 `DeepSeekService`；不要在 Query Engine 内散落新的 DeepSeek HTTP 客户端。
 
 流程：
 
 ```text
 Question
-→ Retrieval
-→ Rerank
-→ Evidence
+→ Dense + BM25
+→ Query Fusion
+→ BGE Reranker
+→ Evidence Nodes
+→ LlamaIndex Response Synthesis
 → DeepSeek
 → Answer
 ```
 
 Prompt 原则：
-- 只能使用 Evidence。
+
+- 只能使用最终 Evidence。
 - 证据不足时明确说明。
 - 不虚构来源。
 - 不虚构页码。
 - 数字与关键事实必须可追溯。
+- LlamaIndex 默认 Prompt 不能未经审查直接作为比赛生产 Prompt。
 
-建议返回：
+建议项目 API 仍返回自己的 Schema：
 
 ```json
 {
@@ -1780,8 +1944,10 @@ Prompt 原则：
 }
 ```
 
+不得把 LlamaIndex 内部 `Response / NodeWithScore` 对象直接暴露给前端。
+
 ## 完成标准
-可以完成真实问题的端到端 RAG。
+可以完成真实问题的端到端 RAG，同时保留 DKF-Agent 自己的 Evidence / Citation 契约。
 
 ---
 
@@ -1792,9 +1958,10 @@ Prompt 原则：
 
 ```text
 Answer
-→ Evidence
-→ Chunk
-→ Page
+→ Evidence Node
+→ chunk_id
+→ DocumentChunk
+→ DocumentBlock / Page / Section
 → Document
 ```
 
@@ -1804,20 +1971,28 @@ Citation 至少：
 file_name
 page_start
 page_end
+section
 chunk_id
 text
-score
+retrieval_score
+rerank_score
 ```
 
+原则：
+
+- Citation 以 DKF 数据库和 Node metadata 为准，不依赖模型生成引用。
+- LlamaIndex metadata 只承载已有可验证来源，不允许让 LLM 自行补文件名或页码。
+- 对 Office 逻辑页、PDF 物理页继续沿用 Parser 契约中的页码语义。
+
 ## 完成标准
-答案中的重要信息都能定位原文。
+答案中的重要信息都能反查到原始 Chunk / Document / Page，框架替换不会破坏 Citation。
 
 ---
 
 # 30. 阶段 24：Knowledge Query API
 
 ## 目标
-为前端和未来 Agent 提供稳定接口。
+为前端和未来 Agent 提供稳定接口，并隔离 LlamaIndex 具体实现。
 
 建议：
 
@@ -1829,17 +2004,19 @@ POST /api/knowledge/query
 `/search`：
 
 ```text
-Query → Evidence
+Query
+→ LlamaIndex Retriever / Fusion / Rerank
+→ DKF Evidence Schema
 ```
 
 `/query`：
 
 ```text
 Query
-→ Retrieval
-→ Rerank
-→ LLM
-→ Answer + Evidence
+→ RAG Service
+→ LlamaIndex Query Engine / Response Synthesis
+→ DeepSeek
+→ DKF Answer + Evidence
 ```
 
 请求支持：
@@ -1850,6 +2027,8 @@ question
 doc_ids（可选）
 top_k（可选）
 ```
+
+API 层不得依赖或返回 LlamaIndex 内部类型；未来替换框架时不影响前端和 Coordinator Agent。
 
 ---
 
@@ -2067,7 +2246,9 @@ calculate_formula
 Parser Test
 Chunk Test
 Database Test
+LlamaIndex Adapter Test
 Retrieval Test
+Query Fusion Test
 Citation Test
 Formula Test
 ```
@@ -2227,7 +2408,9 @@ Query 记录：
 query_embedding_ms
 dense_retrieval_ms
 bm25_ms
+fusion_ms
 rerank_ms
+response_synthesis_ms
 llm_ms
 total_ms
 ```
@@ -2321,10 +2504,12 @@ Demo 5：
 [ ] 单文档 RAG
 [ ] 全知识库 RAG
 [ ] MinerU Cloud 图片 / 扫描 PDF / Office 解析
+[ ] LlamaIndex Adapter（不接管 Parse / Chunk / Embedding / DB）
 [ ] Dense Retrieval
-[ ] BM25
-[ ] Hybrid
-[ ] Reranker
+[ ] BM25 Retriever
+[ ] Query Fusion / Hybrid
+[ ] BGE Reranker
+[ ] DeepSeek Response Synthesis
 [ ] Citation
 [ ] Parser Router 与混合文档路由
 [ ] CSV / XLSX Native Parser
@@ -2357,10 +2542,30 @@ Knowledge Agent
 
 ```text
 Coordinator Agent
-↓
+        │
+        │ LangGraph / Workflow
+        ↓
 Knowledge Agent
-↓
+        │
+        ↓
 Knowledge Base Service
+        │
+        ├─ LlamaIndex RAG Orchestration
+        │   ├─ Dense Retriever
+        │   ├─ BM25 Retriever
+        │   ├─ Query Fusion
+        │   ├─ BGE Reranker Adapter
+        │   └─ DeepSeek Response Synthesis
+        │
+        └─ PostgreSQL + pgvector + document_chunks
+```
+
+职责边界固定为：
+
+```text
+LangGraph = Agent / Workflow 层
+LlamaIndex = Knowledge RAG 编排层
+DKF-Agent Service = 解析、切片、Embedding、持久化、Evidence 真相来源
 ```
 
 当前阶段不要为了其他 Agent 提前改变底层实现。
@@ -2400,19 +2605,28 @@ Codex 必须遵守：
 23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
+26. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
+27. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
+28. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
+29. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
+30. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
+31. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
+32. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
 
 
 ---
 
 
-# 46.1 当前工程基线（V0.4）
+# 46.1 当前工程基线（V0.5）
 
 ```text
 阶段 1～9：已完成并回归通过
 阶段 10：MinerU Cloud Provider 已完成真实 API 人工验收
 阶段 11A：当前开发阶段
 阶段 11B：等待 11A 和多格式真实样本验收后开始
-阶段 12+：未开始
+阶段 12～15：未开始
+阶段 15A：计划中的 LlamaIndex Adapter，等待 pgvector 基线完成后开始
+阶段 16+：未开始
 ```
 
 当前已确认解析基线：
@@ -2430,6 +2644,8 @@ MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
 ```
 
 阶段 11A 工程实现已扩展以上能力：统一十三种 FileType，上传和 MinerU 共用 OOXML/OLE 校验；CSV/XLSX 原生表格与 Office 云转换输出统一 Block。Office 本地页数保持未知、云页为逻辑页、bbox 为空。当前等待新增 CSV/XLSX 用户原件和六种真实 Office 云 API 的人工验收；11B 尚未开始。
+
+LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：完成 Parse Cache、Chunk、BGE-M3 和 pgvector 后，在阶段 15A 建立 `DocumentChunk ↔ TextNode / NodeWithScore` 适配边界，再进入 Dense / BM25 / Query Fusion / Reranker / DeepSeek RAG。
 
 已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并执行完整回归。
 
@@ -2451,6 +2667,8 @@ MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
 
 每个阶段以“能运行、能测试、能解释”为完成标准，不以“代码写完”为完成标准。
 
+LlamaIndex 相关开发同样遵循阶段闸门：未完成阶段 15 的 pgvector 真相表前，不提前进入阶段 15A；阶段 15A 只验证 Adapter，不直接跳到完整 RAG。
+
 
 ---
 
@@ -2458,5 +2676,6 @@ MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
 
 - MinerU 精准解析 API：`https://mineru.net/apiManage/docs`
 - OHR-Bench：`https://github.com/opendatalab/OHR-Bench`
+- LlamaIndex Framework：`https://developers.llamaindex.ai/`
 
 外部服务能力、限流与支持格式可能变化；实现时以官方当前文档和账号后台为准。

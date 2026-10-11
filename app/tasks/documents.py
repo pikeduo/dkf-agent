@@ -3,11 +3,13 @@
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from time import perf_counter
 from uuid import UUID
 
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
 from app.db.session import get_engine
 from app.parsers.common import ParserError
@@ -40,6 +42,13 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
             record_failure(session, doc_id, task_id, message, final)
     except (SQLAlchemyError, RuntimeError, ValueError):
         logger.error("文档错误未能写入数据库：doc_id=%s，原因=%s", doc_id, message)
+        log_event(
+            "parse.error_record_failed",
+            level=logging.ERROR,
+            doc_id=doc_id,
+            task_id=task_id,
+            error_code="DATABASE",
+        )
 
 
 @celery_app.task(
@@ -57,15 +66,45 @@ def process_document(self, doc_id: str) -> dict[str, str | int]:
         task_id = UUID(self.request.id)
     except (ValueError, TypeError, AttributeError) as exc:
         raise DocumentProcessingError("文档或任务标识必须为合法 UUID") from exc
+    started = perf_counter()
     try:
         with processing_session() as session, session.begin():
-            return run_processing_step(session, identifier, task_id)
+            result = run_processing_step(session, identifier, task_id)
+        # 事务上下文退出完成提交后才报告成功；验证通过不等同于落库完成。
+        log_event(
+            "parse.persisted"
+            if result["status"] == "awaiting_chunk"
+            else "parse.skipped",
+            doc_id=identifier,
+            task_id=task_id,
+            status=result["status"],
+            state=result.get("document_status"),
+            block_count=result.get("block_count"),
+            duration_ms=round((perf_counter() - started) * 1000, 2),
+        )
+        return result
     except (DocumentSourceError, ParserError) as exc:
+        log_event(
+            "parse.failed",
+            level=logging.ERROR,
+            doc_id=identifier,
+            task_id=task_id,
+            error_code=type(exc).__name__,
+        )
         message = str(exc)
         save_failure(identifier, task_id, message, final=True)
         raise DocumentProcessingError(message) from None
     except (OperationalError, OSError):
         final = self.request.retries >= self.max_retries
+        log_event(
+            "parse.failed" if final else "parse.retry",
+            level=logging.ERROR if final else logging.WARNING,
+            doc_id=identifier,
+            task_id=task_id,
+            error_code="DATABASE_OR_FILE_IO",
+            retry_count=self.request.retries,
+            delay_seconds=None if final else min(5 * 2**self.request.retries, 60),
+        )
         message = (
             "文档处理重试已耗尽：数据库或文件访问暂时不可用"
             if final
@@ -82,6 +121,14 @@ def process_document(self, doc_id: str) -> dict[str, str | int]:
         ) from None
     # 任务边界必须兜底记录未知错误，但只暴露异常类型，避免原始信息泄漏凭据。
     except Exception as exc:  # noqa: BLE001
+        log_event(
+            "parse.failed",
+            level=logging.ERROR,
+            doc_id=identifier,
+            task_id=task_id,
+            error_code="UNKNOWN",
+            error_type=type(exc).__name__,
+        )
         message = f"文档处理框架执行失败（{type(exc).__name__}），请检查配置与 Worker"
         save_failure(identifier, task_id, message, final=True)
         raise DocumentProcessingError(message) from None

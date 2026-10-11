@@ -1,0 +1,262 @@
+"file_name","file_type","status","block_id","block_index","page","section","block_type","text","bbox","source"
+"10_mixed_docx.docx","docx","CHUNKING","55b4de43-201f-5d01-90fb-690ea03733d0",1,1,"Stage 11A Mixed DOCX 验收文档","title","Stage 11A Mixed DOCX 验收文档","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","b1260fc2-fc74-5a63-82c6-c58709eef5dd",2,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-TITLE-MARKER-2026","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","873b7bea-ea9e-54ac-ac69-09306ef28bd0",3,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-P1：这是一段可由 python-docx 原生解析的普通文本，包含中文、English、数字 1,250.50 和百分比 30.00%。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","42c00eb6-4623-5419-aaa7-1ee340823cc4",4,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-P2：本文件同时包含原生文本、原生表格、内嵌图片文字和图片公式，用于对比 Native Parser 与 MinerU Cloud。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","cef1baab-0ddd-5f9c-989d-6eec63a4bc62",5,1,"Stage 11A Mixed DOCX 验收文档 / 原生表格区","title","原生表格区","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","a146ebcd-77cd-5c5c-be04-094804df501e",6,1,"Stage 11A Mixed DOCX 验收文档 / 原生表格区","table","<table><tr><td>部门</td><td>营业收入</td><td>营业成本</td><td>毛利率</td><td>Marker</td></tr><tr><td>华东区</td><td>1,250.50</td><td>875.35</td><td>30.00%</td><td>DOCX-TABLE-R1</td></tr><tr><td>华南区</td><td>980.20</td><td>640.10</td><td>34.70%</td><td>DOCX-TABLE-R2</td></tr><tr><td>合计</td><td>2,230.70</td><td>1,515.45</td><td>32.06%</td><td>DOCX-TABLE-END</td></tr></table>
+DOCX-AFTER-TABLE-TEXT：该段位于表格之后，用于检查表格后正文是否被保留。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","42d68fe2-e494-5898-b6bb-2930d97e627f",7,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","title","内嵌图片文字区","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","01041b36-f12e-5d82-8d73-7fa1384dcbfc",8,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","下面的图片包含文字，Native DOCX Parser 预期不会识别图片内文字；MinerU 预期可以识别。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","81c78d39-24d3-5a91-8a55-86c797a90726",9,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX 内嵌图片 OCR 测试","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","dd4a82b0-1b7b-566c-aae9-ec4879948070",10,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX-IMAGE-OCR-MARKER-2026","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","0cb20199-0fc4-532a-b991-af702e1572e3",11,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内指标：营业收入3,600万元","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","7243215b-cac8-56a3-a709-d1054e89f439",12,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内指标：营业成本 2,160 万元","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","b921d198-ebef-59ac-be8f-b72c6beed212",13,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内校验码：DOCX-IMG-7C91","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","5b1eee26-59a5-5ee0-9768-4b862895ab0e",14,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX-AFTER-IMAGE-TEXT：图片之后的原生正文继续。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","788b5b10-bd54-540e-af85-b87179d09fb9",15,1,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","title","图片公式区","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","8ef21118-0112-5072-9efa-50af95153590",16,1,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","下面的公式是图片内容，供 MinerU 的 formula/image\_text 能力测试。","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","25731f78-8b35-5aad-88ee-60fd39f83c41",17,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","图片公式 / Formula Image","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","36815e1f-c1c1-54fb-bcc2-4d6fe42d52f4",18,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","formula","$$
+\text {   DOCX - FORMULA - IMAGE - MARKER - 2026   }
+$$","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","fd5a6059-c9cf-55f4-bbb6-56e426fb9bca",19,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","formula","$$
+\text{毛利率} = (\text{营业收入} - \text{营业成本}) / \text{营业收入} \times 100\%
+$$","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","60bbc655-dfdf-5656-9064-ac0efd77f067",20,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","formula","$$
+\mathrm{YoY} = (\text { Current - Previous }) / \text { Previous } \times 100 \%
+$$","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","8f2239fb-27b2-522e-ae6d-1599114ca48f",21,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","formula","$$
+\text { WeightedAvg } = \text { SUM } (w _ {\_} i ^ {*} x _ {\_} i) / \text { SUM } (w _ {\_} i)
+$$","null","mineru_cloud"
+"10_mixed_docx.docx","docx","CHUNKING","80b70d49-7a49-5b41-ab20-4a8d21ef1279",22,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","DOCX-END-MARKER-2026：文档结束标记。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","a1561c76-b215-5b75-90c3-0eef554799d6",1,1,"Stage 11A Mixed DOCX 验收文档","title","Stage 11A Mixed DOCX 验收文档","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","1f0bf22b-2a3d-5e5b-98ba-c3e07a958a8f",2,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-TITLE-MARKER-2026","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","1a17b6ef-31dc-5230-a164-78981a37e2a6",3,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-P1：这是一段可由 python-docx 原生解析的普通文本，包含中文、English、数字 1,250.50 和百分比 30.00%。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","3a78bc34-3b37-57ec-863c-ca74fb1f9f7f",4,1,"Stage 11A Mixed DOCX 验收文档","text","DOCX-NATIVE-P2：本文件同时包含原生文本、原生表格、内嵌图片文字和图片公式，用于对比 Native Parser 与 MinerU Cloud。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","193a3253-753f-5cdc-807f-3c4ff30f1c8e",5,1,"Stage 11A Mixed DOCX 验收文档 / 原生表格区","title","原生表格区","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","b71d1fdd-1087-54e7-bab7-a64404ce3639",6,1,"Stage 11A Mixed DOCX 验收文档 / 原生表格区","table","<table><tr><td>部门</td><td>营业收入</td><td>营业成本</td><td>毛利率</td><td>Marker</td></tr><tr><td>华东区</td><td>1,250.50</td><td>875.35</td><td>30.00%</td><td>DOCX-TABLE-R1</td></tr><tr><td>华南区</td><td>980.20</td><td>640.10</td><td>34.70%</td><td>DOCX-TABLE-R2</td></tr><tr><td>合计</td><td>2,230.70</td><td>1,515.45</td><td>32.06%</td><td>DOCX-TABLE-END</td></tr></table>
+DOCX-AFTER-TABLE-TEXT：该段位于表格之后，用于检查表格后正文是否被保留。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","07fa1ef3-3562-5acc-aa95-37e33b9a9f43",7,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","title","内嵌图片文字区","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","a0ce0333-0a97-5f6e-83e9-532cb9cfcffd",8,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","下面的图片包含文字，Native DOCX Parser 预期不会识别图片内文字；MinerU 预期可以识别。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","4a1a0129-a9b0-5554-8189-46998463282b",9,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX 内嵌图片 OCR 测试","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","e82b8548-1f86-51cf-9afe-dd33bb9a8695",10,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX-IMAGE-OCR-MARKER-2026","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","16010948-97c2-58df-9856-24402b1b1122",11,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内指标：营业收入 3,600 万元","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","f376e780-40bf-5f4b-aec5-f947f6d34abf",12,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内指标：营业成本2,160万元","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","a5b5c058-b0a3-560b-9443-fc41bc5cd4b4",13,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","图片内校验码：DOCX-IMG-7C91","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","0b4dcf79-99a5-56b6-82b3-1d5238019cab",14,1,"Stage 11A Mixed DOCX 验收文档 / 内嵌图片文字区","text","DOCX-AFTER-IMAGE-TEXT：图片之后的原生正文继续。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","8a616919-6ef7-5f3d-917e-7669f782a172",15,1,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","title","图片公式区","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","9c984fb7-5840-5701-b7c3-012ba6538d2c",16,1,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","下面的公式是图片内容，供 MinerU 的 formula/image\_text 能力测试。","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","4d008936-3738-5e35-979a-7684ef959a72",17,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","```txt
+图片公式 / Formula Image
+DOCX-FORMULA-IMAGE-MARKER-2026
+毛利率 = (营业收入 - 营业成本) / 营业收入 × 100%
+YoY = (Current - Previous) / Previous × 100%
+WeightedAvg = SUM(w_i * x_i) / SUM(w_i)
+```","null","mineru_cloud"
+"11_legacy_doc.doc","doc","CHUNKING","d753215f-de5a-5b72-b501-4c246ff0b4fb",18,2,"Stage 11A Mixed DOCX 验收文档 / 图片公式区","text","DOCX-END-MARKER-2026：文档结束标记。","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","70347aec-310e-5a44-be83-f138ed621887",1,1,"经营指标","title","经营指标","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","7c59d187-5290-5e66-b19f-257e48b753c7",2,1,"经营指标","table","<table>
+  <tr>
+    <th><p>部门</p></th>
+    <th><p><strong>Q1</strong><strong>收入</strong></p></th>
+    <th><p><strong>Q2</strong><strong>收入</strong></p></th>
+    <th><p><strong>Q3</strong><strong>收入</strong></p></th>
+    <th><p><strong>Q3</strong><strong>成本</strong></p></th>
+    <th><p>毛利率</p></th>
+    <th><p>Marker</p></th>
+  </tr>
+  <tr>
+    <td><p>华东区</p></td>
+    <td><p>1250.5</p></td>
+    <td><p>1318.2</p></td>
+    <td><p>1420.8</p></td>
+    <td><p>980.4</p></td>
+    <td><p>0.309966216216216</p></td>
+    <td><p>XLSX-R1</p></td>
+  </tr>
+  <tr>
+    <td><p>华南区</p></td>
+    <td><p>980.2</p></td>
+    <td><p>1010.5</p></td>
+    <td><p>1120.6</p></td>
+    <td><p>760.2</p></td>
+    <td><p>0.321613421381403</p></td>
+    <td><p>XLSX-R2</p></td>
+  </tr>
+  <tr>
+    <td><p>西南区</p></td>
+    <td><p>640</p></td>
+    <td><p>700</p></td>
+    <td><p>820</p></td>
+    <td><p>590</p></td>
+    <td><p>0.280487804878049</p></td>
+    <td><p>XLSX-R3</p></td>
+  </tr>
+  <tr>
+    <td><p>合计</p></td>
+    <td><p>2870.7</p></td>
+    <td><p>3028.7</p></td>
+    <td><p>3361.4</p></td>
+    <td><p>2330.6</p></td>
+    <td><p>0.306657940143988</p></td>
+    <td><p>XLSX-TOTAL</p></td>
+  </tr>
+  <tr>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+  </tr>
+  <tr>
+    <td><p>XLSX-END-MARKER-2026</p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+    <td><p></p></td>
+  </tr>
+</table>","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","0e3b1f11-2d8e-54db-b3c9-643ded9b2f60",3,2,"多Sheet公式","title","多Sheet公式","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","b3ba9c8f-c235-531d-b93e-732f9ad255a0",4,2,"多Sheet公式","table","<table>
+  <tr>
+    <th><p>项目</p></th>
+    <th><p>当前值</p></th>
+    <th><p>上期值</p></th>
+    <th><p>增长率</p></th>
+    <th><p><strong>公式</strong><strong>Marker</strong></p></th>
+  </tr>
+  <tr>
+    <td><p>活跃用户</p></td>
+    <td><p>125000</p></td>
+    <td><p>110000</p></td>
+    <td><p>0.136363636363636</p></td>
+    <td><p>XLSX-FORMULA-01</p></td>
+  </tr>
+  <tr>
+    <td><p>客单价</p></td>
+    <td><p>86.5</p></td>
+    <td><p>80</p></td>
+    <td><p>0.08125</p></td>
+    <td><p>XLSX-FORMULA-02</p></td>
+  </tr>
+  <tr>
+    <td><p>公式保留测试</p></td>
+    <td><p>125086.5</p></td>
+    <td><p>不计算</p></td>
+    <td><p>公式文本应保留</p></td>
+    <td><p>XLSX-FORMULA-TEXT</p></td>
+  </tr>
+</table>","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","7b2e5d2a-7da3-5a93-a04b-75cec19561fc",5,3,"图片与图表","title","图片与图表","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","5be02848-c98d-5ee8-86dc-3c6c0e685d3e",6,3,"图片与图表","text","XLSX-VISUAL-SHEET-MARKER-2026","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","78796035-9c1e-57be-adcb-541ebe81a7ae",7,3,"图片与图表","text","图表数据","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","165459bf-fdbe-5f6d-a839-bb588073c568",8,3,"图片与图表","table","<table>
+  <tr>
+    <th><p>以下图片内文字需要 OCR，Native XLSX Parser 第一版不识别图片内文字。<br><img src=""images/8cc54e077fb63f3fab4ca30099ae0b789d96e870393d91f9801fbb1d9cb47672.jpg""/></p></th>
+  </tr>
+</table>","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","f3f875c6-b76e-51fc-8a73-c98cb850dfed",9,3,"图片与图表","table","<table>
+  <tr>
+    <th><p>季度</p></th>
+    <th><p>收入</p></th>
+  </tr>
+  <tr>
+    <td><p>Q1</p></td>
+    <td><p>1250</p></td>
+  </tr>
+  <tr>
+    <td><p>Q2</p></td>
+    <td><p>1380</p></td>
+  </tr>
+  <tr>
+    <td><p>Q3</p></td>
+    <td><p>1560</p></td>
+  </tr>
+</table>","null","mineru_cloud"
+"21_legacy_xls.xls","xls","CHUNKING","1bf8fb28-3ad5-538f-8a90-d478dc406764",10,3,"图片与图表","image_text","<table>
+  <tr>
+    <th><p>Q1</p></th>
+    <th><p>1250</p></th>
+  </tr>
+  <tr>
+    <td><p>Q2</p></td>
+    <td><p>1380</p></td>
+  </tr>
+  <tr>
+    <td><p>Q3</p></td>
+    <td><p>1560</p></td>
+  </tr>
+</table>","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","3d3e9ebf-6f2b-5cb1-8c24-e4ca2c6c4d96",1,1,"PPTX-NATIVE-TEXT-MARKER-2026","title","PPTX-NATIVE-TEXT-MARKER-2026","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","d086be8d-35ae-50dd-90b4-f285dae84e22",2,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","本演示文稿包含普通文本、表格、图片文字和图表图片，用于验证显式 MinerU Office 解析。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","d430f9e7-025e-574a-b370-699e5e5fb757",3,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","关键数字：营业收入 1,560 万元；完成率 92.4%；日期 2026-10-11。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","c0c69960-1828-5d2f-bcaf-1d33aaaf8a4e",4,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","PPTX-NOTE-A17：本页为普通文本框，不依赖图片OCR。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","0763fa4c-f377-554c-aff2-5db4e313e11f",5,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","PPTX 图片 OCR 测试
+PPTX-IMAGE-OCR-MARKER-2026
+图片字段：客户满意度 93.5%
+图片字段：投诉率 1.2%
+图片校验码：PPTX-IMG-A88F","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","cbe391f5-80df-5a4f-8e22-50ced437a562",6,1,"PPTX-NATIVE-TEXT-MARKER-2026","image_text","右侧图片内含OCR Marker","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","7d03faef-5a00-5ab5-b9a9-2b030b10e3df",7,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","Stage 11A Mixed PPTX 验收文档","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","b55fe9f1-8f56-5bc0-a774-644976470935",8,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","Stage 11A PPTX Test • slide 1","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","79146554-2fc5-5d77-8d67-6b9e0d7bddb0",9,2,"PPTX 表格结构测试","title","PPTX 表格结构测试","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","7617508a-5e0d-57f2-925f-fcbaaa342cf9",10,2,"PPTX 表格结构测试","table","<table><tr><td>部门</td><td>Q1</td><td>Q2</td><td>Q3</td><td>同比</td><td>Marker</td></tr><tr><td>北区</td><td>1,250.50</td><td>1,380.20</td><td>1,560.00</td><td>+24.75%</td><td>PPTX-TABLE-R1</td></tr><tr><td>南区</td><td>980.10</td><td>1,020.60</td><td>1,150.90</td><td>+17.43%</td><td>PPTX-TABLE-R2</td></tr><tr><td>合计</td><td>2,230.60</td><td>2,400.80</td><td>2,710.90</td><td>+21.53%</td><td>PPTX-TABLE-END</td></tr></table>","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","b478390d-8d87-54fe-bca0-761ca218c387",11,2,"PPTX 表格结构测试","text","表格后正文校验：PPTX-AFTER-TABLE-TEXT。若结构正确，该段应位于表格之后。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","99f63081-14ab-5b86-a504-f03fcd54a67d",12,2,"图表图片校验区域","title","图表图片校验区域","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","f51c5ed0-6569-52f6-8b1b-33fca88ed7f5",13,2,"图表图片校验区域","text","该图表是图片而非原生图表，用于检验 MinerU 对图中文字、数值和图表说明的识别。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","29fab602-8efa-5bcd-9700-a9d4edf6972a",14,2,"图表图片校验区域","text","PPTX图表图片测试  
+CHART-MARKER-2026  
+Q1 1250 | Q2 1380 | Q3 1560  
+North $+12.5\%$ / South $+9.8\%$ 图表校验码：PPTX-CHART-53A2","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","fd857cfc-2d08-56b3-9e2a-84bf3684dbd3",15,2,"图表图片校验区域","text","表格与数值测试","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","8123c28a-34c0-5571-9d0d-a3d21f842a9e",16,2,"图表图片校验区域","text","Stage 11A PPTX Test • slide 2","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","6993d50e-8d71-5914-8cdb-5e9871ed4506",17,3,"PPTX-MIXED-PAGE-MARKER-2026","title","PPTX-MIXED-PAGE-MARKER-2026","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","596c47ae-b524-5f6a-915d-9954b5a9ebdd",18,3,"PPTX-MIXED-PAGE-MARKER-2026","text","左侧为普通文本；右侧为图片文字。该页面用于验证显式MinerU 路径能否同时捕获普通文本和图片文字。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","9548930e-6b7f-5c8e-97b1-48278b0cc48d",19,3,"PPTX-MIXED-PAGE-MARKER-2026","text","PPTX-END-MARKER-2026","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","509c3c58-596b-57ba-bd8c-9f156d767b74",20,3,"PPTX 图片 OCR 测试","title","PPTX 图片 OCR 测试","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","4bf02d84-3959-5866-be20-b2b1bf4b092d",21,3,"PPTX 图片 OCR 测试","text","PPTX-IMAGE-OCR-MARKER-2026","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","5c6b7a66-9c0c-58f3-975a-c4c6eabd1f63",22,3,"PPTX 图片 OCR 测试","text","图片字段：客户满意度 $93.5\%$","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","4d2bab45-5132-54ca-8b1f-0e94df53dc1d",23,3,"PPTX 图片 OCR 测试","text","图片字段：投诉率 $1.2\%$","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","01beecd4-36a0-5f8a-b0ea-4b3e4abe3730",24,3,"PPTX 图片 OCR 测试","text","图片校验码：PPTX-IMG-A88F","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","19235420-ae6c-5eb3-b657-112bf822ecca",25,3,"PPTX 图片 OCR 测试","text","验收重点：普通文本顺序、图片OCR、图表图片、表格结构、source=mineru\_cloud、Office bbox=NULL。","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","0f6813a7-46de-5362-b3a9-6a5b58588040",26,3,"PPTX 图片 OCR 测试","text","图文混合页面","null","mineru_cloud"
+"30_mixed_pptx.pptx","pptx","CHUNKING","d9b36bdd-8a58-5632-b5d8-b5c12636d4d4",27,3,"PPTX 图片 OCR 测试","text","Stage 11A PPTX Test • slide 3","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","43807a9c-1525-59d3-89ff-4d18bc72b247",1,1,"PPTX-NATIVE-TEXT-MARKER-2026","title","PPTX-NATIVE-TEXT-MARKER-2026","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","9b7bd6f5-dc71-514b-bc9b-c3bceeeee7c8",2,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","本演示文稿包含普通文本、表格、图片文字和图表图片，用于验证显式 MinerU Office 解析。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","99a9ff04-b4a1-5e3e-bf04-07e634c62338",3,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","关键数字：营业收入 1,560 万元；完成率 92.4%；日期 2026-10-11。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","34bfd457-9f7a-5e2b-a8bb-6017688c0559",4,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","PPTX-NOTE-A17：本页为普通文本框，不依赖图片OCR。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","ddac180f-b921-50f9-a0bb-d379157f60dd",5,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","PPTX 图片 OCR 测试
+PPTX-IMAGE-OCR-MARKER-2026
+图片字段：客户满意度 93.5%
+图片字段：投诉率 1.2%
+图片校验码：PPTX-IMG-A88F","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","64154f2b-18b2-5ef2-a023-30b3fbc2b9b6",6,1,"PPTX-NATIVE-TEXT-MARKER-2026","image_text","右侧图片内含 OCR Marker","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","5157c620-e432-5519-9351-32de10e6d269",7,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","Stage 11A Mixed PPTX 验收文档","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","824eb586-c9f8-5591-a0b9-80cff3cf55f2",8,1,"PPTX-NATIVE-TEXT-MARKER-2026","text","Stage 11A PPTX Test • slide 1","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","4c87da0a-e64c-5e03-b572-24607a02d4d1",9,2,"PPTX 表格结构测试","title","PPTX 表格结构测试","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","c078e6cc-e4a5-51fb-be5c-e9cba6579de6",10,2,"PPTX 表格结构测试","table","<table><tr><td>部门</td><td>Q1</td><td>Q2</td><td>Q3</td><td>同比</td><td>Marker</td></tr><tr><td>北区</td><td>1,250.50</td><td>1,380.20</td><td>1,560.00</td><td>+24.75%</td><td>PPTX-TABLE-R1</td></tr><tr><td>南区</td><td>980.10</td><td>1,020.60</td><td>1,150.90</td><td>+17.43%</td><td>PPTX-TABLE-R2</td></tr><tr><td>合计</td><td>2,230.60</td><td>2,400.80</td><td>2,710.90</td><td>+21.53%</td><td>PPTX-TABLE-END</td></tr></table>","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","47b0db49-6074-5eee-9933-1df5712bf957",11,2,"PPTX 表格结构测试","text","表格后正文校验：PPTX-AFTER-TABLE-TEXT。若结构正确，该段应位于表格之后。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","11538d29-87ea-545a-8062-537bad6a0ca4",12,2,"图表图片校验区域","title","图表图片校验区域","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","8ce1ea88-1efc-5cfe-b238-7069b4a85a8a",13,2,"图表图片校验区域","text","该图表是图片而非原生图表，用于检验 MinerU 对图中文字、数值和图表说明的识别。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","56b69bc4-30d8-58b0-824a-6d29e7a90801",14,2,"图表图片校验区域","text","PPTX图表图片测试  
+CHART-MARKER-2026  
+Q1 1250 | Q2 1380 | Q3 1560  
+North $+12.5\%$ / South $+9.8\%$ 图表校验码：PPTX-CHART-53A2","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","46b5ada1-2603-54ca-abee-e4123988add2",15,2,"图表图片校验区域","text","表格与数值测试","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","e9ebcfdf-6a19-5fc4-862e-49877341dc9a",16,2,"图表图片校验区域","text","Stage 11A PPTX Test • slide 2","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","8488c7ee-c24d-5eb3-8f82-bbe055366d5e",17,3,"PPTX-MIXED-PAGE-MARKER-2026","title","PPTX-MIXED-PAGE-MARKER-2026","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","174f6bfd-f53b-5fde-bf06-db5cd5825fe0",18,3,"PPTX-MIXED-PAGE-MARKER-2026","text","左侧为普通文本；右侧为图片文字。该页面用于验证显式MinerU 路径能否同时捕获普通文本和图片文字。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","2ac7be77-1b75-5b3b-a660-890c6bc716c9",19,3,"PPTX-MIXED-PAGE-MARKER-2026","text","PPTX-END-MARKER-2026","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","d3faeb2e-aea4-51ac-85a9-b98c07ed40da",20,3,"PPTX 图片 OCR 测试","title","PPTX 图片 OCR 测试","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","fb9b2006-53fd-5ce4-ba2b-84178df28fe8",21,3,"PPTX 图片 OCR 测试","text","PPTX-IMAGE-OCR-MARKER-2026","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","8bc5c304-7384-555a-90ff-cd4d6bbf6ee4",22,3,"PPTX 图片 OCR 测试","text","图片字段：客户满意度 $93.5\%$","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","128212de-10c3-5fec-b976-45388c1e7934",23,3,"PPTX 图片 OCR 测试","text","图片字段：投诉率 $1.2\%$","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","d308cd3a-28f6-52b8-aa5d-5489937045e6",24,3,"PPTX 图片 OCR 测试","text","图片校验码：PPTX-IMG-A88F","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","1be4cca4-924b-5d48-8a9a-cecff65af573",25,3,"PPTX 图片 OCR 测试","text","验收重点：普通文本顺序、图片OCR、图表图片、表格结构、source=mineru\_cloud、Office bbox=NULL。","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","15ef8087-e195-5fc6-97e6-d84a2ca85ed4",26,3,"PPTX 图片 OCR 测试","text","图文混合页面","null","mineru_cloud"
+"31_legacy_ppt.ppt","ppt","CHUNKING","e7170439-c650-54cd-8494-180c506618b5",27,3,"PPTX 图片 OCR 测试","text","Stage 11A PPTX Test • slide 3","null","mineru_cloud"

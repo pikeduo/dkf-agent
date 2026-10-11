@@ -2,12 +2,14 @@
 
 import logging
 import random
+from time import perf_counter
 from uuid import UUID
 
 from kombu.exceptions import OperationalError as BrokerError
 from redis.exceptions import RedisError
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
+from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.models import DocumentParseJob
@@ -25,7 +27,21 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
     task = submit_mineru_parse if step == "submit" else check_mineru_result
     try:
         task.apply_async(args=[str(job_id)], countdown=delay, queue="default_queue")
+        log_event(
+            "mineru.dispatched",
+            job_id=job_id,
+            step=step,
+            delay_seconds=delay,
+            queue="default_queue",
+        )
     except (BrokerError, RedisError, OSError):
+        log_event(
+            "mineru.dispatch_failed",
+            level=logging.ERROR,
+            job_id=job_id,
+            step=step,
+            error_code="QUEUE",
+        )
         raise MinerUError(
             "QUEUE", "MinerU 后续任务投递失败，请恢复队列后继续任务", retryable=True
         ) from None
@@ -39,6 +55,8 @@ def execute_step(task, job_id: str, step: str) -> dict:
     except (ValueError, TypeError, AttributeError):
         raise DocumentProcessingError("MinerU 任务标识必须为合法 UUID") from None
     settings = get_settings()
+    started = perf_counter()
+    log_event("mineru.step_started", job_id=identifier, step=step)
     provider = None
     try:
         provider = MinerUCloudProvider(settings)
@@ -48,7 +66,7 @@ def execute_step(task, job_id: str, step: str) -> dict:
             )
         if action in {"submit", "check"}:
             publish_step(identifier, action, value)
-        return {
+        summary = {
             "job_id": str(identifier),
             "status": {
                 "done": "awaiting_chunk",
@@ -58,6 +76,15 @@ def execute_step(task, job_id: str, step: str) -> dict:
             }[action],
             **({"block_count": value} if action == "done" else {}),
         }
+        log_event(
+            "mineru.step_finished",
+            job_id=identifier,
+            step=step,
+            status=summary["status"],
+            block_count=summary.get("block_count"),
+            duration_ms=round((perf_counter() - started) * 1000, 2),
+        )
+        return summary
     except MinerUError as exc:
         error = exc
     except (OperationalError, OSError):
@@ -85,17 +112,40 @@ def execute_step(task, job_id: str, step: str) -> dict:
             error.retryable and task.request.retries < settings.mineru_max_retries,
             task.request.retries + 1,
         )
+        log_event(
+            "mineru.error_record_failed",
+            level=logging.ERROR,
+            job_id=identifier,
+            error_code=error.code,
+        )
     if retry:
         delay = min(5 * 2 ** max(0, retries - 1), 300) + random.SystemRandom().randint(
             0, 5
         )
         delay = max(delay, error.retry_after or 0)
+        log_event(
+            "mineru.retry",
+            level=logging.WARNING,
+            job_id=identifier,
+            step=step,
+            retry_count=retries,
+            delay_seconds=delay,
+            error_code=error.code,
+        )
         raise task.retry(
             exc=DocumentProcessingError(str(error)),
             countdown=delay,
             max_retries=settings.mineru_max_retries,
             throw=False,
         ) from None
+    log_event(
+        "mineru.failed",
+        level=logging.ERROR,
+        job_id=identifier,
+        step=step,
+        error_code=error.code,
+        duration_ms=round((perf_counter() - started) * 1000, 2),
+    )
     raise DocumentProcessingError(str(error)) from None
 
 

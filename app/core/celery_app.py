@@ -3,6 +3,8 @@
 from celery import Celery
 from kombu import Queue
 
+# 导入信号注册，不影响任务参数、调度或重试规则。
+from app.core import celery_logging  # noqa: F401
 from app.core.config import get_settings
 
 settings = get_settings()

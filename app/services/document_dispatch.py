@@ -1,5 +1,6 @@
 """仅在文档提交后投递任务，投递失败不删除已成功上传的原件。"""
 
+import logging
 from uuid import UUID
 
 from kombu.exceptions import OperationalError
@@ -7,6 +8,7 @@ from redis.exceptions import RedisError
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.core.business_logging import log_event
 from app.models import Document
 from app.tasks.documents import process_document
 
@@ -20,8 +22,18 @@ def publish_document(session: Session, doc_id: UUID, task_id: UUID) -> bool:
         process_document.apply_async(
             args=[str(doc_id)], task_id=str(task_id), queue="default_queue"
         )
+        log_event(
+            "document.dispatched", doc_id=doc_id, task_id=task_id, queue="default_queue"
+        )
         return True
     except (OperationalError, RedisError, OSError):
+        log_event(
+            "document.dispatch_failed",
+            level=logging.ERROR,
+            doc_id=doc_id,
+            task_id=task_id,
+            error_code="QUEUE",
+        )
         # 若消息已被 Worker 接收并推进状态，不能因发送端确认丢失而覆盖 Worker 的结果。
         session.execute(
             update(Document)

@@ -5,11 +5,13 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from urllib.parse import urlsplit
 
 import httpx
 import pymupdf
 
+from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.core.file_formats import (
     MINERU_TYPES,
@@ -217,6 +219,12 @@ class MinerUCloudProvider:
         try:
             with source.path.open("rb") as stream:
                 response = self.client.put(validate_signed_url(url), content=stream)
+            log_event(
+                "mineru.http_response",
+                method="PUT",
+                stage="signed_upload",
+                status_code=response.status_code,
+            )
             self._http_status(response)
         except (httpx.HTTPError, OSError):
             raise MinerUError(
@@ -254,6 +262,12 @@ class MinerUCloudProvider:
         limit = self.settings.mineru_result_max_mb * 1024 * 1024
         try:
             with self.client.stream("GET", validate_signed_url(url)) as response:
+                log_event(
+                    "mineru.http_response",
+                    method="GET",
+                    stage="result_download",
+                    status_code=response.status_code,
+                )
                 self._http_status(response)
                 for chunk in response.iter_bytes():
                     size += len(chunk)
@@ -275,6 +289,13 @@ class MinerUCloudProvider:
     def _api(self, method: str, path: str, **kwargs) -> dict:
         """发送鉴权 API 请求并验证业务 envelope，永不抛出响应原文或 Token。"""
 
+        started = perf_counter()
+        route = (
+            "/file-urls/batch"
+            if method == "POST"
+            else "/extract-results/batch/{batch_id}"
+        )
+        log_event("mineru.http_started", method=method, route=route, stage="api")
         try:
             response = self.client.request(
                 method,
@@ -286,11 +307,27 @@ class MinerUCloudProvider:
                 **kwargs,
             )
         except (httpx.ConnectError, httpx.ConnectTimeout):
+            log_event(
+                "mineru.http_failed",
+                level=logging.WARNING,
+                method=method,
+                route=route,
+                error_code="NETWORK",
+                duration_ms=round((perf_counter() - started) * 1000, 2),
+            )
             # 未建立连接时可以重试；已发送 POST 后的读取超时按不确定提交处理。
             raise MinerUError(
                 "NETWORK", "MinerU 网络暂时无法连接", retryable=True
             ) from None
         except httpx.HTTPError:
+            log_event(
+                "mineru.http_failed",
+                level=logging.WARNING,
+                method=method,
+                route=route,
+                error_code="SUBMIT_UNCERTAIN" if method == "POST" else "NETWORK",
+                duration_ms=round((perf_counter() - started) * 1000, 2),
+            )
             # 申请链接是非幂等 POST，响应丢失时不确认成功与否，禁止盲目重复提交。
             raise MinerUError(
                 "SUBMIT_UNCERTAIN" if method == "POST" else "NETWORK",
@@ -299,6 +336,14 @@ class MinerUCloudProvider:
                 else "MinerU 查询网络暂时不可用",
                 retryable=method != "POST",
             ) from None
+        log_event(
+            "mineru.http_response",
+            method=method,
+            route=route,
+            stage="api",
+            status_code=response.status_code,
+            duration_ms=round((perf_counter() - started) * 1000, 2),
+        )
         self._http_status(response)
         try:
             envelope = response.json()

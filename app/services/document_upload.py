@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.business_logging import log_event
 from app.core.config import PROJECT_ROOT, Settings
 from app.core.file_formats import FILE_TYPES, FileFormatError, validate_file_content
 from app.models import Document
@@ -80,6 +81,12 @@ def remove_owned_file(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         logger.error("上传文件清理失败，需人工核对文件与记录：%s", path.name)
+        log_event(
+            "upload.cleanup_failed",
+            level=logging.ERROR,
+            doc_id=path.stem,
+            error_code="FILE_IO",
+        )
 
 
 def write_upload(upload: UploadFile, path: Path) -> None:
@@ -105,6 +112,9 @@ def reject_duplicate(session: Session, kb_id: UUID, file_hash: str) -> None:
         select(Document).where(Document.kb_id == kb_id, Document.file_hash == file_hash)
     )
     if existing is not None:
+        log_event(
+            "upload.duplicate", kb_id=kb_id, doc_id=existing.doc_id, status_code=409
+        )
         raise HTTPException(
             status_code=409,
             detail={
@@ -120,12 +130,20 @@ def store_document(
 ) -> DocumentResponse:
     """校验、去重、保存文件并提交 UPLOADED 记录，正常失败时补偿删除本次文件。"""
 
-    filename, extension = validate_filename(upload.filename)
+    log_event("upload.received", kb_id=kb_id, file_name=upload.filename)
+    try:
+        filename, extension = validate_filename(upload.filename)
+    except HTTPException as exc:
+        log_event("upload.rejected", kb_id=kb_id, status_code=exc.status_code)
+        raise
     file_path = None
+    doc_id = None
     committed = False
     commit_started = False
     try:
         file_hash = hash_upload(upload, settings.max_upload_size_mb * 1024 * 1024)
+        size_bytes = upload.file.seek(0, 2)
+        upload.file.seek(0)
         validate_content(upload, extension)
         reject_duplicate(session, kb_id, file_hash)
         directory = settings.upload_dir
@@ -161,8 +179,24 @@ def store_document(
         commit_started = True
         session.commit()
         committed = True
+        log_event(
+            "upload.stored",
+            kb_id=kb_id,
+            doc_id=doc_id,
+            file_name=filename,
+            file_type=extension[1:],
+            size_bytes=size_bytes,
+            task_id=response.task_id,
+            status="UPLOADED",
+        )
         return response
     except IntegrityError as exc:
+        log_event(
+            "upload.constraint_conflict",
+            kb_id=kb_id,
+            doc_id=doc_id,
+            error_code="DATABASE_CONSTRAINT",
+        )
         session.rollback()
         if (
             getattr(exc.orig, "sqlstate", None) == "23505"
@@ -173,17 +207,42 @@ def store_document(
             reject_duplicate(session, kb_id, file_hash)
         raise
     except OSError as exc:
+        log_event(
+            "upload.failed",
+            level=logging.ERROR,
+            kb_id=kb_id,
+            doc_id=doc_id,
+            error_code="FILE_IO",
+        )
         session.rollback()
         raise HTTPException(
             status_code=507, detail="文件存储不可用，请检查磁盘空间与目录权限"
         ) from exc
     except DBAPIError as exc:
+        log_event(
+            "upload.failed",
+            level=logging.ERROR,
+            kb_id=kb_id,
+            doc_id=doc_id,
+            error_code="COMMIT_UNCERTAIN"
+            if commit_started and exc.connection_invalidated
+            else "DATABASE",
+        )
         if commit_started and exc.connection_invalidated:
             # 提交确认丢失时无法断言数据库已回滚，保留文件避免误删已提交记录的原件。
             file_path = None
             logger.error(
                 "上传提交结果不确定，需人工核对文件与 Document：doc_id=%s", doc_id
             )
+        session.rollback()
+        raise
+    except HTTPException as exc:
+        log_event(
+            "upload.rejected",
+            kb_id=kb_id,
+            file_name=filename,
+            status_code=exc.status_code,
+        )
         session.rollback()
         raise
     except BaseException:

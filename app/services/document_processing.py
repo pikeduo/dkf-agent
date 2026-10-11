@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.core.business_logging import log_event
 from app.core.config import PROJECT_ROOT
 from app.models import Document, DocumentBlock
 from app.parsers.common import NoTextError, ParserError
@@ -119,11 +120,27 @@ def run_processing_step(
         return result | {"status": "skipped"}
     check_source(document)
     transition_document(document, "PARSING")
-    parsed = get_parser(document.file_type).parse(
+    parser = get_parser(document.file_type)
+    log_event(
+        "parse.started",
+        doc_id=doc_id,
+        kb_id=document.kb_id,
+        task_id=task_id,
+        file_name=document.file_name,
+        file_type=document.file_type,
+        parser=type(parser).__name__,
+    )
+    parsed = parser.parse(
         doc_id=document.doc_id,
         file_path=source_path(document),
         file_name=document.file_name,
         file_type=document.file_type,
+    )
+    log_event(
+        "parse.validated",
+        doc_id=doc_id,
+        task_id=task_id,
+        block_count=len(parsed.blocks),
     )
     persist_blocks(session, document, parsed)
     # CHUNKING 仅表示等待下一阶段；本阶段不产生 Chunk、Embedding 或 READY。
