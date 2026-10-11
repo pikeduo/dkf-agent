@@ -1,0 +1,344 @@
+"file_name","file_type","document_status","document_error","doc_id","kb_id","mineru_job_state","mineru_error_code","route_decision","block_index","page","section","block_type","parsed_text","bbox","source","block_id"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",1,1,"经营台账","table","11B.2 选择性混合解析验收｜经营台账							
+							
+原生单元格与公式由 Native 保留；下方签收凭证中的扫描文字应仅通过图片 OCR 获得。							
+							
+序号	业务部门	预算（元）	实际（元）	差额（元）	执行率	负责人	备注
+1	华东售后	68000	61200	=C6-D6	=D6/C6	陈工	原生结构化文本
+2	北区运营	92500	85100	=C7-D7	=D7/C7	何工	保留数值原值
+3	数据中心	120000	108000	=C8-D8	=D8/C8	卢工	公式不能被 OCR 覆盖
+4	城市服务	75000	69000	=C9-D9	=D9/C9	顾工	此行内容不在图片中
+	合计	=SUM(C6:C9)	=SUM(D6:D9)	=C10-D10	=D10/C10		
+							
+							
+扫描附件 A｜项目款项签收凭证（内嵌图片，不存在可提取的 PDF / DOCX 文本层）							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+说明｜图片正文未出现在任何工作簿单元格。请通过 OCR 输出与单元格值核对视觉增强是否生效。							","null","native_parser","3ef3e749-5a0c-55eb-9db5-79f4d1b6b448"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",2,1,"经营台账","title","项目款项签收凭证","null","mineru_cloud","2c0df169-5332-5733-92c2-7b2605e25028"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",3,1,"经营台账","text","资料扫描件 / 不属于 Excel 单元格文本","null","mineru_cloud","3ea40747-f000-5140-9372-5662c5113c67"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",4,1,"经营台账","text","业务编号： SK-2026-0718","null","mineru_cloud","4c29dbfd-59b9-583f-b591-d19e15082784"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",5,1,"经营台账","text","客户名称： 华辰网络服务中心","null","mineru_cloud","5b19f4b8-4a8e-5c86-85fd-934770be3e0b"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",6,1,"经营台账","text","项目名称：园区网络改造一期","null","mineru_cloud","38102d09-15ee-552b-9e0e-706937a6fa3d"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",7,1,"经营台账","text","应收金额：58,760.00元","null","mineru_cloud","7b7d86f7-8d4f-5b9d-85c0-c497c35b2c9f"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",8,1,"经营台账","text","已收金额：58,760.00元","null","mineru_cloud","eee6349e-0229-50e9-ae75-839ea1d46305"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",9,1,"经营台账","text","签收日期：2026-10-06","null","mineru_cloud","24d11528-fd6f-57d7-a065-27feb8116d85"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",10,1,"经营台账","text","验收说明：凭证原件复核通过，金额与收款记录一致。","null","mineru_cloud","19bfeeba-55f2-5fbb-a8a6-bf8b1e97ee94"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",11,1,"经营台账","text","HYBRID-MIX-A-2026","null","mineru_cloud","9bbe4955-5ee5-5aaa-8469-fecd3b8a3c02"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",12,1,"采购归档","table","11B.2 选择性混合解析验收｜采购归档							
+							
+包含原生采购明细、计算公式、扫描巡检记录和跨 Sheet 重复的签收凭证图片。							
+							
+采购单号	供应商	设备/物料	数量	单价（元）	金额（元）	验收人	验收状态
+PO-2026-01	远望工贸	光模块	4	3200	=D6*E6	赵工	已验收
+PO-2026-02	北辰智服	UPS电池	6	1850	=D7*E7	周工	已验收
+PO-2026-03	镜海通信	服务器支架	8	680	=D8*E8	孙工	已验收
+				采购金额合计	=SUM(F6:F8)		
+							
+				占经营实际比重	=F9/'经营台账'!D10		
+							
+扫描附件 B｜设备巡检记录（内嵌图片，文字仅存在于 PNG 像素中）							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+扫描附件 A（复用）｜与“经营台账”中的签收凭证图片字节完全相同，用于验证云端去重							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+							
+说明｜同一图片内容在两个 Sheet 的不同 Anchor 出现，预期仅占一个 Bundle 物理页，但合并结果保留两处来源。							","null","native_parser","7f46ff38-5991-5f78-a7de-e0bd37a47015"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",13,1,"采购归档","table","现场纸质记录扫描 / OCR 内容测试
+设备运行巡检记录
+<table><tr><td>巡检编号</td><td>XJ-2026-0312</td></tr><tr><td>设备名称</td><td>边缘节点服务器</td></tr><tr><td>监测温度</td><td>27.6 摄氏度</td></tr><tr><td>网络延迟</td><td>18 ms</td></tr><tr><td>丢包率</td><td>0.2%</td></tr><tr><td>运行结论</td><td>正常</td></tr></table>","null","mineru_cloud","d63885cf-6f7f-5a9b-aa56-6c4fc3f1847d"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",14,1,"采购归档","text","值班记录：2026-10-07 09:40 设备状态已核验","null","mineru_cloud","ff6dac5a-a214-5444-9c40-5583d80fee73"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",15,1,"采购归档","text","HYBRID-MIX-B-2026","null","mineru_cloud","6ab69923-f719-5d2e-a8e6-5c03e3ccf20c"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",16,1,"采购归档","title","项目款项签收凭证","null","mineru_cloud","b6759d8c-7a08-5360-8bef-160a7e879c45"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",17,1,"采购归档","text","资料扫描件 / 不属于 Excel 单元格文本","null","mineru_cloud","cb145968-dcf6-5635-8e62-7a8a7eeffdc6"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",18,1,"采购归档","text","业务编号： SK-2026-0718","null","mineru_cloud","3baba70a-6b6d-58dc-baed-3ba22882ed0c"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",19,1,"采购归档","text","客户名称： 华辰网络服务中心","null","mineru_cloud","12647ec0-340a-5c41-bfec-011537b10102"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",20,1,"采购归档","text","项目名称：园区网络改造一期","null","mineru_cloud","9556479e-4961-5269-ac66-96066d7d985f"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",21,1,"采购归档","text","应收金额：58,760.00元","null","mineru_cloud","585be1df-be25-5b7d-a8af-422eab540e53"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",22,1,"采购归档","text","已收金额：58,760.00元","null","mineru_cloud","4a7f57a3-a491-5f9a-b74f-ea7aede97989"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",23,1,"采购归档","text","签收日期：2026-10-06","null","mineru_cloud","a5029596-a1b8-5e6c-80de-659a4f413f58"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",24,1,"采购归档","text","验收说明：凭证原件复核通过，金额与收款记录一致。","null","mineru_cloud","bb0bdb24-e19f-5064-b8d0-c9e979341024"
+"11B2_9CE5B096E6AC_BAE7AF89E68F_B7E588AAE6B6.xlsx","xlsx","CHUNKING",NULL,"4ebeab7b-571c-457f-a31c-61dbf5eca9fd","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 0, ""image_count"": 3, ""sheet_count"": 2, ""drawing_count"": 2, ""formula_count"": 17, ""embedded_count"": 0, ""nonempty_sheet_count"": 2, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",25,1,"采购归档","text","HYBRID-MIX-A-2026","null","mineru_cloud","23e5e041-0a7c-5095-9e0e-420c6e42143d"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",1,1,"经营概览","table","阶段 11B.2 | XLSX Selective Hybrid 验收样本							
+							
+原生数据与公式须保留；右侧图表应优先结构化提取，不额外计入视觉 OCR 页面。							
+区域	Q1 收入	Q2 收入	Q3 收入	营业成本	三季收入合计	毛利润	毛利率
+华东	1200	1340	1480	2870	=SUM(B5:D5)	=F5-E5	=IFERROR(G5/F5,0)
+华北	980	1070	1190	2230	=SUM(B6:D6)	=F6-E6	=IFERROR(G6/F6,0)
+华南	760	820	910	1770	=SUM(B7:D7)	=F7-E7	=IFERROR(G7/F7,0)
+合计				=SUM(E5:E7)	=SUM(F5:F7)	=F8-E8	=IFERROR(G8/F8,0)
+							
+							
+验收重点：请检查每条公式的原式，不能只保存计算后的数值。							
+所有 OCR 校验码只出现在“视觉凭证/复用与核对”的 PNG 图片像素里。							","null","native_parser","4a28be58-eb29-5511-9431-fd9078f5d1eb"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",2,1,"经营概览","text","图表类型：barChart
+样式：[{""attributes"": {}, ""type"": ""spPr""}, {""attributes"": {}, ""type"": ""ln""}, {""attributes"": {""val"": ""solid""}, ""type"": ""prstDash""}]
+样式：[{""attributes"": {}, ""type"": ""spPr""}, {""attributes"": {}, ""type"": ""ln""}, {""attributes"": {""val"": ""solid""}, ""type"": ""prstDash""}]
+样式：[{""attributes"": {}, ""type"": ""spPr""}, {""attributes"": {}, ""type"": ""ln""}, {""attributes"": {""val"": ""solid""}, ""type"": ""prstDash""}]
+标题：区域季度营收（万元）
+标题：业务区域
+标题：万元
+barDir：col
+grouping：clustered
+orientation：minMax
+orientation：minMax
+系列 1
+引用：'经营概览'!B4
+值：[""Q1 收入""]
+引用：'经营概览'!$A$5:$A$7
+值：[""华东"", ""华北"", ""华南""]
+引用：'经营概览'!$B$5:$B$7
+值：[""1200"", ""980"", ""760""]
+系列 2
+引用：'经营概览'!C4
+值：[""Q2 收入""]
+引用：'经营概览'!$A$5:$A$7
+值：[""华东"", ""华北"", ""华南""]
+引用：'经营概览'!$C$5:$C$7
+值：[""1340"", ""1070"", ""820""]
+系列 3
+引用：'经营概览'!D4
+值：[""Q3 收入""]
+引用：'经营概览'!$A$5:$A$7
+值：[""华东"", ""华北"", ""华南""]
+引用：'经营概览'!$D$5:$D$7
+值：[""1480"", ""1190"", ""910""]","null","native_parser","7291d208-73ca-5150-81ef-e1134253514e"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",3,1,"视觉凭证","table","	图片与流程 | 多模态 OCR 验收
+	
+	下面每张图片均为实际嵌入的 PNG，图片里的 OCR 标记未复制到任何 Excel 文本单元格。
+	A. 合同扫描凭证（中文、日期、金额）
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	B. 图片公式（不应替换 Excel 公式原式）
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	C. 图片流程图（分步流程文字）
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	D. 图片表格（只在图片中存在的单元内容）
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	E. 去重凭证第一次出现（另一个 Sheet 会重复）","null","native_parser","9d99f292-d2eb-53d8-8694-e72d622708b0"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",4,1,"视觉凭证","title","HYBRID-A-RECEIPT-2026","null","mineru_cloud","7ebd60e0-317f-5476-b306-02e0766d12f2"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",5,1,"视觉凭证","title","客户合同扫描凭证（仅在图片内）","null","mineru_cloud","b8751d33-3d28-5426-a479-7c61bbbdc661"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",6,1,"视觉凭证","text","\- 客户：星河科技有限公司","null","mineru_cloud","66b6d553-c648-53c3-9160-ff8c4498446d"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",7,1,"视觉凭证","text","\- 合同编号：HT-2026-0917","null","mineru_cloud","a45dddea-3004-5392-85ce-cba980f62980"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",8,1,"视觉凭证","text","\- 应收金额：186.50万元","null","mineru_cloud","a50699fd-6552-5408-be0b-0dc476dccec0"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",9,1,"视觉凭证","text","\- 约定回款日：2026-09-30","null","mineru_cloud","92c39a97-3966-5564-b7af-c5ad9a25e424"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",10,1,"视觉凭证","title","HYBRID-B-FORMULA-2026","null","mineru_cloud","4c198f8c-600f-5f0f-8f5d-8b0e3df94470"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",11,1,"视觉凭证","title","截图中的计算关系（非 Excel 公式）","null","mineru_cloud","65c6ef9a-ce75-5d2e-a883-58b2a7a9f031"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",12,1,"视觉凭证","text","\- 毛利率 = (营业收入 - 营业成本) / 营业收入","null","mineru_cloud","b36ba1ef-c878-57f7-a87c-209fbf00cf57"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",13,1,"视觉凭证","text","\- 示例：收入 4020 万元，成本 2870 万元","null","mineru_cloud","e3ec6a56-93ab-5ad9-9112-f6b4d4864da6"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",14,1,"视觉凭证","text","\- 计算结果：约 $28.61\%$","null","mineru_cloud","95f4b776-3f37-5e20-accd-0a22e5d7abbf"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",15,1,"视觉凭证","title","HYBRID-C-FLOW-2026","null","mineru_cloud","ad67cd5e-be50-5976-8aae-f4813bbece88"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",16,1,"视觉凭证","text","审批业务流程（仅在图片内）","null","mineru_cloud","b771acd4-e2d3-52f1-a965-3c946127c2b2"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",17,1,"视觉凭证","text","需求受理","null","mineru_cloud","7a91ee4f-0c9a-5b8b-85d0-75711132e492"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",18,1,"视觉凭证","text","风险审核","null","mineru_cloud","eb175305-eee3-5823-91fc-5a974135adc5"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",19,1,"视觉凭证","text","合同归档","null","mineru_cloud","1ec3e61b-b8a8-5f54-a595-1db64e357d60"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",20,1,"视觉凭证","text","节点校验：所有步骤必须按箭头方向理解","null","mineru_cloud","e8a86f3d-ee3e-5e01-8ac2-c8360ff461ba"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",21,1,"视觉凭证","title","HYBRID-D-TABLE-2026","null","mineru_cloud","0dc967ca-bf81-5724-8a5a-67fcccf44965"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",22,1,"视觉凭证","title","图片中的部门费用表（不是工作表单元格）","null","mineru_cloud","1cc1e260-c383-5edd-8a90-c87e801fe3e5"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",23,1,"视觉凭证","table","<table><tr><td>部门</td><td>预算</td><td>实际</td><td>差额</td></tr><tr><td>研发</td><td>500</td><td>460</td><td>-40</td></tr><tr><td>运营</td><td>260</td><td>285</td><td>+25</td></tr></table>","null","mineru_cloud","dd7e1063-6698-5aa0-b279-2b41b2b5ae92"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",24,1,"视觉凭证","title","HYBRID-E-DEDUP-2026","null","mineru_cloud","30e8f402-a0fa-5d1a-9b26-c0612c3e0da0"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",25,1,"视觉凭证","text","重复的业务凭证（同一 PNG 二次嵌入）","null","mineru_cloud","ce001048-2b86-5d2e-8d8e-54c5bc9e2e28"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",26,1,"视觉凭证","text","\- 重复凭证编号：RPT-7782","null","mineru_cloud","789094b3-ab60-551e-9338-1be4b54a6ea8"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",27,1,"视觉凭证","text","\- 项目：云网协同升级","null","mineru_cloud","916c75fb-e98f-5867-b3dd-00f6d2feeec9"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",28,1,"视觉凭证","text","核验状态：已归档","null","mineru_cloud","9362e199-e579-5727-948a-65de18661094"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",29,1,"复用与核对","table","	多 Sheet 引用与图片去重验证			
+				
+	下方重复嵌入与“视觉凭证”中最后一张图片完全一致，提取应复用视觉页但保留两个源 Anchor。			
+	业务口径	三季收入（万元）	三季利润（万元）	毛利率
+	引用经营概览	='经营概览'!F8	='经营概览'!G8	=IFERROR(D5/C5,0)
+				
+				
+				
+				
+	F. 与上一 Sheet 的 E 图片是字节完全相同的第二个 Anchor			
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+				
+	说明：两处复用图片内容相同，但必须在最终结果中保留两个不同的来源位置。			","null","native_parser","91756887-f667-57ce-bec3-c9a5c6490f3f"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",30,1,"复用与核对","title","HYBRID-E-DEDUP-2026","null","mineru_cloud","eec91666-45a0-509d-8d08-6ca6c55eb79a"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",31,1,"复用与核对","text","重复的业务凭证（同一 PNG 二次嵌入）","null","mineru_cloud","9283715a-d2e2-5400-826f-877d4f7a2056"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",32,1,"复用与核对","text","\- 重复凭证编号：RPT-7782","null","mineru_cloud","503ccaf0-b1e8-574c-a5fd-2f1ff59191b4"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",33,1,"复用与核对","text","\- 项目：云网协同升级","null","mineru_cloud","b872e46c-8d95-58dd-8a5d-b27696948006"
+"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","CHUNKING",NULL,"14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962","done",NULL,"{""signals"": {""pages"": [], ""page_count"": null, ""chart_count"": 1, ""image_count"": 6, ""sheet_count"": 3, ""drawing_count"": 3, ""formula_count"": 16, ""embedded_count"": 0, ""nonempty_sheet_count"": 3, ""image_reference_count"": 0}, ""file_type"": ""xlsx"", ""parse_mode"": ""auto"", ""reason_codes"": [""XLSX_HYBRID_ENABLED"", ""XLSX_HAS_EMBEDDED_IMAGE"", ""XLSX_HAS_DRAWING"", ""XLSX_HAS_CHART""], ""fallback_count"": 0, ""route_strategy"": ""hybrid_bundle"", ""decision_version"": ""router-v1""}",34,1,"复用与核对","text","核验状态：已归档","null","mineru_cloud","000d8406-1790-55f1-b72c-78ed748e88ae"
+"MANIFEST_SHA256.txt","txt","CHUNKING",NULL,"95b826f9-ef6a-4651-929d-de7791aae839","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962",NULL,NULL,NULL,1,1,"","text","e12827dafef78556ac0c99590f6baf5ba2aba28c8afb3f7864aa351599dc8f89  README_ACCEPTANCE.md
+d3f6d17787fa7e0910009bce24990f2a4be69abf9ae686cab694d5a0bedba91b  STRUCTURAL_QA.txt
+8b64941920dd55fc66c910ad88c1831dda33403f9023ac6efe47be7538639bec  TEST_MATRIX.csv
+333a10c5569a3dc92d5b374f6a9acc4cc9529498c03920cd29d52907260462e6  assets/docx_embedded_ocr.png
+c9c54797c9d06db1d104034515ae1d51ee7527bfecb949a67d4b77d6185b86a2  assets/md_local_asset.png
+ba9e933c80fd1a718044810b956728f7cdff2e27251caa3b7beb474c9e9eb832  assets/mixed_pdf_scan_page2.png
+5c97d8746aac166e2563eee322e637e21376c49fc68e012906e779d32fa1c1b8  assets/same_page_screenshot.png
+f2cf18274a500e2e4e12d074f167dd526e064abbc8d54eea34d4f351701bfbc9  assets/scan_page1.png
+b0b0b846639f39cd1cd71d2f26ccb18d83f547f0ebcbdd4cea0c8fb7ad0a57ca  assets/scan_page2.png
+7f67f5b550da2a07f0f1ff93466302d89d513867c8e2f57360353fbe8c7cd861  assets/tiny_logo.png
+1ac5a2c6a7af91d66187423f9d69f74357f5eafdb4483b62249eed0def6e7d70  assets/xlsx_embedded_visual.png
+8f07b7abb6620c729019c9031fccb1c16bf253fe9da778502731af08115b9c23  mineru/07_mixed_docx.docx
+3a28e0c0b3fbebcfca73de1f6a4efeef48649a74e17259fb179605578d483e4f  mineru/11_pdf_mixed_pages.pdf
+d1e0cc3225edbe588528f05ca5608ff9a75d4144d0f6920eac48be36f5b766f2  mineru/12_pdf_same_page_mixed.pdf
+847d73b198bce99dd27d7cd1b45d747e11c150b6830fb60118b4266b5f3cc782  mineru/13_pdf_two_column.pdf
+08ed7c192836a5682b9f6878be757893452ee65d3fb2d37e33b70713e4df0c4e  mineru/14_pdf_complex_drawing_annotation.pdf
+164cea9eeff3f71688541574b41a54fa15d0d90bbbaab0314f33b2c3054c2da2  mineru/15_pdf_scanned.pdf
+5b26ad93e8c61839390ce7a2e3f50849faebd8c32ad67c9263586f9c68c49970  mineru/16_image_ocr.png
+2b291dff5f38dd2da8d001b3f080aead239f79343b90f5ce266f2a35c6279fff  mineru/30_stage11a_mixed_pptx.pptx
+fe38b83a0d7e0357a9244023e1d56aa787d7124eab00065f2b3e5682d6ff7fc6  native/01_native_text.txt
+735819fefdb400a42c18ce56a2b85eb9976fd5edae017a5abf3f081bcd644882  native/02_native_table.csv
+45b6e0218b552d038a4a7468d9d0762335a769ea334182ee9d3a030362a91a5d  native/03_native_plain.md
+f7fefc911a00b88de07258c7d47099cb8449c5995b1b6848c7703450d332e105  native/06_native_simple.docx
+26ddd334def4cc7be907d9bdb4618ac3e24a8108ed72d4e1071d3f7a78679bf2  native/08_native_simple.xlsx
+25580dde88db660b4725a8f739b3b40d248bcf5f36808968e6df35c516d50a3b  native/10_pdf_plain_small_logo.pdf
+22c379724bddbfa2346c6ed04fc6d0a95c17150359a3802d2fb3bc103bf25a76  negative/17_invalid_encoding.csv
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  negative/18_empty.csv
+de4f2b5331a92e5ce112c070f894a87fce007f8b83b78af4a73210491605209d  negative/19_fake_docx.docx
+fb0a6d54e3d99e01698d6886cb9225ceaacdd6a132e9e551bebcb9a587bf3eb4  negative/20_fake_pdf.pdf
+f2d49ff15a449f769a86c675a419e8ebadd67b036d51938b7f7afee33177882d  review/04_markdown_with_local_image_ref.md
+094ad3c320dc74fc0cfc100b1c0b3817af44ac91b164fba63aebad3a2cc56d44  review/05_markdown_with_remote_image_ref.md
+1d53b0f767ff1f6385a8e9a7f64a47696ff536c2ddea9f163734afd7aa84a3f6  review/09_complex_xlsx.xlsx
+ad2c5b8295472283b1d266134b30b4fac615a2643208181868e3f319a99a73a0  review/10b_preflight_limit_candidate_6pages.pdf","null","native_parser","648ece4f-d4eb-5277-88ec-6c1ab7d67e48"
