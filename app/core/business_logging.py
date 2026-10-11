@@ -3,6 +3,7 @@
 import errno
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -60,6 +61,82 @@ PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 FILE_PREFIX = "knowledge-service"
 LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
+# 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
+EVENT_LABELS = {
+    "http.request": "接口请求结束",
+    "logging.file_unavailable": "日志目录不可用，已降级到终端",
+    "upload.received": "收到文档上传",
+    "upload.rejected": "文档上传校验未通过",
+    "upload.duplicate": "检测到重复文档",
+    "upload.stored": "文档原件与记录已保存",
+    "upload.failed": "文档上传失败",
+    "upload.constraint_conflict": "文档上传数据库约束冲突",
+    "upload.cleanup_failed": "上传失败后的原件清理失败",
+    "upload.batch_rejected": "批量上传数量校验未通过",
+    "upload.batch_started": "开始批量上传",
+    "upload.batch_item": "批量上传单文件处理结束",
+    "upload.batch_finished": "批量上传处理结束",
+    "document.dispatched": "文档解析任务已投递",
+    "document.dispatch_failed": "文档解析任务投递失败",
+    "task.started": "异步任务开始执行",
+    "task.finished": "异步任务执行结束",
+    "parse.started": "开始原生文档解析",
+    "parse.validated": "原生解析结果结构校验通过",
+    "parse.persisted": "原生解析结果已落库",
+    "parse.skipped": "跳过无需处理的文档任务",
+    "parse.retry": "原生解析任务等待重试",
+    "parse.failed": "原生解析任务失败",
+    "parse.error_record_failed": "原生解析失败原因未能写入数据库",
+    "mineru.dispatched": "MinerU 任务已投递",
+    "mineru.dispatch_failed": "MinerU 任务投递失败",
+    "mineru.step_started": "MinerU 处理步骤开始",
+    "mineru.step_finished": "MinerU 处理步骤结束",
+    "mineru.http_started": "开始调用 MinerU 接口",
+    "mineru.http_response": "收到 MinerU HTTP 响应",
+    "mineru.http_failed": "MinerU HTTP 请求失败",
+    "mineru.batch_created": "MinerU 批次检查点已保存",
+    "mineru.upload_complete": "MinerU 原件上传检查点已保存",
+    "mineru.remote_state": "收到 MinerU 远端解析状态",
+    "mineru.result_downloaded": "MinerU 结果 ZIP 下载完成",
+    "mineru.adapter_validated": "MinerU 解析结果结构校验通过",
+    "mineru.blocks_persisted": "MinerU 解析结果已落库",
+    "mineru.retry": "MinerU 任务等待重试",
+    "mineru.failed": "MinerU 任务失败",
+    "mineru.error_record_failed": "MinerU 失败原因未能写入数据库",
+}
+# 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
+FIELD_LABELS = {
+    "request_id": "request_id",
+    "doc_id": "doc_id",
+    "kb_id": "kb_id",
+    "task_id": "task_id",
+    "job_id": "job_id",
+    "batch_id": "batch_id",
+    "file_name": "文件",
+    "file_type": "格式",
+    "size_bytes": "大小_bytes",
+    "method": "方法",
+    "route": "接口",
+    "status_code": "HTTP状态",
+    "parser": "解析器",
+    "stage": "阶段",
+    "step": "步骤",
+    "queue": "队列",
+    "task_name": "任务",
+    "state": "状态",
+    "status": "结果",
+    "upload_complete": "上传完成",
+    "block_count": "Block数",
+    "file_count": "文件数",
+    "file_index": "文件序号",
+    "accepted_count": "接收数",
+    "failed_count": "失败数",
+    "retry_count": "重试次数",
+    "delay_seconds": "等待秒数",
+    "duration_ms": "耗时_ms",
+    "error_code": "错误码",
+    "error_type": "错误类型",
+}
 
 
 def lock_file(descriptor: int, *, unlock: bool = False) -> None:
@@ -122,11 +199,15 @@ def safe_fields(fields: dict) -> dict:
         elif isinstance(value, UUID):
             value = str(value)
         if isinstance(value, str):
-            # JSON 单行编码加上控制字符清理，防止文件名伪造新的日志行。
+            # 清除控制字符；格式器再转义字段分隔符，防止伪造新行或新字段。
             value = "".join(c for c in value if c.isprintable())[:256]
             if key == "batch_id" and not re.fullmatch(r"[\w.:-]{1,128}", value):
                 continue
-        elif not isinstance(value, (int, float, bool)):
+        elif (
+            not isinstance(value, (int, float, bool))
+            or isinstance(value, float)
+            and not math.isfinite(value)
+        ):
             continue
         result[key] = value
     return result
@@ -146,7 +227,7 @@ def log_event(event: str, *, level: int = logging.INFO, **fields) -> None:
         return
 
 
-class JsonFormatter(logging.Formatter):
+class ReadableFormatter(logging.Formatter):
     """仅格式化业务事件，不输出异常堆栈、任意响应、连接串或文档正文。"""
 
     def __init__(self, role: str = "unknown") -> None:
@@ -156,23 +237,32 @@ class JsonFormatter(logging.Formatter):
         self.role = role if role in {"api", "worker"} else "unknown"
 
     def format(self, record: logging.LogRecord) -> str:
-        """生成 UTF-8 单行 JSON，时间统一为 UTC，便于跨进程按标识关联。"""
+        """生成本机时间的中文单行摘要，保留事件码及关联字段，不输出结果正文。"""
 
-        return json.dumps(
-            {
-                "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
-                "level": record.levelname,
-                "event": record.msg
-                if isinstance(record.msg, str)
-                and re.fullmatch(r"[a-z][a-z0-9_.]+", record.msg)
-                else "unknown",
-                "pid": record.process,
-                "role": self.role,
-                **safe_fields(getattr(record, "business_fields", {})),
-            },
-            ensure_ascii=False,
-            allow_nan=False,
+        event = (
+            record.msg
+            if isinstance(record.msg, str)
+            and re.fullmatch(r"[a-z][a-z0-9_.]{0,79}", record.msg)
+            else "unknown"
         )
+        parts = [
+            datetime.fromtimestamp(record.created, UTC)
+            .astimezone()
+            .isoformat(sep=" ", timespec="milliseconds"),
+            logging.getLevelName(record.levelno),
+            {"api": "API", "worker": "Worker", "unknown": "未知进程"}[self.role],
+            EVENT_LABELS.get(event, "业务事件"),
+            f"event={event}",
+            f"pid={record.process}",
+        ]
+        fields = safe_fields(getattr(record, "business_fields", {}))
+        for key, label in FIELD_LABELS.items():
+            if key in fields:
+                # 只借用 JSON 的标量引用/转义，不再输出 JSON 对象；竖线不能伪造分隔符。
+                value = json.dumps(fields[key], ensure_ascii=False, allow_nan=False)
+                value = value.replace("|", r"\u007c")
+                parts.append(f"{label}={value}")
+        return " | ".join(parts)
 
 
 class SafeDailyFileHandler(logging.Handler):
@@ -203,7 +293,7 @@ class SafeDailyFileHandler(logging.Handler):
                 pending = pending[written:]
 
     def emit(self, record: logging.LogRecord) -> None:
-        """追加单行 JSON；锁超时、磁盘或格式错误降级到终端，不影响业务结果。"""
+        """追加单行中文摘要；锁超时、磁盘或格式错误降级到终端，不影响业务结果。"""
 
         try:
             self.append_line(record, (self.format(record) + "\n").encode("utf-8"))
@@ -232,7 +322,7 @@ def configure_logging(settings: Settings, role: str) -> None:
     for handler in LOGGER.handlers[:]:
         LOGGER.removeHandler(handler)
         handler.close()
-    formatter = JsonFormatter(role)
+    formatter = ReadableFormatter(role)
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     LOGGER.addHandler(console)

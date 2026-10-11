@@ -1,13 +1,13 @@
 """业务日志的事务验收：复用临时 schema，Mock 云服务与队列，不操作真实业务数据。"""
 
 import io
-import json
 import logging
 
 import pytest
+from business_log_helpers import read_log_line
 from sqlalchemy.exc import OperationalError
 
-from app.core.business_logging import LOGGER, JsonFormatter
+from app.core.business_logging import LOGGER, ReadableFormatter
 from app.services import document_processing
 from app.tasks import documents, mineru
 
@@ -20,7 +20,7 @@ def event_stream(migrated_connection):
 
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(JsonFormatter())
+    handler.setFormatter(ReadableFormatter())
     # Alembic 的 fileConfig 会禁用已存在的 Logger；仅恢复本测试的观察器。
     disabled, level = LOGGER.disabled, LOGGER.level
     LOGGER.disabled = False
@@ -37,7 +37,7 @@ def event_stream(migrated_connection):
 def events(stream):
     """按行读取安全业务事件，供提交成功与回滚场景比较。"""
 
-    return [json.loads(line) for line in stream.getvalue().splitlines()]
+    return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
 def native_upload(context):

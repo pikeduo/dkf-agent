@@ -235,9 +235,16 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 ### 运行日志
 
-启动命令不变。API 与所有 Worker 的业务日志合并到 `LOG_DIR`，**每天只有一个日志文件**，例如 `knowledge-service-2026-10-11.log`；不按进程号、API/Worker 或文件大小拆分，重启继续追加当天文件。相对目录以项目根目录为基准，默认 `logs/`。JSON 中的 `role=api/worker` 和 `pid` 区分来源。Uvicorn 访问日志和 Celery 原有日志仍保留在终端，不自动收入业务文件。
+启动命令不变。API 与所有 Worker 的业务日志合并到 `LOG_DIR`，**每天只有一个日志文件**，例如 `knowledge-service-2026-10-11.log`；不按进程号、API/Worker 或文件大小拆分，重启继续追加当天文件。相对目录以项目根目录为基准，默认 `logs/`。日志为 UTF-8 中文可读文本，不再是整行 JSON；`API / Worker` 与 `pid` 区分来源，保留 `event` 事件码及关联编号便于搜索。Uvicorn 访问日志和 Celery 原有日志仍保留在终端，不自动收入业务文件。
 
-`LOG_LEVEL` 默认 `INFO`（可选 `DEBUG / INFO / WARNING / ERROR`）；提升为 `WARNING` 会隐藏正常请求和处理摘要。文件日期按事件发生时的本机日期，JSON 时间仍为 UTC；跨日自动写入新文件，不需重启。旧版 `LOG_MAX_BYTES / LOG_BACKUP_COUNT` 不再使用，已从环境模板移除。当前不限制单日文件大小，也不自动删除历史日志，请按需归档并关注磁盘空间；旧 `api-<进程号>.log / worker-<进程号>.log` 不会自动合并或删除。
+格式示例（字段按实际事件输出，不记录结果正文）：
+
+```text
+2026-10-11 15:30:00.123+08:00 | INFO | API | 接口请求结束 | event=http.request | pid=1234 | 方法="GET" | 接口="/health" | HTTP状态=200 | 耗时_ms=2.5
+2026-10-11 15:30:01.456+08:00 | INFO | Worker | 原生解析结果已落库 | event=parse.persisted | pid=5678 | 状态="CHUNKING" | Block数=3
+```
+
+`LOG_LEVEL` 默认 `INFO`（可选 `DEBUG / INFO / WARNING / ERROR`）；提升为 `WARNING` 会隐藏正常请求和处理摘要。时间与文件日期均按事件发生时的本机时区，时间包含毫秒和 UTC 偏移；跨日自动写入新文件，不需重启。旧版 `LOG_MAX_BYTES / LOG_BACKUP_COUNT` 不再使用，已从环境模板移除。当前不限制单日文件大小，也不自动删除历史日志，请按需归档并关注磁盘空间；旧 `api-<进程号>.log / worker-<进程号>.log` 不会自动合并或删除。历史 JSON 行不会被改写，切换当天可能与新增中文文本共存于同一文件。
 
 多个进程通过同目录的 `.knowledge-service.lock` 串行追加完整日志行，该固定辅助文件不是额外日志，不含业务内容，运行中不能删除。所有进程必须配置相同的本地 `LOG_DIR`；不保证网络共享盘/多主机的文件锁行为。写盘失败或锁等待超过 1 秒时安全提示并保留终端日志，不阻塞业务无限等待。
 
@@ -245,17 +252,17 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 业务日志不记录请求/响应正文、文件正文、Token、密码、连接串、签名链接或上游错误原文；记录的是状态与结果摘要，解析内容仍在数据库。`parse.persisted / mineru.blocks_persisted` 表示事务落库成功，不表示 OCR、公式或阅读顺序质量全部正确。文件名可能包含业务信息，日志目录需限制访问，不能提交仓库。日志写盘失败时会提示并降级到终端，不应据此重新上传已成功的文件。
 
-日志配置改变后重启 API 与所有消费相同队列的 Worker；若保留旧 Worker，部分新任务可能被旧进程消费而没有新增业务日志。查阅默认目录的近期业务日志：
+日志格式或配置改变后重启 API 与所有消费相同队列的 Worker；若保留旧 Worker，部分新任务可能仍按旧格式记录。日志使用 UTF-8，查看时指定编码。查阅默认目录的近期业务日志：
 
 ```powershell
 Get-ChildItem .\logs\knowledge-service-*.log | Sort-Object Name -Descending
-Get-ChildItem .\logs\knowledge-service-*.log | Select-String -SimpleMatch '你的文档UUID'
+Get-ChildItem .\logs\knowledge-service-*.log | Select-String -Encoding UTF8 -SimpleMatch '你的文档UUID'
 ```
 
 实时查看当天文件（先调用一次接口生成文件；Ctrl+C 退出，跨日后重新执行）：
 
 ```powershell
-Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd')) -Tail 50 -Wait
+Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd')) -Encoding UTF8 -Tail 50 -Wait
 ```
 
 详细事件语义和人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。

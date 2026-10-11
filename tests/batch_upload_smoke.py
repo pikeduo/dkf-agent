@@ -1,10 +1,10 @@
 """批量接口隔离数据库验收：逐文件事务、任务身份和日志，不调用真实云 API。"""
 
-import json
 from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
+from business_log_helpers import read_log_line
 from fastapi import HTTPException, Response, UploadFile
 from kombu.exceptions import OperationalError as BrokerError
 from mineru_samples import pdf_bytes, png_bytes
@@ -298,7 +298,7 @@ def test_batch_logs_are_safe_and_correlated(upload_context, event_stream):
     response = post_batch(
         api, kb_id, [("正文.txt", b"PRIVATE_BATCH_CONTENT"), ("空.txt", b"")]
     )
-    recorded = [json.loads(line) for line in event_stream.getvalue().splitlines()]
+    recorded = [read_log_line(line) for line in event_stream.getvalue().splitlines()]
     batch_events = [
         event for event in recorded if event["event"].startswith("upload.batch_")
     ]

@@ -4,13 +4,15 @@
 
 现有 FastAPI、上传与 Celery 解析链路采用 Python 标准库业务日志，不增加依赖、不改变 API 请求体、任务参数、状态机、重试次数、限流或落库约束。启动和 `LOG_*` 配置见 [README](../README.md#运行日志)。
 
-每行 JSON 包含 UTC 时间、级别、事件名、进程号、`role=api/worker`，以及事件适用的白名单字段。所有进程按事件发生时的本机日期写入同一 `knowledge-service-YYYY-MM-DD.log`，跨日改写目标文件，不重命名/覆盖旧文件，重启不会再增加 PID 文件。UTC 时间和本机文件日期在午夜附近可能不同，这是预期转换。HTTP 使用路由模板，不写用户原始路径、查询串、请求头或正文。响应通常含服务生成的 `X-Request-ID`，不信任客户端提供的同名头；框架兜底未处理异常的 500 响应可能没有该头。Celery 投递头携带请求编号，连续的短任务和重试可关联；旧消息和命令行直接提交的任务没有 HTTP 请求编号。进程崩溃、队列确认丢失、磁盘故障等情况下不能保证每个事件都记录，这是排障信息，不是强一致审计或恢复机制。
+每行使用 UTF-8 中文可读文本，固定前缀为“本机时间（含毫秒及 UTC 偏移） | 级别 | API/Worker | 中文事件说明 | event=事件码 | pid=进程号”，后接适用的白名单字段。关联编号保留 `request_id / doc_id / kb_id / task_id / job_id / batch_id` 原名，其他摘要按固定顺序使用中文标签，例如 `文件 / 接口 / HTTP状态 / 状态 / Block数 / 耗时_ms / 错误码`。未知合法事件显示“业务事件”并保留事件码；非法事件显示 unknown，不格式化任意消息参数或异常堆栈。字段标量独立引用，字符串清理控制字符、限制长度并转义竖线，不能伪造新行或分隔字段；不是整行 JSON，不在行尾附加 JSON 对象。非有限浮点数舍弃，不因此丢掉事件。
+
+所有进程按事件发生时的本机日期写入同一 `knowledge-service-YYYY-MM-DD.log`，跨日切换目标文件，不重命名/覆盖旧文件，重启不会再增加 PID 文件。时间与文件日期使用同一本机时区。HTTP 使用路由模板，不写用户原始路径、查询串、请求头或正文。响应通常含服务生成的 `X-Request-ID`，不信任客户端提供的同名头；框架兜底未处理异常的 500 响应可能没有该头。Celery 投递头携带请求编号，连续的短任务和重试可关联；旧消息和命令行直接提交的任务没有 HTTP 请求编号。进程崩溃、队列确认丢失、磁盘故障等情况下不能保证每个事件都记录，这是排障信息，不是强一致审计或恢复机制。
 
 不输出任意请求/响应对象、异常堆栈、数据库连接串、Token、签名 URL、文档正文或上游错误原文。业务 Logger 独立于第三方 Logger，配置 DEBUG 也不会启用 httpx 请求详情。现有 Uvicorn/Celery 自带终端输出仍由各框架管理，不宣称它们经过此白名单格式器清洗；请勿自行开启带敏感信息的第三方调试日志。
 
-文件名、资源 ID 也可能属于敏感业务元信息，需要限制日志目录访问。每日文件只追加不按大小轮转，不使用普通多进程 RotatingFileHandler。标准库 OS 锁保护整行 JSON 写入：Windows 使用 [msvcrt.locking](https://docs.python.org/3.11/library/msvcrt.html#msvcrt.locking)，Unix 使用 [fcntl.flock](https://docs.python.org/3.11/library/fcntl.html#fcntl.flock)，线程内仍由 Handler 的锁串行化；锁等待最多 1 秒。固定辅助文件 `.knowledge-service.lock` 不含正文，不随 PID 或日期增加；不能在运行中删除/替换。每条记录独立打开并最终关闭锁描述符与数据文件，prefork 子进程仍重建处理器，避免继承活跃句柄。进程退出由 OS 释放锁，不依赖 PID 清理；自动测试验证正常并发完整行，但磁盘写入中断、电源故障仍可能丢失/留下不完整记录。
+文件名、资源 ID 也可能属于敏感业务元信息，需要限制日志目录访问。每日文件只追加不按大小轮转，不使用普通多进程 RotatingFileHandler。标准库 OS 锁保护整行中文文本写入：Windows 使用 [msvcrt.locking](https://docs.python.org/3.11/library/msvcrt.html#msvcrt.locking)，Unix 使用 [fcntl.flock](https://docs.python.org/3.11/library/fcntl.html#fcntl.flock)，线程内仍由 Handler 的锁串行化；锁等待最多 1 秒。固定辅助文件 `.knowledge-service.lock` 不含正文，不随 PID 或日期增加；不能在运行中删除/替换。每条记录独立打开并最终关闭锁描述符与数据文件，prefork 子进程仍重建处理器，避免继承活跃句柄。进程退出由 OS 释放锁，不依赖 PID 清理；自动测试验证正常并发完整行，但磁盘写入中断、电源故障仍可能丢失/留下不完整记录。
 
-所有写入者必须运行新代码并使用相同的本地 `LOG_DIR`；网络共享盘、多主机锁行为不在保证范围内。旧容量/备份配置废弃，当前无单日容量上限或自动历史清理。旧 PID 文件、已有日期文件均不自动合并/删除，运维应在对应进程停止后自行归档。目录/写盘/锁失败降级终端并安全提示，不改变已提交业务结果；不保证终端与文件双重故障时仍可记录。
+所有写入者必须运行新代码并使用相同的本地 `LOG_DIR`；格式切换后需要重启 API 与所有 Worker，遗留进程可能继续输出 JSON。已有 JSON 历史行不改写、不删除，切换当天同一文件可能同时包含旧 JSON 和新中文文本。旧格式的整行 JSON 读取工具需调整，人工搜索仍可使用事件码或资源 UUID。网络共享盘、多主机锁行为不在保证范围内。旧容量/备份配置废弃，当前无单日容量上限或自动历史清理。旧 PID 文件、已有日期文件均不自动合并/删除，运维应在对应进程停止后自行归档。目录/写盘/锁失败降级终端并安全提示，不改变已提交业务结果；不保证终端与文件双重故障时仍可记录。
 
 ## 主要事件
 
@@ -38,7 +40,7 @@
 
 ## 自动测试
 
-离线日志测试覆盖 JSON 白名单、敏感字段不输出、控制字符处理、并发请求隔离、HTTP 422/404/未处理异常、任务头关联及上下文恢复、同日合并、跨年日期切换、重复配置不创建空文件、真实多进程/多线程完整行、进程退出释放锁、锁超时与写盘故障降级。Linux 下额外覆盖 fork，Windows 当前覆盖 spawn：
+离线日志测试覆盖中文可读格式、固定字段顺序、本机时区与毫秒、白名单、敏感字段不输出、控制字符/分隔符转义、非法事件与非有限数值、历史 JSON 不改写、并发请求隔离、HTTP 422/404/未处理异常、任务头关联及上下文恢复、同日合并、跨年日期切换、重复配置不创建空文件、真实多进程/多线程完整行、进程退出释放锁、锁超时与写盘故障降级。Linux 下额外覆盖 fork，Windows 当前覆盖 spawn：
 
 ```powershell
 python -m pytest tests/test_business_logging.py -q
@@ -54,7 +56,7 @@ python -m pytest tests/business_logging_smoke.py tests/batch_upload_smoke.py -q
 
 ## 人工验收
 
-1. 保持 `LOG_LEVEL=INFO`，重启 API 和所有消费相同队列的 CPU Worker（启用 GPU Worker 时同样更新），并确认它们使用同一 `LOG_DIR`。调用 `/health` 后应生成当天唯一的 `knowledge-service-YYYY-MM-DD.log`，不再生成新 PID 文件；重启后再次调用，文件名不变且追加记录。固定 `.knowledge-service.lock` 是预期辅助文件，不要删除。原启动命令不变；旧 Worker 仍可能消费新消息并写旧文件，不能只新开一个 Worker 就认为已全部升级。
+1. 保持 `LOG_LEVEL=INFO`，重启 API 和所有消费相同队列的 CPU Worker（启用 GPU Worker 时同样更新），并确认它们使用同一 `LOG_DIR`。调用 `/health` 后应生成当天唯一的 `knowledge-service-YYYY-MM-DD.log`，用 `Get-Content -Encoding UTF8` 查看新增中文摘要、API 来源、event 和 pid，不再生成新 PID 文件；重启后再次调用，文件名不变且追加记录。历史 JSON 行保留是预期行为。固定 `.knowledge-service.lock` 是预期辅助文件，不要删除。原启动命令不变；旧 Worker 仍可能消费新消息并输出旧格式，不能只新开一个 Worker 就认为已全部升级。
 2. 打开 `/health` 和 `/docs`，确认接口可用；在浏览器开发者工具查看响应 `X-Request-ID`，用该编号查询日志，看到方法、路由、状态码和耗时。不要在 URL 中传真实密钥。
 3. 用验收知识库上传一份新 TXT/CSV，确认出现 `upload.stored`、`document.dispatched`、`parse.started`、`parse.validated`、`parse.persisted`，按 doc_id/request_id 对照接口与 Worker。核对文件名、字节数、Block 数量；文档详情为 CHUNKING，数据库正文正确。
 4. 同库再次上传相同内容，确认 409 和 `upload.duplicate`，且没有第二次成功上传/重复生成 Block。非法扩展名或空文件应有拒绝事件/HTTP 失败记录。

@@ -2,7 +2,6 @@
 
 import asyncio
 import io
-import json
 import logging
 import multiprocessing
 import os
@@ -14,6 +13,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from business_log_helpers import read_log_line
 from fastapi import FastAPI
 
 from app.core import business_logging as logs
@@ -23,7 +23,7 @@ from app.core.config import Settings
 
 @pytest.fixture
 def events():
-    """隔离全局业务 Logger，用内存处理器读取真实 JSON，结束后恢复原有设置。"""
+    """隔离全局业务 Logger，用内存处理器读取真实中文摘要，结束后恢复原有设置。"""
 
     logger = logs.LOGGER
     handlers, level, propagate = logger.handlers[:], logger.level, logger.propagate
@@ -32,7 +32,7 @@ def events():
     token = logs.CONTEXT.set(None)
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)
-    handler.setFormatter(logs.JsonFormatter())
+    handler.setFormatter(logs.ReadableFormatter())
     logger.handlers = [handler]
     logger.setLevel(logging.INFO)
     logger.propagate = False
@@ -49,7 +49,7 @@ def events():
 def records(stream):
     """将内存日志按行解析为事件字典，不依赖终端文本或第三方日志格式。"""
 
-    return [json.loads(line) for line in stream.getvalue().splitlines()]
+    return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
 def test_fields_are_allowlisted_and_single_line(events):
@@ -243,7 +243,7 @@ def test_daily_merge_reconfiguration_and_no_empty_files(events, tmp_path):
         path.name == f"knowledge-service-{datetime.now(UTC).astimezone():%Y-%m-%d}.log"
     )
     entries = [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        read_log_line(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert [entry["role"] for entry in entries] == ["api", "api", "api", "worker"]
     assert {entry["pid"] for entry in entries} == {os.getpid()}
@@ -280,7 +280,7 @@ def test_handler_io_failure_does_not_break_business(
     logs.log_event("upload.stored")
     output = capsys.readouterr().err
     assert output.count("业务日志写盘失败") == 1
-    assert output.count('"event": "upload.stored"') == 2
+    assert output.count("event=upload.stored") == 2
     assert "SECRET_PATH" not in output
 
 
@@ -300,7 +300,7 @@ def test_daily_boundary_and_delayed_record_keep_original_date(tmp_path):
     """以本机事件日期选文件，跨月/跨年不重命名，延迟记录不会覆盖当天文件。"""
 
     handler = logs.SafeDailyFileHandler(tmp_path)
-    handler.setFormatter(logs.JsonFormatter("worker"))
+    handler.setFormatter(logs.ReadableFormatter("worker"))
     local_zone = datetime.now(UTC).astimezone().tzinfo
     dates = [
         datetime(2025, 12, 31, 23, 59, tzinfo=local_zone),
@@ -321,11 +321,19 @@ def test_daily_boundary_and_delayed_record_keep_original_date(tmp_path):
         "knowledge-service-2026-01-01.log",
     }
     assert (
-        len((tmp_path / "knowledge-service-2025-12-31.log").read_text().splitlines())
+        len(
+            (tmp_path / "knowledge-service-2025-12-31.log")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
         == 2
     )
     assert (
-        len((tmp_path / "knowledge-service-2026-01-01.log").read_text().splitlines())
+        len(
+            (tmp_path / "knowledge-service-2026-01-01.log")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
         == 1
     )
 
@@ -344,8 +352,8 @@ def write_process_events(directory, role, index, count, barrier):
 @pytest.mark.parametrize(
     "start_method", ["spawn"] + (["fork"] if os.name != "nt" else [])
 )
-def test_independent_processes_merge_complete_json_lines(tmp_path, start_method):
-    """多 API/Worker 进程竞争同一文件，全部 JSON 行完整、唯一且保留来源标识。"""
+def test_independent_processes_merge_complete_text_lines(tmp_path, start_method):
+    """多 API/Worker 进程竞争同一文件，中文摘要行完整、唯一且保留来源标识。"""
 
     context = multiprocessing.get_context(start_method)
     barrier = context.Barrier(4)
@@ -371,7 +379,7 @@ def test_independent_processes_merge_complete_json_lines(tmp_path, start_method)
                 process.close()
     [path] = tmp_path.glob("*.log")
     entries = [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        read_log_line(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert len(entries) == 320
     assert len({entry["file_name"] for entry in entries}) == 320
@@ -394,7 +402,7 @@ def test_concurrent_threads_keep_complete_lines(events, tmp_path):
         list(executor.map(write_event, range(80)))
     [path] = tmp_path.glob("*.log")
     entries = [
-        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        read_log_line(line) for line in path.read_text(encoding="utf-8").splitlines()
     ]
     assert len(entries) == len({entry["file_name"] for entry in entries}) == 80
 
@@ -462,7 +470,7 @@ def test_crashed_process_does_not_leave_stale_lock(events, tmp_path):
     logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "api")
     logs.log_event("http.request", status_code=200)
     [path] = tmp_path.glob("*.log")
-    assert json.loads(path.read_text(encoding="utf-8"))["status_code"] == 200
+    assert read_log_line(path.read_text(encoding="utf-8").strip())["status_code"] == 200
 
 
 def test_role_cannot_be_forged_and_retired_configuration_is_ignored():
@@ -475,6 +483,103 @@ def test_role_cannot_be_forged_and_retired_configuration_is_ignored():
         "dkf.business", logging.INFO, "", 0, "task.started", (), None
     )
     record.business_fields = {"role": "SECRET", "pid": 1}
-    entry = json.loads(logs.JsonFormatter("worker").format(record))
+    entry = read_log_line(logs.ReadableFormatter("worker").format(record))
     assert entry["role"] == "worker"
     assert entry["pid"] == os.getpid()
+
+
+def test_readable_chinese_summary_and_deterministic_field_order(events):
+    """日志直接可读且不再是 JSON 对象；中文字段按固定顺序，不随传参顺序变化。"""
+
+    doc_id = uuid4()
+    logs.log_event(
+        "parse.persisted",
+        duration_ms=12.5,
+        block_count=3,
+        file_name="中文验收.txt",
+        doc_id=doc_id,
+        state="CHUNKING",
+    )
+    [line] = events.getvalue().splitlines()
+    assert not line.startswith("{")
+    assert " | INFO | 未知进程 | 原生解析结果已落库 | event=parse.persisted | " in line
+    assert '文件="中文验收.txt"' in line
+    assert '状态="CHUNKING" | Block数=3 | 耗时_ms=12.5' in line
+    assert line.index("doc_id=") < line.index("文件=") < line.index("状态=")
+    assert set(logs.FIELD_LABELS) == logs.FIELDS
+    assert records(events)[0]["doc_id"] == str(doc_id)
+    record = logging.LogRecord(
+        "dkf.business", logging.INFO, "", 0, "parse.persisted", (), None
+    )
+    record.business_fields = {"duration_ms": 12.5, "file_name": "中文验收.txt"}
+    formatter = logs.ReadableFormatter("worker")
+    forward = formatter.format(record)
+    record.business_fields = dict(reversed(list(record.business_fields.items())))
+    assert formatter.format(record) == forward
+
+
+def test_local_timestamp_has_milliseconds_and_explicit_offset():
+    """时间使用与每日文件一致的本机时区，保留毫秒及 UTC 偏移用于跨进程对照。"""
+
+    record = logging.LogRecord(
+        "dkf.business", logging.INFO, "", 0, "http.request", (), None
+    )
+    record.created = datetime(2026, 10, 11, 4, 5, 6, 123000, tzinfo=UTC).timestamp()
+    line = logs.ReadableFormatter("api").format(record)
+    timestamp = read_log_line(line)["timestamp"]
+    assert timestamp == (
+        datetime.fromtimestamp(record.created, UTC)
+        .astimezone()
+        .isoformat(sep=" ", timespec="milliseconds")
+    )
+    assert datetime.fromisoformat(timestamp).microsecond == 123000
+    assert datetime.fromisoformat(timestamp).utcoffset() is not None
+
+
+def test_delimiter_quotes_and_controls_cannot_forge_fields(events):
+    """文件名中的竖线、引号、反斜杠和换行不能伪造事件、进程身份或额外日志行。"""
+
+    filename = '文档 | event=upload.failed | pid=1 "引号" \\正文\r\n.txt'
+    logs.log_event("upload.stored", file_name=filename)
+    [record] = records(events)
+    assert record["event"] == "upload.stored"
+    assert record["pid"] == os.getpid()
+    assert record["file_name"] == filename.replace("\r", "").replace("\n", "")
+    assert len(events.getvalue().splitlines()) == 1
+    assert events.getvalue().count(" | event=") == 1
+
+
+@pytest.mark.parametrize("message", ["SECRET=%s", "SECRET\n", object()])
+def test_invalid_event_and_exception_details_are_not_formatted(message):
+    """不使用 getMessage 或异常堆栈，非法事件及参数不能泄露原始敏感内容。"""
+
+    record = logging.LogRecord(
+        "dkf.business", logging.ERROR, "SECRET_PATH", 0, message, ("SECRET",), None
+    )
+    record.exc_text = "SECRET_TRACE"
+    line = logs.ReadableFormatter("api").format(record)
+    assert "SECRET" not in line
+    assert " | 业务事件 | event=unknown | " in line
+
+
+def test_nonfinite_numbers_are_omitted_without_losing_event(events):
+    """NaN 和无限数不是有效业务摘要，应舍弃字段但保留该次日志事件。"""
+
+    logs.log_event("parse.retry", duration_ms=float("nan"), delay_seconds=float("inf"))
+    [record] = records(events)
+    assert record["event"] == "parse.retry"
+    assert "duration_ms" not in record and "delay_seconds" not in record
+
+
+def test_existing_json_history_is_preserved_in_same_daily_file(events, tmp_path):
+    """切换格式只追加新摘要，不覆盖已有 JSON 历史，也不新建格式专属文件。"""
+
+    path = tmp_path / f"knowledge-service-{datetime.now(UTC).astimezone():%Y-%m-%d}.log"
+    history = '{"event": "historical.record"}\n'
+    path.write_text(history, encoding="utf-8")
+    logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "api")
+    logs.log_event("http.request", status_code=200)
+    first, second = path.read_text(encoding="utf-8").splitlines()
+    assert first + "\n" == history
+    assert read_log_line(second)["status_code"] == 200
+    assert len(list(tmp_path.glob("*.log"))) == 1
