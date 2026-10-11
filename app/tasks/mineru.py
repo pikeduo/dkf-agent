@@ -14,7 +14,7 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.models import DocumentParseJob
 from app.services.mineru.errors import MinerUError
-from app.services.mineru.jobs import check_step, record_error, submit_step
+from app.services.mineru.jobs import check_step, record_error, submit_step, restore_cached_result
 from app.services.mineru.provider import MinerUCloudProvider
 from app.parsers.hybrid import BundleManifest
 from app.services.hybrid_processing import metrics
@@ -61,11 +61,16 @@ def execute_step(task, job_id: str, step: str) -> dict:
     log_event("mineru.step_started", job_id=identifier, step=step)
     provider = None
     try:
-        provider = MinerUCloudProvider(settings)
         with processing_session() as session:
-            action, value = (submit_step if step == "submit" else check_step)(
-                session, identifier, provider, settings
-            )
+            restored = restore_cached_result(session, identifier, settings)
+            if restored is not None:
+                action, value = restored
+            else:
+                # 完整本地结果命中无需 Token、限流或任何 HTTP 客户端。
+                provider = MinerUCloudProvider(settings)
+                action, value = (submit_step if step == "submit" else check_step)(
+                    session, identifier, provider, settings
+                )
             job = session.get(DocumentParseJob, identifier)
             route_summary = {}
             if job is not None and "_route_decision" in job.parse_options:

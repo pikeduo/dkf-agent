@@ -21,7 +21,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**11B.2：默认 auto、取消 Review；XLSX 优先 Hybrid，提交前受控 Whole 回退及公式保护已实现，待用户验收。**
+当前阶段：**12：Parse Cache。整份/视觉缓存、缓存回放与显式 Force Reparse 已实现，待用户验收。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,11 +33,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 配套功能 | 已实现原接口多选上传、中文业务日志及按日期合并日志文件 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
-| 12 及后续 | 未开展，等待用户确认 |
+| 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
+| 13 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0004_mineru_jobs`；“已实现”不等于已完成真实 API 人工验收。
 - 成功解析只写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`，不等于可检索或 `READY`。
-- 当前仅实施用户授权的 11B.2；未经用户确认，不进入 Parse Cache、Chunk、Embedding、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前仅实施用户授权的阶段 12；11B.2 的待验收事项仍保留。未经用户确认，不进入 Chunk、Embedding、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -98,7 +99,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 原件与 Document 提交后再投递 `default_queue`。耗时入库走 Celery，晚确认、文档行锁、当前 `processing_task_id` 和稳定 ID 保证幂等；旧消息/回调不能覆盖新代次或重复写块。
 - Native 临时数据库/文件错误最多重试 3 次（总共 4 次），退避 5/10/20 秒；原件缺失/空文件立即失败，记录安全原因，成功重试清旧错误。
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
-- `/process` 仅重投 UPLOADED/FAILED，不作为 Reindex；活动云任务通过已有 `/mineru` 恢复，完成状态拒绝重解析。数据库/文件/消息/云端非原子，无 Outbox、后台扫描或自动补投；提交不确定先查记录并保留原件，不盲目重传或宣称 exactly-once。
+- `/process` 仅重投 UPLOADED/FAILED；活动云任务通过 `/mineru` 恢复。`/reindex` 仅缓存回放到等待切片；`/reparse?force=true` 明确建立跳过缓存的新代次，活动任务不可覆盖。数据库/文件/消息/云端非原子，无 Outbox、后台补投；不盲目重传或宣称 exactly-once。
 - Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4，GPU 单进程并发 1（当前不加载模型），在线 RAG 默认同步。
 
 ### Parser、证据与质量
@@ -137,6 +138,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - XLSX Whole 也冻结 Native 主结果 Hash，完成时保留整表与公式，再附云块原序；不覆盖原式、不猜 Whole 云块的原 Sheet/Anchor。主结果不可恢复或云结果失败全回滚；私有摘要不是 Parse Cache。
 - manifest 与冻结配置保存在私有检查点，Sheet/Anchor 可追溯，稳定 visual/Block ID；云结果 page=1、section=原 Sheet、bbox=NULL。整 Sheet table 不拆分，增强块在对应 table 后按 Anchor 稳定排列。
 - 活动恢复沿用同 Job/batch/Bundle；Bundle 缺失仅按原 Hash/映射重建，不是 Parse Cache。完整性与合并全部成功后一次事务替换 Block；失败不写半份结果。运行文件不在当前开发回合生成，真实文档处理仅由用户启动。
+
+### Parse Cache
+
+- 整份键包含原件 Hash/格式、Provider、模型、语言、OCR/表格/公式选项、Route/覆盖范围及版本；Hybrid 额外含 Extractor、manifest/视觉内容摘要。视觉键使用原图片字节 Hash，不使用临时 PDF Hash、doc_id 或 Anchor。
+- 缓存只发布已完整校验结果，保存不可变代次和文件校验和；跨文档重绑身份，Reindex 使用该文档冻结代次以保持 ID/顺序。Native XLSX 原式不得被缓存云计算值覆盖。
+- `PARSED_DIR` 由所有进程共享并备份整个目录（含隐藏元数据）；缓存含原文，不入仓库/日志，变更归一化或提取算法时维护版本失效。损坏/缺失不静默重新付费，旧已完成结果不自动回填。
+- 相同活动内容用数据库事务锁/Job 检查点保护；普通重试遇收费历史而无可用结果停止，只有显式 Force Reparse 允许新调用。缓存发布和数据库非同一事务；已验证结果可在 SQL 回滚后同代次恢复，落库日志只在提交后记录。
 
 ## 5. 专题文档与交付要求
 

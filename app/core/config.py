@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     celery_result_backend: str | None = None
     upload_dir: Path = Path("data/uploads")
     max_upload_size_mb: int = Field(default=50, gt=0)
+    # 解析缓存与原件分开管理；API/Worker 必须共享该本地目录，不自动清理历史结果。
+    parsed_dir: Path = Path("data/parsed")
+    parse_cache_max_entry_mb: int = Field(default=768, ge=64, le=2048)
 
     # 预检阈值是结构风险指标，不是解析置信度；不触发逐页/逐图云端调用。
     router_pdf_image_area_ratio: float = Field(default=0.01, gt=0, le=1)

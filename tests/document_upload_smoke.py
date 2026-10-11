@@ -48,7 +48,8 @@ def upload_context(api, tmp_path, monkeypatch):
     """将文件存储指向临时目录、上限设为 1 MiB，并创建本用例的知识库。"""
 
     settings = get_settings().model_copy(
-        update={"upload_dir": tmp_path / "uploads", "max_upload_size_mb": 1}
+        update={"upload_dir": tmp_path / "uploads", "max_upload_size_mb": 1,
+                "parsed_dir": tmp_path / "parsed"}
     )
 
     def test_settings():

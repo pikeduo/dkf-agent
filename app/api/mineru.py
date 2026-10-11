@@ -13,6 +13,7 @@ from app.api.admin_knowledge_bases import (
     require_knowledge_base,
 )
 from app.core.config import get_settings
+from app.core.business_logging import log_event
 from app.core.file_formats import MINERU_TYPES
 from app.models import Document, DocumentParseJob
 from app.schemas.batch_upload import BatchUploadResponse
@@ -33,14 +34,9 @@ router = APIRouter(
 
 
 def require_configuration():
-    """入口只校验配置，不发送 API、不消耗额度；缺少 Token 不影响原生功能启动。"""
+    """读取配置，缓存命中无需 Token；真正 miss 时在提交本地云任务前校验 Token。"""
 
     settings = get_settings()
-    try:
-        provider = MinerUCloudProvider(settings)
-        provider.close()
-    except MinerUError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
     return settings
 
 
@@ -49,12 +45,15 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
 
     try:
         job = create_job(session, document, settings)
+        if job.is_active:
+            provider = MinerUCloudProvider(settings)
+            provider.close()
         session.commit()
     except MinerUError as exc:
         session.rollback()
         code = (
-            409
-            if exc.code in {"ACTIVE_JOB", "DOCUMENT_STATE"}
+            503 if exc.code in {"CONFIG", "TOKEN_MISSING"} else 409
+            if exc.code in {"ACTIVE_JOB", "DOCUMENT_STATE", "CACHE_IN_PROGRESS", "CACHE_REPARSE_REQUIRED"}
             else (413 if exc.code in {"FILE_SIZE", "PAGE_LIMIT"} else 422)
         )
         raise HTTPException(
@@ -66,6 +65,12 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
             },
         ) from None
     response = ParseJobResponse.model_validate(job)
+    if not job.is_active:
+        # done 且 batch=NULL 表示缓存回放，不伪造外部上传/解析状态，也不发短任务。
+        session.commit()
+        log_event("cache.persisted", doc_id=response.doc_id, job_id=response.job_id,
+                  parse_cache_hit=True, status="CHUNKING", mineru_file_submit_count=0)
+        return response
     next_step = "check" if job.upload_complete else "submit"
     # ORM 刷新会开启读事务；发送消息前也释放它，避免占用连接及妨碍并发 Worker。
     session.commit()

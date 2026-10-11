@@ -60,8 +60,9 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def process_document(self, doc_id: str, parse_mode: str | None = "auto") -> dict:
-    """默认自动路由；拒绝终态标记任务失败，云检查点提交后才投递短任务。"""
+def process_document(self, doc_id: str, parse_mode: str | None = "auto",
+                     operation: str = "ingest") -> dict:
+    """入库优先缓存；Reindex 仅回放，明确 Reparse 绕过缓存，旧代次依然无效。"""
 
     try:
         identifier = UUID(doc_id)
@@ -70,17 +71,22 @@ def process_document(self, doc_id: str, parse_mode: str | None = "auto") -> dict
         raise DocumentProcessingError("文档或任务标识必须为合法 UUID") from exc
     started = perf_counter()
     try:
+        if operation not in {"ingest", "reindex", "reparse"}:
+            raise ParserError("文档处理操作无效")
         with processing_session() as session, session.begin():
             if parse_mode == "native":
                 # 管理员的显式 Native 是范围对照，保留前九阶段 Parser/事务/重试实现。
-                result = run_processing_step(session, identifier, task_id)
+                result = run_processing_step(session, identifier, task_id,
+                    settings=get_settings(), force_reparse=operation == "reparse",
+                    cache_only=operation == "reindex")
                 if result["status"] == "awaiting_chunk":
                     result["coverage"] = "explicit_native_scope"
             else:
                 from app.services.routed_processing import run_routed_step
 
                 result = run_routed_step(
-                    session, identifier, task_id, parse_mode or "auto", get_settings()
+                    session, identifier, task_id, parse_mode or "auto", get_settings(),
+                    force_reparse=operation == "reparse", cache_only=operation == "reindex",
                 )
         if result["status"] == "failed":
             # 决策拒绝不是成功解析：数据库终态已提交，Celery 同样返回安全 FAILURE。
@@ -110,7 +116,12 @@ def process_document(self, doc_id: str, parse_mode: str | None = "auto") -> dict
             block_count=result.get("block_count"),
             mineru_file_submit_count=result.get("mineru_file_submit_count"),
             duration_ms=round((perf_counter() - started) * 1000, 2),
+            parse_cache_hit=result.get("parse_cache_hit"),
         )
+        if result.get("parse_cache_hit"):
+            log_event("cache.persisted", doc_id=identifier, task_id=task_id,
+                      operation=operation, block_count=result.get("block_count"), status="CHUNKING",
+                      parse_cache_hit=True, mineru_file_submit_count=0)
         if result["status"] == "awaiting_chunk" and "hybrid_bundle_page_count" in result:
             log_event("hybrid.persisted", doc_id=identifier, task_id=task_id,
                       block_count=result.get("block_count"), status="CHUNKING",

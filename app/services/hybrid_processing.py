@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import UUID
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.parsers.common import ParserError
 from app.parsers.hybrid import (
     VERSION, BundleManifest, HybridPlan, HybridPolicy, HybridPreflightError,
@@ -18,6 +18,7 @@ from app.parsers.routing.guard import guard_result
 from app.schemas.parsed_document import ParsedDocument
 from app.services.document_processing import source_path
 from app.services.mineru.errors import MinerUError
+from app.services.parse_cache import ParseCache, CacheError, cloud_options, visual_recipe, key_for
 
 
 def policy_from_settings(settings: Settings) -> HybridPolicy:
@@ -71,11 +72,19 @@ def write_checkpoint(path: Path, content: bytes) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def prepare_checkpoint(document, task_id: UUID, settings: Settings, decision: RouteDecision):
-    """暂存主解析并为一份 Bundle 保存映射；零视觉页时仅结构化 Chart/过滤结果。"""
+def prepare_checkpoint(document, task_id: UUID, settings: Settings, decision: RouteDecision,
+                       *, force_reparse: bool = False):
+    """先查视觉缓存再冻结缺失图片 Bundle；强制 Reparse 跳过缓存但恢复不扩大提交范围。"""
+
+    cache, options = ParseCache(settings), cloud_options(settings)
+
+    def lookup(content_hash):
+        """只读取精确图片结果，损坏缓存停止本代次，不悄悄重新花费额度。"""
+
+        return cache.visual(visual_recipe(content_hash, options, VERSION))
 
     plan = prepare_hybrid(document.doc_id, source_path(document), document.file_name,
-                          policy_from_settings(settings))
+                          policy_from_settings(settings), visual_lookup=None if force_reparse else lookup)
     validate_primary(plan, decision)
     with source_path(document).open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
@@ -83,6 +92,7 @@ def prepare_checkpoint(document, task_id: UUID, settings: Settings, decision: Ro
     context = {
         "version": VERSION, "source_hash": document.file_hash,
         "routing_task_id": str(task_id), "manifest": plan.manifest.model_dump(mode="json"),
+        "cache_options": options,
     }
     if plan.bundle:
         path = checkpoint_path(document, context)
@@ -96,7 +106,8 @@ def checked_context(document, context: dict) -> BundleManifest:
     """核对当前源文档身份和有界 manifest，错误只返回固定安全说明。"""
 
     try:
-        if (set(context) != {"version", "source_hash", "routing_task_id", "manifest"}
+        if (set(context) not in ({"version", "source_hash", "routing_task_id", "manifest"},
+                                {"version", "source_hash", "routing_task_id", "manifest", "cache_options"})
             or context["version"] != VERSION or context["source_hash"] != document.file_hash
             or document.file_type != "xlsx"):
             raise ValueError
@@ -116,11 +127,24 @@ def checked_context(document, context: dict) -> BundleManifest:
 
 
 def regenerate_plan(document, context: dict) -> HybridPlan:
-    """用冻结配置重新读取原件核对完全相同映射；不复用跨文档结果、不调用云 API。"""
+    """按冻结配置/缓存命中集合恢复相同映射；新缓存不得改页，不调用云 API。"""
 
     manifest = checked_context(document, context)
     try:
-        plan = prepare_hybrid(document.doc_id, source_path(document), document.file_name, manifest.policy)
+        cached_hashes = {entry.content_hash for entry in manifest.entries if entry.cache_hit}
+
+        def lookup(content_hash):
+            """恢复只读本代次冻结命中，其他新缓存不能改变原 Bundle 页号或提交身份。"""
+
+            if content_hash not in cached_hashes:
+                return None
+            blocks = ParseCache(get_settings()).visual(visual_recipe(content_hash, context["cache_options"], VERSION))
+            if blocks is None:
+                raise CacheError("CACHE_MISS")
+            return blocks
+
+        plan = prepare_hybrid(document.doc_id, source_path(document), document.file_name, manifest.policy,
+                              visual_lookup=lookup if cached_hashes else None)
         if plan.manifest != manifest:
             raise HybridPreflightError()
         return plan
@@ -164,4 +188,5 @@ def metrics(manifest: BundleManifest) -> dict[str, int]:
         "hybrid_visual_dedup_count": sum(e.reused_from is not None for e in manifest.entries),
         "hybrid_bundle_page_count": manifest.bundle_page_count,
         "hybrid_chart_count": sum(e.source_type == "chart" for e in manifest.entries),
+        "visual_cache_hit_count": sum(e.cache_hit and e.reused_from is None for e in manifest.entries),
     }

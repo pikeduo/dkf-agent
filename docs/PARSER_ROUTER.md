@@ -1,6 +1,6 @@
 # 整份文档 Parser Router v1（11B.1）
 
-当前链路为 `Preflight → Decision → Native / MinerU Whole / Hybrid → Guard`；无法安全处理明确 FAILED，不设置 Review。11B.2 默认尝试 XLSX 单 Bundle 增强，见 [Selective Hybrid](SELECTIVE_HYBRID.md)。阶段 1～11A 不重做，无 Parse Cache、Chunk、Embedding 或 RAG；本次测试只编写未执行，真实验收由用户完成。
+当前链路为 `Preflight → Decision → Cache / Native / MinerU Whole / Hybrid → Guard`；无法安全处理明确 FAILED，不设置 Review。XLSX 增强见 [Selective Hybrid](SELECTIVE_HYBRID.md)，缓存/维护见 [Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。仍无 Chunk/Embedding/RAG，验收由用户完成。
 
 ## 1. 使用和兼容边界
 
@@ -125,7 +125,7 @@ tests/test_parser_router.py、tests/parser_router_smoke.py 覆盖格式矩阵、
 
 费用摘要：初始结果实际提交 0、云计划 1；确认 batch 后提交 1，PUT/GET/下载重试不建新源文件任务。重复日志/快照不能累加为真实配额，应按 job_id/batch_id 去重。POST 确认丢失/平台拒绝时本地无法证明实际收费/额度，以平台核对为准。开启 Hybrid 后同样最多一份 Bundle；零视觉页为零云文件，没有每图/每表调用。
 
-当前按用户授权调整 11B.2 为默认自动路由；取消 Review 不等于免除验收。用户先完成测试和真实对照，不自动进入阶段 12。
+最新授权已接入阶段12缓存，不改变完整性底线；已有收费历史的失败操作不得按旧说明自动申请新批次。11B.2 和缓存仍待人工验收，不进入阶段13。
 
 ## 5. 本次修改文件
 

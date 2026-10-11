@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.file_formats import FILE_TYPES
 from app.db.session import get_session
-from app.models import Document, KnowledgeBase
+from app.models import Document, DocumentParseJob, KnowledgeBase
+from app.core.business_logging import log_event
 from app.parsers.routing.contracts import ParseMode
 from app.schemas.batch_upload import BatchUploadResponse
 from app.schemas.knowledge_base import (
@@ -306,3 +307,48 @@ def resubmit_document(
             status_code=503, detail="任务投递失败，文件已保留，请查询文档状态后重试"
         )
     return response
+
+
+def submit_maintenance(session: Session, document: Document, operation: str,
+                       parse_mode: ParseMode) -> DocumentResponse:
+    """为显式维护建立新代次；拒绝活动任务，保留旧块，提交后才投递，不声称已索引。"""
+
+    active = session.scalar(select(DocumentParseJob.job_id).where(
+        DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
+    if active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING"}:
+        raise HTTPException(status_code=409, detail="文档正在处理或当前阶段不允许维护，请先查询状态")
+    # 只有此显式入口可以从等待切片重新建立处理代次，普通 /process 的限制不变。
+    document.status, document.error_message = "UPLOADED", None
+    document.processing_task_id = uuid4()
+    session.flush()
+    response = DocumentResponse.model_validate(document)
+    session.commit()
+    log_event("cache.maintenance_requested", doc_id=response.doc_id, task_id=response.task_id,
+              operation=operation, parse_mode=parse_mode)
+    if not publish_document(session, response.doc_id, response.task_id,
+                            parse_mode=parse_mode, operation=operation):
+        raise HTTPException(status_code=503, detail="维护任务投递失败，原件与旧解析结果已保留")
+    return response
+
+
+@router.post("/{kb_id}/documents/{doc_id}/reindex", response_model=DocumentResponse, status_code=202,
+    summary="仅从成功解析缓存恢复 Block，等待后续切片（不调用云端）",
+    responses={404: {"description": "文档不存在"}, 409: {"description": "活动任务或不允许的状态"}})
+def reindex_document(kb_id: UUID, doc_id: UUID, session: AdminSession) -> DocumentResponse:
+    """当前阶段 Reindex 只回放 Parse Cache；miss/损坏/配置变更失败，不解析或重建索引。"""
+
+    return submit_maintenance(session, require_document(session, kb_id, doc_id, lock=True), "reindex", "auto")
+
+
+@router.post("/{kb_id}/documents/{doc_id}/reparse", response_model=DocumentResponse, status_code=202,
+    summary="管理员明确强制重新解析；可能再次产生 MinerU 费用",
+    responses={400: {"description": "必须确认 force=true"}, 409: {"description": "存在活动处理任务"}})
+def reparse_document(kb_id: UUID, doc_id: UUID, session: AdminSession,
+    force: Annotated[bool, Query(description="必须明确 true：绕过整份/视觉缓存并确认可能云收费")] = False,
+    parse_mode: Annotated[ParseMode, Query(description="默认 auto，管理员可覆盖 Native/Whole")] = "auto",
+) -> DocumentResponse:
+    """唯一允许同一已收费文档跳过缓存的新代次入口；默认不确认，防止误操作付费。"""
+
+    if not force:
+        raise HTTPException(status_code=400, detail="Reparse 必须明确 force=true；可能重复消耗云 API 额度")
+    return submit_maintenance(session, require_document(session, kb_id, doc_id, lock=True), "reparse", parse_mode)

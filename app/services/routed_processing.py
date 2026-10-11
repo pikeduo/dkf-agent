@@ -4,13 +4,13 @@ import hashlib
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.core.file_formats import MINERU_TYPES
-from app.models import Document
+from app.models import Document, DocumentBlock
 from app.parsers.common import OCRRequiredError, ParserError
 from app.parsers.hybrid import HybridPreflightError, merge_hybrid
 from app.parsers.registry import get_parser
@@ -20,12 +20,14 @@ from app.parsers.routing.inspector import inspect_document
 from app.parsers.routing.router import decide_route, fallback_route
 from app.services.document_processing import (
     check_source,
+    check_source_hash,
     persist_blocks,
     source_path,
     transition_document,
 )
 from app.services.mineru.jobs import create_job
 from app.services.hybrid_processing import metrics, prepare_checkpoint
+from app.services.parse_cache import CacheError, ParseCache, recipe, guard_cached
 
 
 def log_decision(
@@ -52,9 +54,10 @@ def log_decision(
 
 
 def run_routed_step(
-    session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings
+    session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings,
+    *, force_reparse: bool = False, cache_only: bool = False,
 ) -> dict:
-    """当前代次自动解析；只有 Hybrid 提交前的受控能力缺口可以转 Whole。"""
+    """自动路由先复用缓存；Reindex 不解析或发云，强制 Reparse 才绕过结果/视觉缓存。"""
 
     if mode not in {"auto", "native", "mineru"}:
         raise ParserError("解析模式仅允许 auto、native 或 mineru")
@@ -74,6 +77,16 @@ def run_routed_step(
     with path.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
             raise ParserError("文档原件 Hash 已变化，请核对存储内容")
+    cache = ParseCache(settings)
+    if cache_only:
+        parsed = cache.replay(document, settings)
+        check_source_hash(document, path)
+        transition_document(document, "PARSING")
+        persist_blocks(session, document, parsed)
+        transition_document(document, "CHUNKING")
+        return result | {"status": "awaiting_chunk", "document_status": document.status,
+                         "block_count": len(parsed.blocks), "parse_cache_hit": True,
+                         "mineru_file_submit_count": 0}
     inspection = inspect_document(path, document.file_type, settings)
     decision = decide_route(document.file_type, mode, inspection,
                             hybrid_enabled=settings.hybrid_xlsx_enabled)
@@ -83,7 +96,8 @@ def run_routed_step(
     if decision.route_strategy == "hybrid_bundle":
         log_event("hybrid.started", doc_id=doc_id, task_id=task_id, file_type="xlsx")
         try:
-            plan, hybrid_context = prepare_checkpoint(document, task_id, settings, decision)
+            plan, hybrid_context = prepare_checkpoint(document, task_id, settings, decision,
+                **({"force_reparse": True} if force_reparse else {}))
             hybrid_metrics = metrics(plan.manifest)
         except HybridPreflightError as exc:
             log_event("hybrid.preflight_rejected", doc_id=doc_id, task_id=task_id,
@@ -127,9 +141,26 @@ def run_routed_step(
             "mineru_file_submit_count": 0,
         }
     if plan is not None:
+        identity = recipe(document, settings, "hybrid_bundle", manifest=plan.manifest)
+        cached = None if force_reparse else cache.document(document, identity)
+        if cached is not None:
+            guard_cached(cached, decision)
+            check_source_hash(document, path)
+            persist_blocks(session, document, cached)
+            transition_document(document, "CHUNKING")
+            return result | {"status": "awaiting_chunk", "document_status": document.status,
+                "block_count": len(cached.blocks), "route_decision": decision.model_dump(mode="json"),
+                "parse_cache_hit": True, "mineru_file_submit_count": 0, **hybrid_metrics}
         log_event("hybrid.prepared", doc_id=doc_id, task_id=task_id, **hybrid_metrics)
         if not plan.manifest.bundle_page_count:
             parsed = merge_hybrid(plan, None)
+            check_source_hash(document, path)
+            from app.services.parse_cache import canonical
+            cache.save_document(document, identity, parsed, {
+                "hybrid/bundle_manifest.json": canonical(plan.manifest.model_dump(mode="json")),
+                "hybrid/normalized_visual_blocks.json": canonical({h: [b.model_dump(mode="json")
+                    for b in blocks] for h, blocks in plan.cached.items()}),
+            })
             persist_blocks(session, document, parsed)
             transition_document(document, "CHUNKING")
             return result | {
@@ -140,6 +171,17 @@ def run_routed_step(
             }
     if decision.route_strategy == "native":
         try:
+            identity = recipe(document, settings, "native",
+                              scope="explicit_native_scope" if mode == "native" else "complete")
+            cached = None if force_reparse else cache.document(document, identity)
+            if cached is not None:
+                guard_cached(cached, decision)
+                check_source_hash(document, path)
+                persist_blocks(session, document, cached)
+                transition_document(document, "CHUNKING")
+                return result | {"status": "awaiting_chunk", "document_status": document.status,
+                    "block_count": len(cached.blocks), "route_decision": decision.model_dump(mode="json"),
+                    "parse_cache_hit": True, "mineru_file_submit_count": 0}
             parser = get_parser(document.file_type)
             log_event(
                 "parse.started",
@@ -171,6 +213,8 @@ def run_routed_step(
                 block_count=len(parsed.blocks),
             )
             log_decision("router.guard_passed", decision, doc_id, task_id)
+            check_source_hash(document, path)
+            cache.save_document(document, identity, parsed)
             persist_blocks(session, document, parsed)
             transition_document(document, "CHUNKING")
             return result | {
@@ -190,7 +234,14 @@ def run_routed_step(
         routing_task_id=task_id,
         route_decision=decision.model_dump(mode="json"),
         hybrid_context=hybrid_context,
+        force_reparse=force_reparse,
     )
+    if not job.is_active:
+        return result | {"status": "awaiting_chunk", "document_status": document.status,
+            "block_count": session.scalar(select(func.count()).select_from(DocumentBlock)
+                .where(DocumentBlock.doc_id == doc_id)),
+            "route_decision": decision.model_dump(mode="json"), "parse_cache_hit": True,
+            "mineru_file_submit_count": 0}
     # 换成云任务代次后旧 Native 消息/失败回调全部失效；提交之后才投递短任务。
     return result | {
         "status": "delegated_to_mineru",

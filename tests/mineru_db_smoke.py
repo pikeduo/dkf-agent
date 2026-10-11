@@ -109,6 +109,7 @@ def cloud_context(upload_context, migrated_connection, monkeypatch):
     settings = Settings(
         _env_file=None,
         upload_dir=directory,
+        parsed_dir=directory.parent / "parsed",
         max_upload_size_mb=50,
         mineru_api_token="unit-secret-not-real",
     )
@@ -299,10 +300,10 @@ def test_layout_order_is_persisted_once_with_stable_ids(cloud_context):
     assert detail(cloud_context, job)[0]["status"] == "CHUNKING"
 
 
-def test_image_network_exhaustion_has_no_blocks_and_requires_explicit_new_job(
+def test_image_network_exhaustion_requires_confirmed_force_reparse(
     cloud_context,
 ):
-    """图片上传完成但查询重试耗尽时无块；远端后来成功也不能自动复活已终止的任务。"""
+    """查询耗尽无块；普通显式提交同样不得重新收费，只有确认 Force Reparse 可新建批次。"""
 
     job = upload(cloud_context, "图片.png", png_bytes())
     execute(job)
@@ -327,8 +328,13 @@ def test_image_network_exhaustion_has_no_blocks_and_requires_explicit_new_job(
     response = cloud_context.api(
         "POST", f"{PREFIX}/{cloud_context.kb_id}/documents/{job['doc_id']}/mineru"
     )
-    assert response.status_code == 202
-    new = response.json()
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "CACHE_REPARSE_REQUIRED"
+    with cloud_context.session() as session:
+        new_job = create_job(session, session.get(Document, UUID(job["doc_id"])),
+                             cloud_context.settings, force_reparse=True)
+        session.commit()
+        new = {"job_id": str(new_job.job_id), "doc_id": str(new_job.doc_id)}
     assert new["job_id"] != job["job_id"] and new["doc_id"] == job["doc_id"]
     with cloud_context.session() as session:
         assert session.scalar(select(func.count()).select_from(Document)) == 1

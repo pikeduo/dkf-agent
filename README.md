@@ -44,6 +44,8 @@ MINERU_MODEL_VERSION=vlm
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
+PARSED_DIR=data/parsed
+PARSE_CACHE_MAX_ENTRY_MB=768
 # auto 内部优先尝试 XLSX 视觉增强。
 HYBRID_XLSX_ENABLED=true
 HYBRID_MAX_CANDIDATES=64
@@ -56,6 +58,7 @@ HYBRID_MAX_IMAGE_MB=16
 - 替换数据库密码，URL 中特殊字符需百分号编码；真实密钥和 `.env` 不提交仓库。
 - Redis 逻辑库 0/1/2 分别用于应用、消息、结果；三个 URL 指向同一本地服务，未配置 Celery URL 时使用 REDIS_URL。
 - API/Worker 使用同一数据库，并能读写同一原件目录；UPLOAD_DIR 相对项目根目录，默认单文件上限 50 MiB。
+- API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
 - Native 无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token，手动维护有效性。当前不需要 DeepSeek Key 或下载 Embedding/Reranker 模型。
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
@@ -188,6 +191,8 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | GET / POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档列表 / 单选、多选上传 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、错误、任务标识 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递，可选 Query parse_mode，无请求体 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reindex` | 仅回放成功解析缓存，停在等待切片，不调用 MinerU |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reparse?force=true` | 管理员明确重新解析，可选 parse_mode，可能重新收费 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式云上传，支持多选 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 已有文档云提交 / 活动云任务恢复，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 云任务状态与安全错误 |
@@ -240,8 +245,22 @@ MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换
 
 - 文档详情是业务状态依据；云解析另查 parse-jobs。成功为 Document=CHUNKING，云 job=done；Celery SUCCESS 或交接结果 delegated_to_mineru 不代表整份解析成功。
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
-- 仅 UPLOADED/FAILED 可通过 /process 重投，省略默认 auto；管理员可用 `?parse_mode=native|mineru` 覆盖。活动云任务用 /mineru 恢复同一任务；非活动失败文档再提交是人工新代次，可能产生费用。远端 failed 不自动新建批次。
-- 当前不提供 Delete/Reparse/Reindex 或后台自动补投，CHUNKING 等完成状态拒绝重解析；更新代码不会改写旧结果。
+- 仅 UPLOADED/FAILED 可通过 /process 重投，默认 auto；管理员可覆盖。活动云任务用 /mineru 恢复同一任务；收费失败且无可用缓存时，普通重投不再申请批次，返回 CACHE_REPARSE_REQUIRED。相同内容已有活动云任务时为 CACHE_IN_PROGRESS，完成后再重投可复用结果。
+- 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
+- `/reindex` 当前只将缓存恢复为 Block 并停在 CHUNKING，不执行尚未实现的 Chunk/Embedding/Index；缓存缺失、损坏或参数变化明确 FAILED，旧块保留。升级前已完成结果不会自动回填缓存。当前无 Delete/后台自动补投。
+- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动任务时拒绝换代次。维护入口当前支持 UPLOADED/FAILED/CHUNKING，管理接口暂无鉴权，仅限可信环境。
+
+维护已有文档（无请求体，替换 UUID）：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/reindex"
+# 仅在确认外传权限和新增云费用后执行：
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/reparse?force=true"
+```
+
+202 表示已投递，使用文档详情查询最终状态。缓存回放不需要有效 Token；明确需要云解析的新任务仍需要 Token/Redis/预算。目录保存版本化的标准化结果、云 ZIP/content_list、上游提供的 full.md，以及 Hybrid manifest/Bundle/视觉结果；原始文件不会自动进入 Git。
+
+- 云缓存任务可表现为 job=done、batch_id=null、upload_complete=false，这是本地复用，不伪造远端上传状态。
 - 常见错误：400 空文件/文件名，404 不存在，409 重复/状态冲突，413 超限，415 格式，422 参数/原件校验，503 服务/配置/迁移不可用，507 存储不可用；详情见响应 detail。
 
 ## 5. 部署检查与排障
@@ -261,7 +280,7 @@ Swagger 仍显示 Add string item 时，重启 API、Ctrl+F5 刷新，检查 `/s
 
 MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs、平台批次与直连网络/VPN/TUN，不关闭证书校验、不改签名 URL、不盲目创建新批次。详见 [网络排查与恢复](docs/MINERU_CLOUD.md#结果下载与代理排查)。
 
-数据库与原件目录应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
+数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 
 ## 6. 开发文档
 

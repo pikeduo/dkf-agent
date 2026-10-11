@@ -251,6 +251,21 @@ def test_extractor_stub_dedup_filter_limits_and_single_bundle(monkeypatch):
     plan = hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy())
     assert calls == [1] and plan.manifest.bundle_page_count == 1
     assert [e.state for e in plan.manifest.entries] == ["pending", "reused", "reused"]
+    calls.clear()
+    cached = visual_result(base, (1,)).blocks
+    cached = [block.model_copy(update={"page": 1, "bbox": None, "section": ""}) for block in cached]
+
+    def cached_visual(content_hash):
+        """相同精确视觉字节复用 Stub 标准化结果，不依赖新 Bundle/Anchor/文档身份。"""
+
+        return cached
+
+    hit_plan = hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy(),
+                                    visual_lookup=cached_visual)
+    assert calls == [0] and hit_plan.manifest.bundle_page_count == 0
+    assert all(entry.cache_hit and entry.bundle_page is None for entry in hit_plan.manifest.entries)
+    assert len(merge_hybrid(hit_plan, None).blocks) == 5
+    calls.clear()
     with pytest.raises(HybridPreflightError, match="HYBRID_RESOURCE_LIMIT"):
         hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy(max_candidates=2))
     calls.clear()
@@ -269,11 +284,23 @@ def test_extractor_stub_dedup_filter_limits_and_single_bundle(monkeypatch):
     assert calls == []
     plan = hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy())
     assert calls == [2] and plan.manifest.bundle_page_count == 2
+    first_hash = digest(b"non-image-stub")
+
+    def partial_visual(content_hash):
+        """只缓存第一张图，第二张仍进入唯一 Bundle，禁止每图提交。"""
+
+        return cached if content_hash == first_hash else None
+
+    partial = hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy(),
+                                   visual_lookup=partial_visual)
+    assert calls == [2, 1] and partial.manifest.bundle_page_count == 1
+    assert partial.manifest.entries[0].cache_hit and partial.manifest.entries[0].bundle_page is None
+    assert partial.manifest.entries[1].bundle_page == 1 and not partial.manifest.entries[1].cache_hit
     parts["xl/drawings/d1.xml"] = parts["xl/drawings/d1.xml"].replace(b'<a:srcRect l="0"', b'<a:srcRect l="1"')
     with pytest.raises(HybridPreflightError) as caught:
         hybrid.prepare_hybrid(doc_id, Path("unused.xlsx"), "source.xlsx", HybridPolicy())
     assert caught.value.code == "HYBRID_UNSUPPORTED_IMAGE_TRANSFORM"
-    assert caught.value.whole_compatible and calls == [2]
+    assert caught.value.whole_compatible and calls == [2, 1]
 
 
 def test_bundle_resource_limit_before_pdf_open(monkeypatch):

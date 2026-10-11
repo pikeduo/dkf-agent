@@ -17,6 +17,7 @@ from app.parsers.routing.inspector import inspect_document
 from app.parsers.common import ParserError
 from app.services.document_processing import (
     persist_blocks,
+    check_source_hash,
     source_path,
     transition_document,
 )
@@ -26,6 +27,9 @@ from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
 from app.parsers.hybrid import BundleManifest
 from app.services.xlsx_primary import prepare_primary, complete_primary
+from app.services.parse_cache import (CacheError, ParseCache, recipe, key_for, canonical,
+    visual_recipe, archive_artifacts, guard_cached)
+from app.services.cache_claims import lock_keys, claim_miss
 
 
 def parse_options(settings: Settings) -> dict:
@@ -52,6 +56,12 @@ def local_file(document: Document, job: DocumentParseJob) -> LocalFile:
     )
 
 
+def read_bundle_bytes(path) -> bytes:
+    """缓存只保存已经 Hash 校验的当前 Bundle 字节，路径来自内部检查点。"""
+
+    return path.read_bytes()
+
+
 def create_job(
     session: Session,
     document: Document,
@@ -60,8 +70,9 @@ def create_job(
     routing_task_id: UUID | None = None,
     route_decision: dict | None = None,
     hybrid_context: dict | None = None,
+    force_reparse: bool = False,
 ) -> DocumentParseJob:
-    """创建 Whole/单 Bundle 云身份；冻结 Hybrid 检查点，活动恢复不改为新 Whole 任务。"""
+    """先查已验证缓存；只有首次 miss/明确 Reparse 创建云身份，恢复仍沿用同一批次。"""
 
     document = session.scalar(
         select(Document)
@@ -107,6 +118,12 @@ def create_job(
         raise MinerUError(
             "DOCUMENT_STATE", "文档已进入处理阶段，不提供 Reparse 或 Reindex"
         )
+    try:
+        with source_path(document).open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
+                raise MinerUError("FILE_HASH", "原件 Hash 已变化，禁止复用缓存或提交云任务")
+    except OSError:
+        raise MinerUError("FILE_MISSING", "原件无法读取，未复用缓存或提交云任务") from None
     if route_decision is not None:
         # 决策只作内部元数据，不进入官方请求参数，也不改变供应商解析身份 Hash。
         checked = RouteDecision.model_validate(route_decision)
@@ -135,6 +152,36 @@ def create_job(
         identity = hashlib.sha256(json.dumps(
             {key: value for key, value in options.items() if key != "_route_decision"},
             sort_keys=True).encode()).hexdigest()
+    if hybrid_context is None:
+        try:
+            guard_inspection = None if route_decision else inspect_document(source_path(document), document.file_type, settings)
+        except ParserError:
+            raise MinerUError("FILE_STRUCTURE", "原件无法安全预检，未复用缓存或提交云任务") from None
+        if guard_inspection is not None and guard_inspection.uncertain:
+            raise MinerUError("PREFLIGHT_LIMIT", "原件预检超出资源限制，未提交云任务")
+        guard_decision = RouteDecision.model_validate(route_decision) if route_decision else RouteDecision(
+            file_type=document.file_type, parse_mode="mineru", route_strategy="mineru_whole",
+            reason_codes=("EXPLICIT_MINERU",),
+            signals=guard_inspection.signals)
+        options = options | {"_cache_guard": guard_decision.model_dump(mode="json")}
+    manifest = BundleManifest.model_validate(hybrid_context["manifest"]) if hybrid_context else None
+    cache_recipe = recipe(document, settings, "hybrid_bundle" if hybrid_context else "mineru_whole",
+                          manifest=manifest)
+    cache_key = key_for(cache_recipe)
+    visual_keys = sorted({key_for(visual_recipe(entry.content_hash, options, manifest.version))
+        for entry in manifest.entries if entry.source_type == "embedded_image"
+        and entry.bundle_page is not None and not entry.cache_hit}) if manifest else []
+    lock_keys(session, [cache_key, *visual_keys])
+    try:
+        cached = None if force_reparse else ParseCache(settings).document(document, cache_recipe)
+        if cached is not None and hybrid_context is None:
+            guard_cached(cached, guard_decision)
+    except CacheError as exc:
+        raise MinerUError(exc.code, str(exc)) from None
+    if cached is None:
+        claim_miss(session, document, cache_recipe, visual_keys, force_reparse=force_reparse)
+    options = options | {"_cache_key": cache_key, "_cache_recipe": cache_recipe,
+                         "_cache_visual_keys": visual_keys, "_force_reparse": force_reparse}
     job_id = uuid4()
     job = DocumentParseJob(
         job_id=job_id,
@@ -152,14 +199,62 @@ def create_job(
         submission_attempted=False,
         upload_complete=False,
     )
-    validate_local_file(local_file(document, job))
+    if cached is None:
+        validate_local_file(local_file(document, job))
     if document.status == "FAILED":
         transition_document(document, "UPLOADED")
     transition_document(document, "PARSING")
     document.processing_task_id = job.task_id
     session.add(job)
     session.flush()
+    if cached is not None:
+        try:
+            check_source_hash(document, source_path(document))
+        except ParserError:
+            raise MinerUError("FILE_HASH", "缓存回放期间原件 Hash 已变化，未写入结果") from None
+        finish_job(session, document, job, cached)
     return job
+
+
+def finish_job(session, document, job, parsed) -> None:
+    """在调用方事务中替换完整块并完成 Job；缓存命中不伪造 batch 或上传成功。"""
+
+    persist_blocks(session, document, parsed)
+    transition_document(document, "CHUNKING")
+    job.state, job.is_active = "done", False
+    job.finished_at = datetime.now(UTC)
+    job.error_code = job.error_message = None
+
+
+def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[str, int] | None:
+    """恢复同一云代次已验证的本地结果，提交失败重试不需要 Token、GET 或 ZIP 下载。"""
+
+    locked = lock_job(session, job_id)
+    if not locked:
+        return "skipped", 0
+    document, job = locked
+    if "_cache_recipe" not in job.parse_options:
+        return None
+    try:
+        restored = ParseCache(settings).job_document(document, job.parse_options["_cache_recipe"], job_id)
+        if restored is None:
+            return None
+        from app.services.document_processing import check_source
+        check_source(document)
+        with source_path(document).open("rb") as stream:
+            if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
+                raise CacheError()
+        parsed, files = restored
+        if "_hybrid" in job.parse_options:
+            completed = json.loads(files["hybrid/bundle_manifest.json"])
+            job.parse_options = job.parse_options | {"_hybrid_result": completed}
+        finish_job(session, document, job, parsed)
+        session.commit()
+        log_event("cache.persisted", doc_id=document.doc_id, job_id=job_id,
+                  block_count=len(parsed.blocks), parse_cache_hit=True, status="CHUNKING")
+        return "done", len(parsed.blocks)
+    except CacheError as exc:
+        raise MinerUError(exc.code, str(exc)) from None
 
 
 def lock_job(
@@ -207,6 +302,9 @@ def submit_step(
 ) -> tuple[str, int]:
     """持久化申请意图及 batch 后 PUT，同一 batch 上传恢复不重复 POST；返回下一短步骤。"""
 
+    restored = restore_cached_result(session, job_id, settings)
+    if restored is not None:
+        return restored
     locked = lock_job(session, job_id)
     if not locked:
         return "skipped", 0
@@ -297,6 +395,9 @@ def check_step(
 ) -> tuple[str, int]:
     """只检查一次；Whole 或 Hybrid 全部校验后原子写块，未完成延时再查。"""
 
+    restored = restore_cached_result(session, job_id, settings)
+    if restored is not None:
+        return restored
     locked = lock_job(session, job_id)
     if not locked:
         return "skipped", 0
@@ -347,6 +448,7 @@ def check_step(
         block_count=len(parsed.blocks),
     )
     hybrid_metrics = {}
+    original_visual = parsed
     if "_hybrid" in job.parse_options:
         parsed, completed_manifest = complete_hybrid(
             document, job.parse_options["_hybrid"], parsed,
@@ -354,11 +456,11 @@ def check_step(
         )
         job.parse_options = job.parse_options | {"_hybrid_result": completed_manifest}
         hybrid_metrics = metrics(BundleManifest.model_validate(completed_manifest))
-    elif "_route_decision" in job.parse_options:
+    elif "_route_decision" in job.parse_options or "_cache_guard" in job.parse_options:
         try:
             guard_result(
                 parsed,
-                RouteDecision.model_validate(job.parse_options["_route_decision"]),
+                RouteDecision.model_validate(job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"]),
             )
         except CompletenessError as exc:
             log_event(
@@ -380,11 +482,8 @@ def check_step(
             RouteDecision.model_validate(job.parse_options["_route_decision"])
             if "_route_decision" in job.parse_options else None,
         )
-    persist_blocks(session, document, parsed)
-    transition_document(document, "CHUNKING")
-    job.state, job.is_active = "done", False
-    job.finished_at = datetime.now(UTC)
-    job.error_code = job.error_message = None
+    save_cloud_cache(document, job, settings, parsed, original_visual, archive, source)
+    finish_job(session, document, job, parsed)
     completed_doc_id = document.doc_id
     session.commit()
     log_event(
@@ -402,6 +501,45 @@ def check_step(
         log_event("xlsx.primary_persisted", doc_id=completed_doc_id, job_id=job_id,
                   block_count=len(parsed.blocks), status="CHUNKING")
     return "done", len(parsed.blocks)
+
+
+def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -> None:
+    """全量校验后保存原始结果和视觉缓存；旧代次不猜新身份，不回填未知覆盖结果。"""
+
+    if "_cache_recipe" not in job.parse_options:
+        return
+    try:
+        try:
+            check_source_hash(document, source_path(document))
+        except ParserError:
+            raise MinerUError("FILE_HASH", "解析完成时原件 Hash 已变化，未发布缓存") from None
+        cache = ParseCache(settings)
+        artifacts = archive_artifacts(archive)
+        if "_hybrid" in job.parse_options:
+            manifest = BundleManifest.model_validate(job.parse_options["_hybrid_result"])
+            normalized = {}
+            for entry in manifest.entries:
+                if entry.source_type != "embedded_image" or entry.state == "filtered":
+                    continue
+                value = visual_recipe(entry.content_hash, job.parse_options, manifest.version)
+                if entry.bundle_page is not None and entry.reused_from is None:
+                    blocks = [block for block in visual.blocks if block.page == entry.bundle_page]
+                    cache.save_visual(value, blocks)
+                blocks = cache.visual(value)
+                if blocks is None:
+                    raise CacheError("CACHE_MISS")
+                if entry.cache_hit and hashlib.sha256(json.dumps(
+                    [block.model_dump(mode="json") for block in blocks], sort_keys=True,
+                    ensure_ascii=False).encode()).hexdigest() != entry.cache_result_hash:
+                    raise CacheError()
+                normalized[entry.content_hash] = [block.model_dump(mode="json") for block in blocks]
+            artifacts.update({"hybrid/bundle_manifest.json": canonical(manifest.model_dump(mode="json")),
+                "hybrid/visual_bundle.pdf": read_bundle_bytes(source.path),
+                "hybrid/normalized_visual_blocks.json": canonical(normalized)})
+        cache.save_document(document, job.parse_options["_cache_recipe"], parsed,
+                            artifacts, job_id=job.job_id)
+    except CacheError as exc:
+        raise MinerUError(exc.code, str(exc)) from None
 
 
 def record_error(

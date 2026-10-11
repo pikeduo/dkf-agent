@@ -70,6 +70,10 @@ FIELDS = {
     "hybrid_visual_dedup_count",
     "hybrid_bundle_page_count",
     "hybrid_chart_count",
+    "cache_key",
+    "parse_cache_hit",
+    "visual_cache_hit_count",
+    "operation",
 }
 LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
@@ -133,6 +137,12 @@ EVENT_LABELS = {
     "hybrid.preflight_rejected": "Hybrid 预检拒绝，按固定原因选择提交前回退或失败",
     "xlsx.primary_validated": "XLSX 原生单元格与公式主结果已校验，尚未最终落库",
     "xlsx.primary_persisted": "XLSX 原生主结果与整份云增强已一起落库",
+    "cache.hit": "命中完整解析缓存，不调用云端",
+    "cache.miss": "解析缓存未命中，尚未提交云任务",
+    "cache.stored": "完整校验结果已持久化为解析缓存，尚未代表数据库提交",
+    "cache.busy": "相同内容已有活动云任务，禁止重复收费提交",
+    "cache.persisted": "解析缓存已事务回放到文档 Block",
+    "cache.maintenance_requested": "收到显式缓存回放或强制重新解析请求",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
@@ -182,6 +192,10 @@ FIELD_LABELS = {
     "hybrid_visual_dedup_count": "视觉复用数",
     "hybrid_bundle_page_count": "Bundle页数",
     "hybrid_chart_count": "结构化图表数",
+    "cache_key": "缓存键",
+    "parse_cache_hit": "解析缓存命中",
+    "visual_cache_hit_count": "视觉缓存命中数",
+    "operation": "操作",
 }
 
 

@@ -10,7 +10,7 @@
 - 生产 HTTP 客户端固定 `trust_env=False`，API、签名上传、结果下载共用直连策略，不发现环境 / Windows 系统代理，不自动回退代理。保持默认 HTTPS 证书校验；不读取 `SSL_CERT_FILE / SSL_CERT_DIR`，不修改系统代理或 VPN / TUN 路由。不新增环境变量。
 - 结构化结果依据：官方 [ContentListV1 序列化源码](https://github.com/opendatalab/MinerU/blob/3e60291846cb7c3bf8fe7f4f16238f4fc6cce491/mineru/backend/pipeline/pipeline_middle_json_mkcontent.py)。云端实际格式仍须以真实 ZIP 验收；不能把 API V4 与开源模型版本或 ContentListV2 混为一谈。
 - 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。原 `/mineru/documents` 接收 1～50 个 multipart `file`，OpenAPI 为文件数组以支持 Swagger 多选；只选一份保持原 202/Parse Job，多份逐文件建立独立 Document 和 Parse Job，HTTP 200 返回逐项报告。不新增 `/batch` 路径，不是云端合批或预置知识库批量导入；Provider 的批量申请协议与按文件数计量的共享频控不变。
-- 内存读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，不持久化下载 ZIP、Markdown 或标准化结果文件，不实现 Parse Cache。未知 V2 / 类型安全失败，不能偷换成读取 full.md。
+- Adapter 内存读取唯一 `content_list.json / *_content_list.json`；完整校验成功后阶段12缓存保存 ZIP、结构化结果及可选 full.md。未知 V2/类型失败，不以 Markdown 代正文；详见 [Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。
 - ContentListV1 的 `page_idx` 转 1 基页码、归一化 bbox 转原件尺寸，保留正文顺序和实际标题章节；只在可选 layout 证据明确时恢复页眉/页脚位置，具体保护条件见下节。表格 HTML 与公式文本原样作为证据，不执行 HTML / JavaScript / 公式。图片仅有路径而无文字时不伪造正文；无可用块时失败。
 - `full.md` 可在供应商平台下载用于人工比对；当前没有 Admin 预览接口。
 
@@ -48,7 +48,7 @@
 
 所有入口远端 failed 都不自动追加 batch 或降级 Native；管理员核对后才可显式开启新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。
 
-没有 Outbox / 自动补投器。同代次的活动任务可通过显式 `POST .../documents/{doc_id}/mineru` 恢复投递，继续沿用已保存的 batch。任务已经失败且非活动时，该入口会建立新任务，可能重新申请云端批次、上传并消耗额度；它不是旧失败批次的“仅重新下载”入口。状态已完成或原生 PARSING 不允许借用它重新解析。更换参数不能覆盖活动任务。不对旧任务做后台扫描。
+没有 Outbox/自动补投器。活动 `/mineru` 恢复沿用 batch；失败文档优先缓存，收费历史而无可用缓存时拒绝新批次，需管理员 `/reparse?force=true` 明确确认费用。完成状态不可借 `/mineru` 重解析，Reindex 仅缓存回放；更换参数不能覆盖活动任务，不后台扫描。
 
 Redis 使用 TIME + Lua 原子滚动计数，默认安全系数 0.9，按实际文件数预留；失败调用预留量不返还，采取保守策略。日文件额度滚动 24 小时，不假定平台重置时区；优先页按 UTC 日粗略观测，超出不拒绝。所有同账户 Worker 共用 Redis 与命名空间；外部平台 / 其他应用消耗仍以平台为准。
 
@@ -89,7 +89,7 @@ python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 ```powershell
 conda activate dkf-agent
-python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=threads --concurrency=2 --hostname=cpu@%h -l info
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
 ```
 
 预期迁移为 `0004_mineru_jobs (head)`；Worker 注册两个 MinerU 任务，并消费 default_queue。GPU Worker 不必启动。
@@ -188,17 +188,17 @@ curl.exe "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$t
 curl.exe "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId/parse-jobs"
 ```
 
-网络恢复不会自动复活该终态任务。先在平台核对旧批次和 ZIP，若你允许新建批次并消耗额度，再对同一个 Document 显式提交（无需重复上传原件）：
+网络恢复不会自动复活终态任务。先核对旧批次和 ZIP；阶段12普通提交不再重新收费，只有明确允许新云调用后执行 Force Reparse（无需重传原件）：
 
 ```powershell
-curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId/mineru"
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/$taskKbId/documents/$taskDocId/reparse?force=true&parse_mode=mineru"
 ```
 
-返回 202、新 job_id；完成后该 job=done、Document=CHUNKING 且 block_count>0。它可能重新申请、PUT 并解析，不是复用旧 ZIP；若收到 409，先查询当前状态，不直接改数据库状态或删除旧记录。
+返回202及新的本地 task_id；云 job_id 通过 parse-jobs 查询。成功应 job=done、Document=CHUNKING、block_count>0；不是仅下载旧 ZIP，可能重新收费。409先查状态，不改数据库或删旧记录。
 
 ### 回归抽检与导出
 
-阶段 10 已验收，无需为本次扩展重做付费主链路。需要额外抽检时重启 API/Worker，在独立知识库使用显式 `/mineru/documents`；已 CHUNKING 不支持 Reparse。新增 Office 应按下一节单独验收，真实提交消耗额度。
+阶段10已验收，不必重做付费主链路。额外抽检可用独立知识库；已有 CHUNKING 只允许显式维护入口，Reindex不调用云，Force Reparse需确认额度。Office验收仍分别核对。
 
 等待 job=done、Document=CHUNKING 后执行以下 SQL，将知识库 UUID 替换为本次验收库。用 LEFT JOIN 同时显示尚无块的文档，再按 block_index 验收；不要用 `ORDER BY bbox` 掩盖持久化顺序问题：
 
@@ -259,4 +259,4 @@ ORDER BY d.file_name, b.block_index;
 
 阶段 10 已完成人工验收；最新开发计划记录 DOC/DOCX、PPT/PPTX 和 XLS 的真实云结果及质量边界，XLSX 云结果仍需独立对照，不能从 XLS 推断。本轮没有重新调用真实 API，11B.1 新路由仍需人工验收。Mock 不能替代真实鉴权、格式转换、页面语义和视觉质量，也不等于真实 429 或所有网络故障均已验证。
 
-已有默认 auto 路由及 XLSX Hybrid，本次未调用真实云 API；不使用 Review。复杂 XLSX 优先 Hybrid，明确能力缺口仅提交前可转带 Native 原式保护的 Whole，损坏/缺附件/超限失败。活动 Job 恢复同一检查点，失败不自动第二次 Whole；非幂等申请 5xx 按提交不确定处理，禁止盲目重发。公开参数仍 auto/native/mineru。未实现 Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期，等待用户验收。
+默认 auto 与 XLSX Hybrid 保留，阶段12新增整份/视觉缓存和显式 Reparse，待人工验证。上文“失败后重新提交可收费”仅是历史行为，当前必须明确 Force Reparse；不使用 Review，不进入 Chunk/Embedding/RAG，质量边界不由缓存修复。

@@ -6,6 +6,7 @@ import posixpath
 import re
 import struct
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 from uuid import UUID, uuid5
@@ -89,6 +90,8 @@ class VisualEntry(BaseModel):
     filter_reason: Literal["small", "solid"] | None = None
     reused_from: UUID | None = None
     block_ids: list[UUID] = Field(default_factory=list)
+    cache_hit: bool = False
+    cache_result_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("source_anchor")
     @classmethod
@@ -121,6 +124,7 @@ class HybridPlan:
     manifest: BundleManifest
     bundle: bytes = field(repr=False)
     charts: dict[UUID, ParsedBlock] = field(repr=False)
+    cached: dict[str, list[ParsedBlock]] = field(default_factory=dict, repr=False)
 
 
 def digest(value: bytes) -> str:
@@ -357,15 +361,16 @@ def build_bundle(images: list[bytes], policy: HybridPolicy) -> bytes:
     return result
 
 
-def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolicy) -> HybridPlan:
-    """读取 Native 和已锚定 OOXML 图片/图表，任何未覆盖结构都阻止半份 Hybrid。"""
+def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolicy,
+                   visual_lookup: Callable[[str], list[ParsedBlock] | None] | None = None) -> HybridPlan:
+    """读取主结果和候选；过滤后先查精确视觉缓存，仅未命中图片进入一份 Bundle。"""
 
     try:
         native = XlsxParser().parse(doc_id=doc_id, file_path=path, file_name=file_name, file_type="xlsx")
     except NoTextError:
         # 视觉专用工作表可以没有单元格；后续必须确有视觉结果，不能把全空 Workbook 判成功。
         native = ParsedDocument(doc_id=doc_id, file_name=file_name, file_type="xlsx", blocks=[])
-    entries, images, charts = [], [], {}
+    entries, images, charts, cached = [], [], {}, {}
     seen_hashes, used_media, used_drawings, used_charts = {}, set(), set(), set()
     try:
         with ZipFile(path) as archive:
@@ -494,7 +499,19 @@ def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolic
                             previous = seen_hashes[image_hash]
                             entry.state, entry.reused_from = "reused", previous.visual_id
                             entry.bundle_page = previous.bundle_page
+                            entry.cache_hit = previous.cache_hit
+                            entry.cache_result_hash = previous.cache_result_hash
                         else:
+                            reused = visual_lookup(image_hash) if visual_lookup is not None else None
+                            if reused is not None:
+                                cached[image_hash] = reused
+                                entry.state, entry.cache_hit = "reused", True
+                                entry.cache_result_hash = digest(json.dumps(
+                                    [b.model_dump(mode="json") for b in reused], sort_keys=True,
+                                    ensure_ascii=False).encode())
+                                seen_hashes[image_hash] = entry
+                                entries.append(entry)
+                                continue
                             if len(images) >= policy.max_pages:
                                 raise HybridPreflightError("HYBRID_RESOURCE_LIMIT")
                             if sum(len(image) for image in images) + len(content) > policy.max_bundle_bytes:
@@ -517,7 +534,7 @@ def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolic
             manifest = BundleManifest(policy=policy, sheet_names=[s[0] for s in sheets], entries=entries,
                                       bundle_page_count=len(images), bundle_hash=digest(bundle),
                                       native_hash=digest(native.model_dump_json().encode("utf-8")))
-            return HybridPlan(native, manifest, bundle, charts)
+            return HybridPlan(native, manifest, bundle, charts, cached)
     except (ParserError, OSError):
         raise
     except (BadZipFile, KeyError, ValueError, TypeError, AttributeError, RuntimeError, etree.XMLSyntaxError):
@@ -572,16 +589,27 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
                     raise HybridPreflightError()
                 blocks.append(block)
                 continue
-            if entry.bundle_page not in pages or entry.state not in {"pending", "parsed", "reused"}:
+            if entry.state not in {"pending", "parsed", "reused"}:
                 raise HybridPreflightError()
+            if entry.cache_hit:
+                source_blocks = plan.cached.get(entry.content_hash)
+                if (entry.bundle_page is not None or not source_blocks
+                    or any(b.source != "mineru_cloud" or not b.text.strip() or b.page != 1
+                           or b.bbox is not None or b.section for b in source_blocks)):
+                    raise HybridPreflightError()
+            else:
+                if entry.bundle_page not in pages:
+                    raise HybridPreflightError()
+                source_blocks = pages[entry.bundle_page]
             if entry.reused_from is not None:
                 original = next((e for e in manifest.entries if e.visual_id == entry.reused_from), None)
                 if (original is None or original.reused_from is not None
-                    or original.content_hash != entry.content_hash or original.bundle_page != entry.bundle_page):
+                    or original.content_hash != entry.content_hash or original.bundle_page != entry.bundle_page
+                    or original.cache_hit != entry.cache_hit):
                     raise HybridPreflightError()
             entry.block_ids = []
             seen = set()
-            for index, block in enumerate(pages[entry.bundle_page], 1):
+            for index, block in enumerate(source_blocks, 1):
                 key = (block.block_type, " ".join(block.text.split()))
                 if key in seen:
                     continue
@@ -592,7 +620,7 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
                 })
                 blocks.append(copied)
                 entry.block_ids.append(copied.block_id)
-            entry.state = "reused" if entry.reused_from is not None else "parsed"
+            entry.state = "reused" if entry.reused_from is not None or entry.cache_hit else "parsed"
             if not entry.block_ids:
                 raise HybridPreflightError()
     if any(e.state not in {"parsed", "filtered", "reused"} for e in manifest.entries):

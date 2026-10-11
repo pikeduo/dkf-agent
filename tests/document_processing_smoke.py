@@ -45,6 +45,7 @@ def processing_context(upload_context, migrated_connection, monkeypatch):
             yield session
 
     monkeypatch.setattr(tasks, "processing_session", isolated_processing_session)
+    monkeypatch.setattr(tasks, "get_settings", admin_api.get_settings)
     return upload_context
 
 

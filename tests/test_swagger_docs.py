@@ -77,6 +77,20 @@ def test_static_plugin_is_available_and_docs_routes_stay_hidden():
     paths = docs_request("/openapi.json").json()["paths"]
     assert "/docs" not in paths and "/docs/oauth2-redirect" not in paths
     assert not any("/static/" in path or "/batch" in path for path in paths)
+
+
+def test_cache_maintenance_contract_explicit_force_and_no_body():
+    """Reindex 无解析模式/请求体，Reparse 默认不确认收费，保持普通上传 auto 契约。"""
+
+    schema = docs_request("/openapi.json").json()
+    prefix = "/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}"
+    reindex = schema["paths"][prefix + "/reindex"]["post"]
+    reparse = schema["paths"][prefix + "/reparse"]["post"]
+    assert "requestBody" not in reindex and "requestBody" not in reparse
+    assert {p["name"] for p in reindex["parameters"]} == {"kb_id", "doc_id"}
+    parameters = {p["name"]: p for p in reparse["parameters"]}
+    assert parameters["force"]["schema"]["default"] is False
+    assert parameters["parse_mode"]["schema"]["default"] == "auto"
     assert docs_request("/docs/oauth2-redirect").status_code == 200
     assert docs_request("/redoc").status_code == 200
 

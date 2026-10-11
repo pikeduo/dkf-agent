@@ -16,17 +16,20 @@ PUBLISH_ERROR = "异步任务投递失败，请检查 Redis 与 CPU Worker 配�
 
 
 def publish_document(
-    session: Session, doc_id: UUID, task_id: UUID, parse_mode: str | None = "auto"
+    session: Session, doc_id: UUID, task_id: UUID, parse_mode: str | None = "auto",
+    *, operation: str = "ingest",
 ) -> bool:
     """提交后投递当前代次；省略或历史空模式归一为 auto，失败不删原件。"""
 
     try:
         options = {"kwargs": {"parse_mode": parse_mode or "auto"}}
+        if operation != "ingest":
+            options["kwargs"]["operation"] = operation
         process_document.apply_async(
             args=[str(doc_id)], task_id=str(task_id), queue="default_queue", **options
         )
         log_event(
-            "document.dispatched", doc_id=doc_id, task_id=task_id, queue="default_queue"
+            "document.dispatched", doc_id=doc_id, task_id=task_id, queue="default_queue", operation=operation
         )
         return True
     except (OperationalError, RedisError, OSError):

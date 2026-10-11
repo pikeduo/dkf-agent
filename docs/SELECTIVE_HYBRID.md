@@ -14,11 +14,11 @@
 
 ## 检查点与合并
 
-运行中的用户文档任务在原件目录下 `.hybrid/<doc_id>/<初始路由task_id>/` 暂存 `visual_bundle.pdf`、`bundle_manifest.json`。这是业务处理输入，不是开发回合生成的测试资料，也不是 Parse Cache；没有跨文档复用、缓存命中或原件 Reparse。
+运行任务仍在原件目录 `.hybrid/<doc_id>/<初始路由task_id>/` 冻结 Bundle/manifest。阶段12在此之外增加整份/视觉缓存，见 [Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。开发回合不生成任何运行文件/测试资料；缓存命中的精确图片不进入新的 Bundle。
 
 `document_parse_jobs.parse_options._hybrid` 保存版本、源 Hash、路由代次、配置和 manifest。manifest 含 visual_id/source_doc_id/type/Sheet/零基 Anchor/Hash/尺寸/bundle_page，以及 Native 结果 Hash。公开 API、任务结果、日志、官方请求不输出完整 manifest；本地文件和 DB 检查点需限制访问。
 
-申请只包含一个 PDF；POST/PUT/GET 沿用既有检查点。上传/下载/DB 临时错误有限重试，同 batch；申请不确定不盲目重发，远端明确失败不自动追加 Whole。活动 `/mineru` 恢复同一 Hybrid Job，不把它改成 XLSX 整份任务。失败后的管理员显式新代次可能重新收费。
+申请只包含一个 PDF；POST/PUT/GET 沿用检查点，有限重试同 batch，不确定申请不盲重发、不追加 Whole。活动 `/mineru` 恢复同一 Hybrid Job。收费失败无缓存仅 `/reparse?force=true` 可新代次；普通重投不额外收费。
 
 Whole 回退仅发生在尚无云 Job/POST 的本地预检阶段，且原件仍通过平台格式/大小/共享预算限制。同代次最多一个云文件，不会先 Bundle 再 Whole。`_xlsx_primary` 保存 Native 结果 Hash/源 Hash/结构摘要；完成时恢复同样的整 Sheet 表格和原式，随后附 Whole 云块原序。云块的转换逻辑页/章节保留，不伪造原 Sheet/Anchor；来源重复文本不做语义去重，失败不单独提交 Native。
 
@@ -92,8 +92,8 @@ SELECT count(*) AS block_count, count(DISTINCT block_id) AS unique_ids,
 FROM document_blocks WHERE doc_id = '替换文档UUID'::uuid;
 ```
 
-5. 超限/坏原件/缺附件/孤立部件应 FAILED、固定理由码、无新 Block/云批次。受控不支持结构可提交前 Whole，最终仍保留 Native 原式；若云失败，不提交半份 Native、不追加批次。活动恢复使用已有 `/documents/{doc_id}/mineru`，应同 Job/batch；完成状态仍禁止 Reparse。故障注入优先由你运行 Mock，不中断共用服务或故意耗尽云额度。
-6. 在不同知识库比较 Native/Whole/Hybrid 的内容完整性、文件提交数、页数、耗时。真实鉴权、Bundle 上传、ZIP 页覆盖、公式不被覆盖、费用收益及 Worker 恢复必须由你确认。**本次未真实验证任何新增 Hybrid 链路，不进入阶段 12。**
+5. 超限/坏原件/缺附件/孤立部件应 FAILED，无新 Block/云批次。受控缺口只提交前 Whole，原式保留；云失败不交半份 Native/追加批次。活动 `/mineru` 仍同 Job/batch；完成状态仅显式 `/reindex` 缓存回放或已确认 `/reparse?force=true`，不改数据库状态。故障优先 Mock，不中断共用服务/耗尽额度。
+6. 在不同知识库比较 Native/Whole/Hybrid 的完整性、文件/页数、耗时。真实鉴权、上传、ZIP 页覆盖、原式与费用收益由你确认；新增阶段12缓存仍待人工验收，不进入阶段13。
 
 ## 本次文件范围
 

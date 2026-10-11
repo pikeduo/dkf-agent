@@ -104,7 +104,79 @@ PDF 跳过真正空白页但保留其后文本页的原始页码。无原生文�
 4. 永久格式、空文本或 OCR 需求立即标记 `FAILED`；临时文件访问 / 数据库错误按原任务重试规则处理。数据库持续不可用时可能无法记录失败原因，但保留安全日志和任务错误。
 5. 过期代次返回 `stale_task`，已推进的文档返回 `skipped`，不重复解析或生成 Block。重复消息可能更新 Celery 结果为 `skipped`，以 Document 持久化状态为准。
 
-解析过程持有事务与行锁，`PARSING` 不保证实时对外可见。更新代码不会自动补投历史文档；现有 `/process` 仍仅接受 `UPLOADED / FAILED`，不支持对已有 `PARSING / CHUNKING` 文档重新解析或 Reindex。
+解析过程持有事务与行锁，`PARSING` 不保证实时对外可见。`/process` 仍仅接受 `UPLOADED / FAILED`；显式维护入口见下节，活动任务不可换代次，历史结果不自动重写。
+
+## 阶段 12：Parse Cache 契约与验收
+
+只保存通过统一契约/完整性 Guard/Merge 的全量结果，不开发 Chunk、Embedding 或真正 Index。Native 对照范围单独寻址，不能冒充 auto 完整覆盖。Whole XLSX 缓存包含 Native 主表/原式与云块。
+
+整份键包含 `file_hash / file_type / provider / model_version / language / is_ocr / enable_table / enable_formula / route_strategy / coverage_scope`，以及本地归一化/主解析版本和路由配置摘要。Hybrid 额外含 `visual_extractor_version / bundle_manifest_hash / visual_content_hash`：manifest 摘要使用原 Sheet/Anchor/候选内容/策略，不含随机 UUID、结果状态或临时 Bundle 页号。视觉键仅用原图片字节 Hash、模型选项和 Extractor/Normalizer 版本，不依赖 doc_id/Anchor/PDF Hash。
+
+`PARSED_DIR` 配置缓存根目录，`PARSE_CACHE_MAX_ENTRY_MB` 限制每代次总大小；无新依赖/迁移，默认目录已被忽略。运行时结构：
+
+```text
+data/parsed/
+├── .cache/<key>/<generation>/
+│   ├── normalized_document.json
+│   ├── raw/mineru_result.zip          # 云结果
+│   ├── content_list.json
+│   ├── full.md                        # 上游存在且有界才保存
+│   └── hybrid/
+│       ├── bundle_manifest.json
+│       ├── visual_bundle.pdf
+│       └── normalized_visual_blocks.json
+├── .cache/<key>/ready.json
+├── .jobs/<job_id>.json                 # 同代次 SQL 回滚恢复指针
+└── <doc_id>/
+    ├── latest.json                    # 本文档冻结成功代次
+    └── <key>/<generation>/...          # 文档归档与重绑后的标准化结果
+```
+
+每个文件有 Hash，先写不可变完整代次，再原子发布 READY/指针；不 extractall、不存签名链接。Markdown 不成为正文替代。ZIP/manifest 是首次云结果的来源归档，跨文档命中时不冒充新的云返回；标准化文档重绑新 doc_id/文件名/稳定 Block ID。Reindex 使用本文档冻结代次，不被其他文档或 Force 发布的新 READY 改换 ID。
+
+新上传/首次无收费历史的 miss 仍正常解析；损坏缓存明确失败，不当成 miss。已有收费历史而缓存缺失/不确定，普通重投为 CACHE_REPARSE_REQUIRED，仅显式 Force Reparse 允许新调用。相同内容/缺失视觉对象由 PostgreSQL advisory 事务锁 + Job 私有摘要保护，活动 owner 为 CACHE_IN_PROGRESS，不并行重复付费；无自动续租/补投。
+
+完整结果已缓存但 SQL 临时失败，同 Job 重试重放不可变结果，不再 GET/下载/POST；文件与 SQL 非原子，cache.stored 不表示落库成功。失败不缓存成成功；已有成功缓存不因 Force 失败被删除。缓存包含原文，Hash 不是防御有目录写权限者篡改的签名，需要限制权限并备份整个目录（含隐藏元数据）。无自动 TTL/清理、多主机共享盘保证。
+
+Hybrid 先查精确视觉缓存，只有未命中图片进入一份 Bundle。缓存视觉丢弃旧页/bbox/Sheet，按当前 Anchor 回插；冻结命中集合和结果 Hash，新缓存不得改变本代次页映射。零缺失页不建云 Job。Native/Chart 来自当前原件，保留公式原式，缺页/失败/空 OCR 不缓存，不做相似文本复用。
+
+Reindex 无成功缓存、原件/配置/模型/参数/版本变更或缓存损坏应 FAILED，旧块保留，不运行 Parser/云；目前只停在 CHUNKING。升级前完成记录不自动回填，旧活动 Job 按原检查点完成，不猜新缓存身份。云端 `vlm/pipeline` 同名模型升级不可自动检测，需要管理员 Reparse。
+
+### 用户执行的测试与真实验收
+
+Codex 仅编写、未运行。新用例使用元数据/Source/ZIP Stub，不生成 Office/PDF/图片验收资料。DB 用例复用已有隔离 schema，Broker/Provider Mock：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_parse_cache.py tests/test_hybrid.py tests/test_swagger_docs.py -q
+python -m pytest tests/parse_cache_smoke.py tests/hybrid_smoke.py tests/mineru_db_smoke.py tests/parser_router_smoke.py tests/native_parser_db_smoke.py tests/document_processing_smoke.py -q
+```
+
+历史回归由用户按范围选择执行，不授权 Codex 测试。真实步骤：
+
+1. 备份数据库/原件/整个 PARSED_DIR，核对权限、Token/直连/Redis/预算，重启全部 API/Worker；无新迁移，Windows solo/concurrency=1。只使用你已有且允许外传的资料。
+2. 新库首次上传已有扫描 PDF/图片，等 CHUNKING/job=done，检查 ZIP/content_list/标准化结果与 cache.stored。记录平台文件任务数。
+3. POST `/reindex`（无请求体），预期 CHUNKING、正文/ID/顺序不变，无新 batch/HTTP。向另一个库上传同一原件，预期缓存 hit、0 新云文件，doc_id/文件名/Block ID 分离。
+4. 使用已有两份 XLSX：图片字节相同但单元格/Anchor 不同。第一份完成后第二份相同图片不入新 Bundle；全部命中0云任务，部分命中仅缺失图片组成1份 Bundle。核对原式/Sheet/page=1/NULL bbox/增强顺序。
+5. `/reparse` 不带 force 应400；确认预算后仅执行一次 `?force=true`，预期新增最多1份 Whole/Bundle（Native/零视觉仍0）。活动 `/mineru` 仍同 Job/batch；活动维护应409。
+6. 故障/并发/损坏优先运行 Mock，不破坏共用缓存/服务。独立验收目录中的 miss/配置变更 Reindex 应 FAILED，旧块保留、云次数不增；旧完成记录无缓存也不能悄悄收费。
+
+只读 SQL（替换 UUID）：
+
+```sql
+SELECT doc_id, file_name, status, error_message FROM documents WHERE doc_id='文档UUID'::uuid;
+SELECT job_id, state, is_active, batch_id, upload_complete, error_code, error_message,
+       parse_options->>'_cache_key' AS cache_key,
+       parse_options->>'_force_reparse' AS force_reparse,
+       parse_options->'_hybrid_result' AS visual_ledger
+FROM document_parse_jobs WHERE doc_id='文档UUID'::uuid ORDER BY created_at;
+SELECT count(DISTINCT batch_id) FILTER (WHERE batch_id IS NOT NULL) AS confirmed_cloud_files
+FROM document_parse_jobs WHERE doc_id='文档UUID'::uuid;
+SELECT block_id, block_index, page, section, block_type, source, bbox, text
+FROM document_blocks WHERE doc_id='文档UUID'::uuid ORDER BY block_index;
+```
+
+本地 batch 数不是收费证明，不确定申请以平台核对为准。新增缓存链路、真实费用收益、Windows 多进程持久化及全部回归待用户验收，Codex 不自行调用真实 API，不进入阶段13。
 
 ## 人工验收
 

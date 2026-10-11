@@ -90,6 +90,14 @@ def hybrid_context(cloud_context, monkeypatch):
     monkeypatch.setattr(hybrid_processing, "source_path", source_stub)
     monkeypatch.setattr(hybrid_processing, "regenerate_plan", regenerate_stub)
     monkeypatch.setattr(jobs, "bundle_file", file_stub)
+    monkeypatch.setattr(jobs, "source_path", source_stub)
+
+    def bundle_bytes_stub(path):
+        """持久化测试只使用既有 Bundle 字节 Stub，不创建或读取 PDF 文档。"""
+
+        return b"stub-bundle"
+
+    monkeypatch.setattr(jobs, "read_bundle_bytes", bundle_bytes_stub)
     monkeypatch.setattr(jobs, "validate_local_file", validate_stub)
     monkeypatch.setattr(jobs, "page_geometry", geometry_stub)
     monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", normalize_stub)

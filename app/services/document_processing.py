@@ -1,13 +1,14 @@
 """原生文档解析、事务性 Block 落库与状态机，不执行 OCR、切片或索引。"""
 
 from pathlib import Path
+import hashlib
 from uuid import UUID
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.business_logging import log_event
-from app.core.config import PROJECT_ROOT
+from app.core.config import PROJECT_ROOT, Settings, get_settings
 from app.models import Document, DocumentBlock
 from app.parsers.common import NoTextError, ParserError
 from app.parsers.registry import get_parser
@@ -64,6 +65,14 @@ def check_source(document: Document) -> None:
         raise DocumentSourceError("文档原件不存在或不是文件，请检查存储目录") from exc
 
 
+def check_source_hash(document: Document, path=None) -> None:
+    """读取前后核对原件 Hash，防止解析期间改变的文件被发布到错误缓存身份。"""
+
+    with (source_path(document) if path is None else path).open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
+            raise ParserError("文档原件 Hash 已变化，请核对存储内容")
+
+
 def persist_blocks(
     session: Session, document: Document, parsed: ParsedDocument
 ) -> None:
@@ -103,9 +112,10 @@ def persist_blocks(
 
 
 def run_processing_step(
-    session: Session, doc_id: UUID, task_id: UUID
+    session: Session, doc_id: UUID, task_id: UUID, *, settings: Settings | None = None,
+    force_reparse: bool = False, cache_only: bool = False,
 ) -> dict[str, str | int]:
-    """持有行锁校验代次、解析原件并写块，同事务推进到等待切片，重复任务跳过。"""
+    """显式 Native 使用范围独立缓存；Reindex 仅重放，强制 Reparse 才忽略已有缓存。"""
 
     document = session.scalar(
         select(Document).where(Document.doc_id == doc_id).with_for_update()
@@ -119,7 +129,23 @@ def run_processing_step(
     if document.status not in {"UPLOADED", "PARSING"}:
         return result | {"status": "skipped"}
     check_source(document)
+    from app.services.parse_cache import CacheError, ParseCache, recipe
+
+    settings = settings or get_settings()
+    check_source_hash(document)
+    cache = ParseCache(settings)
     transition_document(document, "PARSING")
+    identity = recipe(document, settings, "native", scope="explicit_native_scope")
+    cached = cache.replay(document, settings) if cache_only else None if force_reparse else cache.document(document, identity)
+    if cache_only and cached is None:
+        raise CacheError("CACHE_MISS")
+    if cached is not None:
+        check_source_hash(document)
+        persist_blocks(session, document, cached)
+        transition_document(document, "CHUNKING")
+        return result | {"status": "awaiting_chunk", "document_status": document.status,
+                         "block_count": len(cached.blocks), "parse_cache_hit": True,
+                         "mineru_file_submit_count": 0}
     parser = get_parser(document.file_type)
     log_event(
         "parse.started",
@@ -142,6 +168,8 @@ def run_processing_step(
         task_id=task_id,
         block_count=len(parsed.blocks),
     )
+    check_source_hash(document)
+    cache.save_document(document, identity, parsed)
     persist_blocks(session, document, parsed)
     # CHUNKING 仅表示等待下一阶段；本阶段不产生 Chunk、Embedding 或 READY。
     transition_document(document, "CHUNKING")
