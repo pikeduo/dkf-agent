@@ -47,8 +47,6 @@ APP_HOST=0.0.0.0
 APP_PORT=8000
 LOG_LEVEL=INFO
 LOG_DIR=logs
-LOG_MAX_BYTES=10485760
-LOG_BACKUP_COUNT=5
 
 # 数据库与缓存
 DATABASE_URL=postgresql+psycopg://dkf_user:your_password@127.0.0.1:5432/dkf_agent
@@ -237,9 +235,11 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 
 ### 运行日志
 
-启动命令不变。API 与 Worker 自动向终端及 `LOG_DIR` 输出 UTF-8 单行 JSON 业务日志；相对目录以项目根目录为基准，默认 `logs/`。文件名为 `api-<进程号>.log`、`worker-<进程号>.log`，不同进程独立写入。Uvicorn 访问日志和 Celery 原有日志仍保留在终端，不自动收入这些业务文件。
+启动命令不变。API 与所有 Worker 的业务日志合并到 `LOG_DIR`，**每天只有一个日志文件**，例如 `knowledge-service-2026-10-11.log`；不按进程号、API/Worker 或文件大小拆分，重启继续追加当天文件。相对目录以项目根目录为基准，默认 `logs/`。JSON 中的 `role=api/worker` 和 `pid` 区分来源。Uvicorn 访问日志和 Celery 原有日志仍保留在终端，不自动收入业务文件。
 
-`LOG_LEVEL` 默认 `INFO`（可选 `DEBUG / INFO / WARNING / ERROR`）；提升为 `WARNING` 会隐藏正常请求和处理摘要。每个文件达到 `LOG_MAX_BYTES`（默认 10 MiB，至少 1024 字节）后轮转，保留 `LOG_BACKUP_COUNT` 份备份（默认 5，范围 1～100）。这是每进程的大小限制，不是全目录总量限制；重启产生新的进程文件，旧文件需由维护者按需归档或清理，不自动删除历史进程日志。
+`LOG_LEVEL` 默认 `INFO`（可选 `DEBUG / INFO / WARNING / ERROR`）；提升为 `WARNING` 会隐藏正常请求和处理摘要。文件日期按事件发生时的本机日期，JSON 时间仍为 UTC；跨日自动写入新文件，不需重启。旧版 `LOG_MAX_BYTES / LOG_BACKUP_COUNT` 不再使用，已从环境模板移除。当前不限制单日文件大小，也不自动删除历史日志，请按需归档并关注磁盘空间；旧 `api-<进程号>.log / worker-<进程号>.log` 不会自动合并或删除。
+
+多个进程通过同目录的 `.knowledge-service.lock` 串行追加完整日志行，该固定辅助文件不是额外日志，不含业务内容，运行中不能删除。所有进程必须配置相同的本地 `LOG_DIR`；不保证网络共享盘/多主机的文件锁行为。写盘失败或锁等待超过 1 秒时安全提示并保留终端日志，不阻塞业务无限等待。
 
 日志包含接口方法、路由模板、HTTP 状态码、耗时；上传文件名、类型、实际大小及文档标识；任务投递、原生解析与 MinerU 处理步骤、Block 数量、重试及安全错误码。正常处理的 HTTP 响应包含 `X-Request-ID`，编号随新投递的 Celery 消息传递，可用请求编号、文档 ID 或云任务 ID 关联 API 与 Worker；旧消息没有请求编号时仍可按文档/任务 ID 查询。未处理异常的框架兜底 500 响应可能没有此响应头，应查看相应请求日志。
 
@@ -248,8 +248,14 @@ Celery 官方[不正式支持 Windows](https://docs.celeryq.dev/en/stable/faq.ht
 日志配置改变后重启 API 与所有消费相同队列的 Worker；若保留旧 Worker，部分新任务可能被旧进程消费而没有新增业务日志。查阅默认目录的近期业务日志：
 
 ```powershell
-Get-ChildItem .\logs\*.log | Sort-Object LastWriteTime -Descending
-Get-ChildItem .\logs\*.log* | Select-String -SimpleMatch '你的文档UUID'
+Get-ChildItem .\logs\knowledge-service-*.log | Sort-Object Name -Descending
+Get-ChildItem .\logs\knowledge-service-*.log | Select-String -SimpleMatch '你的文档UUID'
+```
+
+实时查看当天文件（先调用一次接口生成文件；Ctrl+C 退出，跨日后重新执行）：
+
+```powershell
+Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd')) -Tail 50 -Wait
 ```
 
 详细事件语义和人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。

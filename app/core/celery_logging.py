@@ -1,4 +1,4 @@
-"""Celery 业务日志上下文；线程隔离，prefork 子进程不共用父进程日志文件。"""
+"""Celery 业务日志上下文；线程隔离，父/子进程通过文件锁合并每日业务日志。"""
 
 import logging
 from time import perf_counter
@@ -12,7 +12,7 @@ from app.core.config import get_settings
 @signals.after_setup_logger.connect
 @signals.worker_process_init.connect
 def setup_worker_logging(**kwargs) -> None:
-    """Worker 启动及 prefork 子进程启动时配置独立业务日志，不接管 Celery 原有日志。"""
+    """Worker 与 prefork 子进程启动时重建处理器，以 worker 身份写每日合并日志。"""
 
     configure_logging(get_settings(), "worker")
 

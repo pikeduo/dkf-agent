@@ -1,9 +1,14 @@
-"""业务日志的离线验收：隐私、请求隔离、任务关联、轮转和故障降级。"""
+"""业务日志的离线验收：隐私、请求隔离、任务关联、每日合并和故障降级。"""
 
 import asyncio
 import io
 import json
 import logging
+import multiprocessing
+import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -221,24 +226,29 @@ def test_builtin_docs_routes_are_identified_safely(events):
     assert "SECRET" not in events.getvalue()
 
 
-def test_rotation_reconfiguration_and_process_files(events, tmp_path, monkeypatch):
-    """小容量文件能轮转，重复初始化不重复写，不同进程标识使用不同文件。"""
+def test_daily_merge_reconfiguration_and_no_empty_files(events, tmp_path):
+    """同日 API/Worker 和重配共用一个日志，未记录事件时不创建空文件。"""
 
-    settings = Settings(
-        _env_file=None, log_dir=tmp_path, log_max_bytes=1024, log_backup_count=2
-    )
-    monkeypatch.setattr(logs.os, "getpid", lambda: 101)
-    logs.configure_logging(settings, "worker")
-    logs.configure_logging(settings, "worker")
+    settings = Settings(_env_file=None, log_dir=tmp_path)
+    logs.configure_logging(settings, "api")
+    logs.configure_logging(settings, "api")
     assert len(logs.LOGGER.handlers) == 2
-    for _ in range(25):
+    assert not list(tmp_path.iterdir())
+    for _ in range(3):
         logs.log_event("upload.stored", file_name="长" * 255)
-    assert (tmp_path / "worker-101.log.1").exists()
-    assert len(list(tmp_path.glob("worker-101.log*"))) == 3
-    monkeypatch.setattr(logs.os, "getpid", lambda: 102)
     logs.configure_logging(settings, "worker")
     logs.log_event("task.started")
-    assert (tmp_path / "worker-102.log").exists()
+    [path] = tmp_path.glob("*.log")
+    assert (
+        path.name == f"knowledge-service-{datetime.now(UTC).astimezone():%Y-%m-%d}.log"
+    )
+    entries = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["role"] for entry in entries] == ["api", "api", "api", "worker"]
+    assert {entry["pid"] for entry in entries} == {os.getpid()}
+    assert len(list(tmp_path.iterdir())) == 2  # 一份每日日志和固定的跨进程锁文件。
+    assert not list(tmp_path.glob("*.log.*"))
 
 
 def test_unwritable_directory_falls_back_to_console(events, tmp_path, capsys):
@@ -255,17 +265,17 @@ def test_unwritable_directory_falls_back_to_console(events, tmp_path, capsys):
 def test_handler_io_failure_does_not_break_business(
     events, tmp_path, monkeypatch, capsys
 ):
-    """轮转写盘失败不会抛出异常或暴露路径，终端仍然有日志且警告不反复刷屏。"""
+    """每日写盘失败不会抛出异常或暴露路径，终端仍有日志且警告不反复刷屏。"""
 
     logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "api")
     file_handler = logs.LOGGER.handlers[1]
 
-    def unavailable(record):
-        """模拟磁盘满的轮转检查错误。"""
+    def unavailable(record, payload):
+        """模拟磁盘满的每日追加错误。"""
 
         raise OSError("SECRET_PATH")
 
-    monkeypatch.setattr(file_handler, "shouldRollover", unavailable)
+    monkeypatch.setattr(file_handler, "append_line", unavailable)
     logs.log_event("upload.stored")
     logs.log_event("upload.stored")
     output = capsys.readouterr().err
@@ -284,3 +294,187 @@ def test_bad_observer_cannot_fail_business(events, monkeypatch):
 
     monkeypatch.setattr(logs.LOGGER, "log", broken_logger)
     logs.log_event("parse.persisted", block_count=3)
+
+
+def test_daily_boundary_and_delayed_record_keep_original_date(tmp_path):
+    """以本机事件日期选文件，跨月/跨年不重命名，延迟记录不会覆盖当天文件。"""
+
+    handler = logs.SafeDailyFileHandler(tmp_path)
+    handler.setFormatter(logs.JsonFormatter("worker"))
+    local_zone = datetime.now(UTC).astimezone().tzinfo
+    dates = [
+        datetime(2025, 12, 31, 23, 59, tzinfo=local_zone),
+        datetime(2026, 1, 1, tzinfo=local_zone),
+        datetime(2025, 12, 31, tzinfo=local_zone),
+    ]
+    try:
+        for date in dates:
+            record = logging.LogRecord(
+                "dkf.business", logging.INFO, "", 0, "task.started", (), None
+            )
+            record.created = date.timestamp()
+            handler.handle(record)
+    finally:
+        handler.close()
+    assert {path.name for path in tmp_path.glob("*.log")} == {
+        "knowledge-service-2025-12-31.log",
+        "knowledge-service-2026-01-01.log",
+    }
+    assert (
+        len((tmp_path / "knowledge-service-2025-12-31.log").read_text().splitlines())
+        == 2
+    )
+    assert (
+        len((tmp_path / "knowledge-service-2026-01-01.log").read_text().splitlines())
+        == 1
+    )
+
+
+def write_process_events(directory, role, index, count, barrier):
+    """独立子进程同时初始化并写入真实锁保护日志，测试不访问数据库或启动 Worker。"""
+
+    logs.configure_logging(Settings(_env_file=None, log_dir=Path(directory)), role)
+    # 仅压力测试静默终端，生产配置仍同时保留文件与终端处理器。
+    logs.LOGGER.removeHandler(logs.LOGGER.handlers[0])
+    barrier.wait(timeout=15)
+    for sequence in range(count):
+        logs.log_event("task.finished", file_name=f"{index}-{sequence}-" + "中文" * 80)
+
+
+@pytest.mark.parametrize(
+    "start_method", ["spawn"] + (["fork"] if os.name != "nt" else [])
+)
+def test_independent_processes_merge_complete_json_lines(tmp_path, start_method):
+    """多 API/Worker 进程竞争同一文件，全部 JSON 行完整、唯一且保留来源标识。"""
+
+    context = multiprocessing.get_context(start_method)
+    barrier = context.Barrier(4)
+    processes = [
+        context.Process(
+            target=write_process_events,
+            args=(str(tmp_path), "api" if index == 0 else "worker", index, 80, barrier),
+        )
+        for index in range(4)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=20)
+            assert process.exitcode == 0
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            if process.pid:
+                process.close()
+    [path] = tmp_path.glob("*.log")
+    entries = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(entries) == 320
+    assert len({entry["file_name"] for entry in entries}) == 320
+    assert len({entry["pid"] for entry in entries}) == 4
+    assert {entry["role"] for entry in entries} == {"api", "worker"}
+    assert len(list(tmp_path.iterdir())) == 2
+
+
+def test_concurrent_threads_keep_complete_lines(events, tmp_path):
+    """Windows 线程池并发记录仍逐行串行，中文、多线程来源和单文件数量正确。"""
+
+    logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "worker")
+
+    def write_event(index):
+        """每个线程写入不同摘要，以检测重复、拼接或丢行。"""
+
+        logs.log_event("task.finished", file_name=f"并发-{index}.txt")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(write_event, range(80)))
+    [path] = tmp_path.glob("*.log")
+    entries = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(entries) == len({entry["file_name"] for entry in entries}) == 80
+
+
+def test_lock_timeout_and_permissions_fail_safely(
+    events, tmp_path, monkeypatch, capsys
+):
+    """锁竞争有等待上限，非竞争错误立即降级，二者均不泄露原始异常或路径。"""
+
+    logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "api")
+    original_lock = logs.lock_file
+
+    def busy(descriptor, **kwargs):
+        """模拟被其他进程长时间占用的 OS 锁。"""
+
+        raise BlockingIOError(logs.errno.EAGAIN, "SECRET_PATH")
+
+    monkeypatch.setattr(logs, "LOCK_TIMEOUT_SECONDS", 0)
+    monkeypatch.setattr(logs, "lock_file", busy)
+    logs.log_event("upload.stored")
+    assert not list(tmp_path.glob("*.log"))
+    assert "SECRET_PATH" not in capsys.readouterr().err
+    monkeypatch.setattr(logs, "lock_file", original_lock)
+    logs.log_event("upload.stored")
+    assert len(list(tmp_path.glob("*.log"))) == 1
+
+    attempts = 0
+
+    def invalid_lock(descriptor, **kwargs):
+        """模拟不可重试的系统锁错误，必须立即降级而不是一直等待。"""
+
+        nonlocal attempts
+        attempts += 1
+        raise OSError(logs.errno.EINVAL, "SECRET_PATH")
+
+    monkeypatch.setattr(logs, "lock_file", invalid_lock)
+    monkeypatch.setattr(logs, "LOCK_TIMEOUT_SECONDS", 1)
+    logs.log_event("upload.stored")
+    assert attempts == 1
+    assert "SECRET_PATH" not in capsys.readouterr().err
+
+
+def crash_with_lock(directory):
+    """模拟写入者进程异常退出，不执行 finally，以验证 OS 会回收文件锁。"""
+
+    with logs.shared_file_lock(Path(directory)):
+        os._exit(0)
+
+
+def test_crashed_process_does_not_leave_stale_lock(events, tmp_path):
+    """锁持有者退出后下一进程可继续写，不需要删除锁文件或 PID 标记。"""
+
+    process = multiprocessing.get_context("spawn").Process(
+        target=crash_with_lock, args=(str(tmp_path),)
+    )
+    try:
+        process.start()
+        process.join(timeout=20)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        process.close()
+    logs.configure_logging(Settings(_env_file=None, log_dir=tmp_path), "api")
+    logs.log_event("http.request", status_code=200)
+    [path] = tmp_path.glob("*.log")
+    assert json.loads(path.read_text(encoding="utf-8"))["status_code"] == 200
+
+
+def test_role_cannot_be_forged_and_retired_configuration_is_ignored():
+    """角色只能来自配置；旧容量/备份参数不恢复拆文件或阻碍配置兼容加载。"""
+
+    settings = Settings(_env_file=None, log_max_bytes=1, log_backup_count=999)
+    assert "log_max_bytes" not in type(settings).model_fields
+    assert "log_backup_count" not in type(settings).model_fields
+    record = logging.LogRecord(
+        "dkf.business", logging.INFO, "", 0, "task.started", (), None
+    )
+    record.business_fields = {"role": "SECRET", "pid": 1}
+    entry = json.loads(logs.JsonFormatter("worker").format(record))
+    assert entry["role"] == "worker"
+    assert entry["pid"] == os.getpid()

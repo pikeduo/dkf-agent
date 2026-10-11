@@ -1,17 +1,24 @@
-"""安全的业务事件日志：白名单摘要、请求关联和每进程独立轮转，不接管第三方日志。"""
+"""安全的业务事件日志：白名单摘要、请求关联和跨进程每日合并，不接管第三方日志。"""
 
+import errno
 import json
 import logging
 import os
 import re
 import sys
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from logging.handlers import RotatingFileHandler
-from time import perf_counter
+from pathlib import Path
+from time import perf_counter, sleep
 from uuid import UUID, uuid4
 
 from app.core.config import PROJECT_ROOT, Settings
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 LOGGER = logging.getLogger("dkf.business")
 CONTEXT: ContextVar[dict | None] = ContextVar("business_log_context", default=None)
@@ -50,6 +57,54 @@ FIELDS = {
 LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
 PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
+FILE_PREFIX = "knowledge-service"
+LOCK_TIMEOUT_SECONDS = 1.0
+LOCK_RETRY_SECONDS = 0.01
+
+
+def lock_file(descriptor: int, *, unlock: bool = False) -> None:
+    """在固定锁文件上加锁/解锁；Windows 锁首字节，Unix 使用非阻塞独占 flock。"""
+
+    if os.name == "nt":
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK if unlock else msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(
+            descriptor, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX | fcntl.LOCK_NB
+        )
+
+
+@contextmanager
+def shared_file_lock(directory: Path):
+    """串行化完整日志行写入；每次独立打开锁描述符，避免 prefork 继承同一锁身份。"""
+
+    # 锁文件不能运行中删除/替换，否则新旧进程可能锁住不同文件而失去互斥。
+    # Windows 允许锁住 EOF 之后的字节，无需向锁文件写入任何业务内容。
+    descriptor = os.open(
+        directory / f".{FILE_PREFIX}.lock", os.O_CREAT | os.O_RDWR, 0o600
+    )
+    acquired = False
+    try:
+        deadline = perf_counter() + LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                lock_file(descriptor)
+                acquired = True
+                break
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    raise
+                if perf_counter() >= deadline:
+                    raise TimeoutError("日志写入锁等待超时") from None
+                sleep(LOCK_RETRY_SECONDS)
+        yield
+    finally:
+        try:
+            if acquired:
+                lock_file(descriptor, unlock=True)
+        finally:
+            # 包括异常退出在内，描述符关闭释放 OS 锁，不遗留 PID 占用标记。
+            os.close(descriptor)
 
 
 def safe_fields(fields: dict) -> dict:
@@ -94,6 +149,12 @@ def log_event(event: str, *, level: int = logging.INFO, **fields) -> None:
 class JsonFormatter(logging.Formatter):
     """仅格式化业务事件，不输出异常堆栈、任意响应、连接串或文档正文。"""
 
+    def __init__(self, role: str = "unknown") -> None:
+        """固定进程来源字段，不允许请求或业务字段伪造 API/Worker 身份。"""
+
+        super().__init__()
+        self.role = role if role in {"api", "worker"} else "unknown"
+
     def format(self, record: logging.LogRecord) -> str:
         """生成 UTF-8 单行 JSON，时间统一为 UTC，便于跨进程按标识关联。"""
 
@@ -106,6 +167,7 @@ class JsonFormatter(logging.Formatter):
                 and re.fullmatch(r"[a-z][a-z0-9_.]+", record.msg)
                 else "unknown",
                 "pid": record.process,
+                "role": self.role,
                 **safe_fields(getattr(record, "business_fields", {})),
             },
             ensure_ascii=False,
@@ -113,26 +175,56 @@ class JsonFormatter(logging.Formatter):
         )
 
 
-class SafeRotatingHandler(RotatingFileHandler):
-    """磁盘失败时只提示安全信息，不抛错、不输出原始异常与文件路径。"""
+class SafeDailyFileHandler(logging.Handler):
+    """所有进程按本机日期追加同一文件，不按 PID/容量拆分，不删除历史日志。"""
 
-    warned = False
+    def __init__(self, directory: Path) -> None:
+        """保存日志目录；不提前创建空日志，不保持跨日或跨 fork 的数据文件句柄。"""
+
+        super().__init__()
+        self.directory = directory
+        self.warned = False
+
+    def append_line(self, record: logging.LogRecord, payload: bytes) -> None:
+        """在 OS 锁内完整写入 UTF-8 行；按事件产生的本机日期选文件，不跨日重命名。"""
+
+        date = (
+            datetime.fromtimestamp(record.created, UTC)
+            .astimezone()
+            .strftime("%Y-%m-%d")
+        )
+        path = self.directory / f"{FILE_PREFIX}-{date}.log"
+        with shared_file_lock(self.directory), path.open("ab", buffering=0) as stream:
+            pending = memoryview(payload)
+            while pending:
+                written = stream.write(pending)
+                if not written:
+                    raise OSError("日志行未完整写入")
+                pending = pending[written:]
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """追加单行 JSON；锁超时、磁盘或格式错误降级到终端，不影响业务结果。"""
+
+        try:
+            self.append_line(record, (self.format(record) + "\n").encode("utf-8"))
+        except Exception:  # noqa: BLE001
+            self.handleError(record)
 
     def handleError(self, record: logging.LogRecord) -> None:
-        """第一次写盘失败提示检查权限或磁盘；终端处理器继续记录业务事件。"""
+        """首次写盘或锁失败安全提示，不输出原始异常；终端仍记录业务事件。"""
 
         if not self.warned:
             self.warned = True
             try:
                 sys.stderr.write(
-                    "业务日志写盘失败，请检查日志目录权限与磁盘空间；终端日志继续输出。\n"
+                    "业务日志写盘失败，请检查目录权限、磁盘空间或写入锁占用；终端日志继续输出。\n"
                 )
             except OSError:
                 return
 
 
 def configure_logging(settings: Settings, role: str) -> None:
-    """配置独立业务 Logger；重复调用替换处理器，prefork 子进程重新建立独立文件。"""
+    """配置业务 Logger；API/Worker 合并每日文件，重复配置或 prefork 不增加文件数量。"""
 
     LOGGER.setLevel(settings.log_level)
     LOGGER.disabled = False
@@ -140,7 +232,7 @@ def configure_logging(settings: Settings, role: str) -> None:
     for handler in LOGGER.handlers[:]:
         LOGGER.removeHandler(handler)
         handler.close()
-    formatter = JsonFormatter()
+    formatter = JsonFormatter(role)
     console = logging.StreamHandler()
     console.setFormatter(formatter)
     LOGGER.addHandler(console)
@@ -149,12 +241,7 @@ def configure_logging(settings: Settings, role: str) -> None:
         directory = PROJECT_ROOT / directory
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        handler = SafeRotatingHandler(
-            directory / f"{role}-{os.getpid()}.log",
-            maxBytes=settings.log_max_bytes,
-            backupCount=settings.log_backup_count,
-            encoding="utf-8",
-        )
+        handler = SafeDailyFileHandler(directory)
         handler.setFormatter(formatter)
         LOGGER.addHandler(handler)
     except OSError:
