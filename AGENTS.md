@@ -21,7 +21,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**11B.2：XLSX Selective Hybrid 已实现，默认关闭，待用户执行测试与真实人工验收。**
+当前阶段：**11B.2：默认 auto、取消 Review；XLSX 优先 Hybrid，提交前受控 Whole 回退及公式保护已实现，待用户验收。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -31,13 +31,14 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
 | 配套功能 | 已实现原接口多选上传、中文业务日志及按日期合并日志文件 |
-| 11B.1 | 已实现预检、整份 Native/MinerU/review 路由、完整性 Guard；待真实路由验收及 XLSX A/B 对照 |
+| 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0004_mineru_jobs`；“已实现”不等于已完成真实 API 人工验收。
 - 成功解析只写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`，不等于可检索或 `READY`。
 - 当前仅实施用户授权的 11B.2；未经用户确认，不进入 Parse Cache、Chunk、Embedding、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
 
@@ -121,18 +122,19 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 
 ### 整份 Router v1
 
-- 外部仅 `auto / native / mineru`；普通上传 Form、重投 Query 可选，省略仍旧 Native，显式 MinerU 旧入口兼容，不让旧调用突然付费。内部 hybrid_bundle 只用于人工开启后的受支持 XLSX，不新增外部 hybrid 模式。
-- Worker 只读预检：简单文档 Native；复杂 DOCX/PDF、图片、旧 Office、PPT/PPTX 整份 MinerU。复杂 XLSX 未有真实 A/B 结论先 review，MD 缺附件 review，不抓 URL、不把 MD/CSV 发云；超预检上限 review，坏原件安全失败。
+- 外部仅 `auto / native / mineru`；上传 Form、重投 Query 省略默认 auto，普通用户不选模式；管理员可覆盖。Hybrid 是 XLSX 云增强的内部实现，不新增外部模式。默认云外传/费用须在 README 告知。
+- Worker 只读预检：可完整覆盖时 Native；复杂 DOCX/PDF、图片、旧 Office/PPT 整份 MinerU。复杂 XLSX 优先 Hybrid。MD 缺附件、XLSX 缺外部资源、云不支持、超限及坏原件明确失败；不抓 URL、不把 MD/CSV 发云、不要求普通用户选解析器。
 - RouteDecision 版本固定，只含模式/格式/策略、白名单理由、结构计数、页摘要和回退次数，不含正文、地址、凭据或虚构置信度；任务结果与 job 的 `_route_decision` 保存，不参与供应商参数 Hash、不透传 API。
-- auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。云失败不降 Native，路由任务不追加第二批；旧显式入口的已确认临时失败重建规则保持兼容。
+- auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。所有云入口远端 failed 不自动追加批次，云失败不降 Native；PUT/GET/下载有限重试仍用同批次。
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
-- 云交接在当前行锁/代次下分配新云代次，提交后投递；review 为 FAILED + 安全 ROUTER_REVIEW，结果 status=review，无新 Block/云调用。交接成功不等于解析成功，保存最初 Celery ID并查 Document/Parse Job。
+- 云交接保持行锁/代次检查、提交后投递；路由拒绝为 Document=FAILED、Celery=FAILURE，固定安全理由可追踪，无新 Block/云调用。交接成功不等于解析成功，查询 Document/Parse Job。
 - 云费用按 doc_id/job_id/batch_id 去重：提交前实际 0、计划 1，确认 batch 后计 1；不直接累加重复日志，提交不确定以平台核对。
 
 ### XLSX Selective Hybrid
 
-- 默认关闭；用户确认真实 Native/Whole 对照及外传权限后才手动启用。Native table/公式保持原式，基础 Chart 确定性结构化；未知视觉语义 review，不伪造 Chart 截图。
-- 同代次唯一图片按 Hash 聚合为单个 Bundle，复用原 Anchor；小图/纯色过滤配置化，不按名称、OCR Marker 或语义相似度删内容。未知结构/超限 review，不逐元素发云或失败后追加 Whole。
+- auto 默认启用 XLSX Hybrid 尝试；Native table/公式保持原式，基础 Chart 确定性结构化；无操作效果、常见样式和共享公式优先合理兼容，不伪造截图。
+- 同代次图片聚合一个 Bundle。仅提交前的已知能力缺口允许一次 Whole 回退；损坏、缺附件、孤立部件、超限直接失败，云提交后不追加 Whole。Whole 原件同样通过格式/大小/平台/共享预算校验。
+- XLSX Whole 也冻结 Native 主结果 Hash，完成时保留整表与公式，再附云块原序；不覆盖原式、不猜 Whole 云块的原 Sheet/Anchor。主结果不可恢复或云结果失败全回滚；私有摘要不是 Parse Cache。
 - manifest 与冻结配置保存在私有检查点，Sheet/Anchor 可追溯，稳定 visual/Block ID；云结果 page=1、section=原 Sheet、bbox=NULL。整 Sheet table 不拆分，增强块在对应 table 后按 Anchor 稳定排列。
 - 活动恢复沿用同 Job/batch/Bundle；Bundle 缺失仅按原 Hash/映射重建，不是 Parse Cache。完整性与合并全部成功后一次事务替换 Block；失败不写半份结果。运行文件不在当前开发回合生成，真实文档处理仅由用户启动。
 

@@ -101,7 +101,8 @@ def test_only_original_upload_arrays_are_marked_for_picker(suffix, allowed):
     assert body["required"] == ["file"]
     if suffix == "documents":
         mode = body["properties"]["parse_mode"]
-        assert mode["anyOf"][0]["enum"] == ["auto", "native", "mineru"]
+        assert mode["enum"] == ["auto", "native", "mineru"]
+        assert mode["default"] == "auto"
     file = body["properties"]["file"]
     assert file["type"] == "array"
     assert file["items"] == {"type": "string", "format": "binary"}

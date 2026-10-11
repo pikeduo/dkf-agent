@@ -120,8 +120,8 @@ EVENT_LABELS = {
     "mineru.failed": "MinerU 任务失败",
     "mineru.error_record_failed": "MinerU 失败原因未能写入数据库",
     "router.decided": "文档完整性路由决策已生成",
-    "router.review": "文档路由需要人工复核",
-    "router.fallback": "Native 完整性检查要求一次整份云解析",
+    "router.failed": "文档自动路由安全拒绝，未生成最终结果",
+    "router.fallback": "解析预检要求一次提交前整份云回退",
     "router.guard_passed": "解析结构覆盖检查通过",
     "router.guard_failed": "解析覆盖检查未通过",
     "router.finished": "路由任务处理结束",
@@ -130,6 +130,9 @@ EVENT_LABELS = {
     "hybrid.prepared": "Hybrid 候选与单个 Bundle 已准备，尚未写入最终 Block",
     "hybrid.started": "开始 XLSX 主解析与视觉候选检查",
     "hybrid.persisted": "Hybrid 主结果与增强结果已完整落库",
+    "hybrid.preflight_rejected": "Hybrid 预检拒绝，按固定原因选择提交前回退或失败",
+    "xlsx.primary_validated": "XLSX 原生单元格与公式主结果已校验，尚未最终落库",
+    "xlsx.primary_persisted": "XLSX 原生主结果与整份云增强已一起落库",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {

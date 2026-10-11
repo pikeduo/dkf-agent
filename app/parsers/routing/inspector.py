@@ -1,6 +1,7 @@
 """有界、只读的预检；检查覆盖风险，不下载附件或推断 OCR 真值。"""
 
 import re
+import posixpath
 from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
@@ -18,7 +19,41 @@ M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 
 
 class InspectionLimitError(ParserError):
-    """资源上限不是格式损坏，路由必须明确复核而不是完成部分预检。"""
+    """资源上限不是格式损坏，路由必须安全失败而不是完成部分预检。"""
+
+
+def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
+    """检查 Office 附件关系；外部视觉/对象资源不抓取，缺失内部部件视为损坏。"""
+
+    names = set(archive.namelist())
+    parts = [name for name in names if name.startswith(root + "/") and name.endswith(".rels")]
+    if sum(archive.getinfo(name).file_size for name in parts) > 64 * 1024**2:
+        raise InspectionLimitError("Office 关系规模超出预检安全上限")
+    external = False
+    for name in parts:
+        parent = posixpath.dirname(posixpath.dirname(name))
+        tree = xml_part(archive, name, limit)
+        if etree.QName(tree).localname != "Relationships":
+            raise ParserError("Office 附件关系结构无法识别")
+        identifiers = set()
+        for node in tree:
+            identifier = node.get("Id", "")
+            if (etree.QName(node).localname != "Relationship" or not identifier
+                or identifier in identifiers or not node.get("Type") or not node.get("Target")):
+                raise ParserError("Office 附件关系损坏或存在重复标识")
+            identifiers.add(identifier)
+            if node.get("Type", "").rsplit("/", 1)[-1] == "hyperlink":
+                continue
+            if node.get("TargetMode", "Internal") != "Internal":
+                external = True
+                continue
+            target = node.get("Target", "")
+            part = posixpath.normpath(target.lstrip("/") if target.startswith("/")
+                                     else posixpath.join(parent, target))
+            if (not target or "\\" in target or ":" in target or "?" in target or "#" in target
+                or part.startswith("../") or part not in names):
+                raise ParserError("Office 附件关系无效或内部部件缺失")
+    return external
 
 
 def xml_part(archive: ZipFile, name: str, limit: int):
@@ -62,7 +97,7 @@ def cell_has_content(cell, shared_strings: list[str]) -> bool:
 
 
 def inspect_office(path: Path, kind: str, settings: Settings) -> Inspection:
-    """检查 DOCX 未覆盖部件或 XLSX 视觉结构；不渲染 Office，也不计算打印页。"""
+    """检查 DOCX/XLSX 覆盖结构和附件关系；不渲染 Office，也不计算打印页。"""
 
     root = "word" if kind == "docx" else "xl"
     limit = settings.router_xml_part_max_mb * 1024 * 1024
@@ -84,6 +119,8 @@ def inspect_office(path: Path, kind: str, settings: Settings) -> Inspection:
             ),
         }
         risks = []
+        if missing_external_assets(archive, root, limit):
+            risks.append("EXTERNAL_ATTACHMENT_MISSING")
         for field, code in (
             ("image_count", "HAS_EMBEDDED_IMAGE"),
             ("drawing_count", "HAS_DRAWING"),
@@ -343,6 +380,10 @@ def inspect_document(path: Path, kind: str, settings: Settings) -> Inspection:
             validate_file_content(stream, kind)
         if kind in {"docx", "xlsx"}:
             return inspect_office(path, kind, settings)
+        if kind == "pptx":
+            with ZipFile(path) as archive:
+                missing = missing_external_assets(archive, "ppt", settings.router_xml_part_max_mb * 1024**2)
+            return Inspection(risks=("EXTERNAL_ATTACHMENT_MISSING",) if missing else ())
         if kind == "pdf":
             return inspect_pdf(path, settings)
         if kind == "md":

@@ -10,7 +10,7 @@ from uuid import UUID
 from app.core.config import Settings
 from app.parsers.common import ParserError
 from app.parsers.hybrid import (
-    VERSION, BundleManifest, HybridPlan, HybridPolicy, HybridReview,
+    VERSION, BundleManifest, HybridPlan, HybridPolicy, HybridPreflightError,
     digest, merge_hybrid, prepare_hybrid,
 )
 from app.parsers.routing.contracts import RouteDecision
@@ -35,7 +35,11 @@ def policy_from_settings(settings: Settings) -> HybridPolicy:
 
 
 def validate_primary(plan: HybridPlan, decision: RouteDecision) -> None:
-    """复用 Native Sheet Guard，仅把视觉风险留给 Hybrid 账本，不跳过有效 Sheet 检查。"""
+    """校验 Native Sheet；无单元格的视觉工作表仅允许暂存，最终仍必须有视觉正文。"""
+
+    if (not plan.native.blocks and decision.signals.nonempty_sheet_count == 0
+        and decision.signals.formula_count == 0 and plan.manifest.entries):
+        return
 
     native_decision = decision.model_copy(update={
         "route_strategy": "native", "parse_mode": "native", "reason_codes": ("EXPLICIT_NATIVE",)
@@ -75,7 +79,7 @@ def prepare_checkpoint(document, task_id: UUID, settings: Settings, decision: Ro
     validate_primary(plan, decision)
     with source_path(document).open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
-            raise HybridReview()
+            raise HybridPreflightError("HYBRID_INVALID_PACKAGE")
     context = {
         "version": VERSION, "source_hash": document.file_hash,
         "routing_task_id": str(task_id), "manifest": plan.manifest.model_dump(mode="json"),
@@ -118,7 +122,7 @@ def regenerate_plan(document, context: dict) -> HybridPlan:
     try:
         plan = prepare_hybrid(document.doc_id, source_path(document), document.file_name, manifest.policy)
         if plan.manifest != manifest:
-            raise HybridReview()
+            raise HybridPreflightError()
         return plan
     except ParserError:
         raise MinerUError("HYBRID_CHECKPOINT", "Hybrid 原件或映射无法恢复，请人工核对") from None

@@ -203,13 +203,13 @@ def upload_knowledge_base_document(
         ),
     ],
     parse_mode: Annotated[
-        ParseMode | None,
+        ParseMode,
         Form(
-            description="auto 启用完整性路由；native/mineru 显式覆盖；省略保持旧 Native 行为"
+            description="默认 auto 自动完整性路由；native/mineru 仅供管理员显式覆盖"
         ),
-    ] = None,
+    ] = "auto",
 ) -> DocumentResponse | BatchUploadResponse:
-    """原上传入口逐文件投递可选路由模式；省略参数保持 Native，响应和独立事务不变。"""
+    """原上传入口默认自动路由；多选仍逐文件提交独立 Document 和处理代次。"""
 
     try:
         validate_batch(file)
@@ -232,11 +232,11 @@ def upload_knowledge_base_document(
 
 
 def dispatch_uploaded_document(
-    session: Session, response: DocumentResponse, parse_mode: ParseMode | None = None
+    session: Session, response: DocumentResponse, parse_mode: ParseMode = "auto"
 ) -> DocumentResponse:
-    """提交后携带可选模式投递；旧调用保留三参数，失败返回持久化状态。"""
+    """提交后投递默认自动模式或管理员覆盖；队列失败仍保留原件与持久化状态。"""
 
-    options = {} if parse_mode is None else {"parse_mode": parse_mode}
+    options = {"parse_mode": parse_mode}
     if not publish_document(session, response.doc_id, response.task_id, **options):
         session.expire_all()
         return DocumentResponse.model_validate(session.get(Document, response.doc_id))
@@ -284,11 +284,11 @@ def resubmit_document(
     doc_id: UUID,
     session: AdminSession,
     parse_mode: Annotated[
-        ParseMode | None,
-        Query(description="auto/native/mineru；省略保持旧 Native 行为"),
-    ] = None,
+        ParseMode,
+        Query(description="默认 auto；native/mineru 仅供管理员显式覆盖"),
+    ] = "auto",
 ) -> DocumentResponse:
-    """待处理/失败文档以可选模式分配新代次，提交后投递；不重解析已完成文档。"""
+    """待处理/失败文档默认自动路由新代次；管理员可覆盖，不重解析已完成文档。"""
 
     document = require_document(session, kb_id, doc_id, lock=True)
     if document.status not in {"UPLOADED", "FAILED"}:
@@ -300,7 +300,7 @@ def resubmit_document(
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
-    options = {} if parse_mode is None else {"parse_mode": parse_mode}
+    options = {"parse_mode": parse_mode}
     if not publish_document(session, response.doc_id, response.task_id, **options):
         raise HTTPException(
             status_code=503, detail="任务投递失败，文件已保留，请查询文档状态后重试"

@@ -37,11 +37,13 @@
 | `mineru.batch_created / upload_complete / remote_state` | 已提交批次检查点、上传完成检查点、收到供应商单文件状态；远端 done 仍可能下载或落库失败 |
 | `mineru.result_downloaded / adapter_validated / blocks_persisted` | ZIP 下载完成、统一结构校验通过、Block 与任务/文档状态已事务提交 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
-| `router.decided / review / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
+| `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |
 | `router.cloud_submitted` | 已确认源文件 batch，云文件提交数=1；重复日志需按 job_id/batch_id 去重 |
 | `router.cloud_dispatch_failed / finished` | 云交接确认失败/路由任务结束，不等于最终解析完成 |
 | `hybrid.prepared` | XLSX 主结果/候选/单 Bundle 已准备，记录候选/过滤/复用/页数/Chart 数，不代表 Block 落库 |
+| `hybrid.preflight_rejected` | 固定拒绝码与提交前 Whole/FAILED 选择，不输出 XML/路径/正文 |
+| `xlsx.primary_validated / primary_persisted` | Whole XLSX 的 Native 公式主结果校验 / 与云块事务提交，不能以校验事件当作落库 |
 | `hybrid.started` | 开始 XLSX 主解析及候选检查；失败继续使用 parse/mineru 的安全错误事件 |
 | `hybrid.persisted` | 全量 Hybrid Block 已事务提交；不记录正文、Anchor/manifest、签名 URL，仍在每日同一个文件 |
 

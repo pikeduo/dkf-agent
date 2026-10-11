@@ -182,8 +182,8 @@ def test_auto_whole_cloud_handoff_and_one_submission(router_context, kind):
 
 
 @pytest.mark.parametrize("kind", ["md", "xlsx"])
-def test_review_exposes_failed_without_partial_blocks(router_context, kind):
-    """缺附件 Markdown/复杂 XLSX 进入明确 review，保留原件且不云调用或部分落库。"""
+def test_rejection_is_failed_not_success_review(router_context, kind):
+    """缺附件 Markdown/孤立 XLSX 部件安全失败，任务不能把拒绝冒充 SUCCESS。"""
 
     context = router_context
     content = (
@@ -193,9 +193,9 @@ def test_review_exposes_failed_without_partial_blocks(router_context, kind):
     )
     document = upload(context, kind, content)
     result = execute(document)
-    assert result.state == "SUCCESS" and result.result["status"] == "review"
+    assert result.state == "FAILURE"
     row, blocks, jobs = snapshot(context, document)
-    assert row.status == "FAILED" and "ROUTER_REVIEW" in row.error_message
+    assert row.status == "FAILED" and "ROUTER_FAILED" in row.error_message
     assert not blocks and not jobs and context.provider.submissions == 0
     assert execute(document).result["status"] == "skipped"
 
@@ -358,7 +358,7 @@ def test_handoff_queue_failure_manual_resume_same_job(router_context, monkeypatc
 
 @pytest.mark.parametrize("mode", ["native", "mineru", None])
 def test_explicit_mode_and_omitted_compatibility(router_context, mode):
-    """显式覆盖可做 A/B；省略模式保持旧 Native 消息与精确结果，不隐式付费。"""
+    """显式 Native 做范围对照；省略模式与显式 MinerU 都可自动交接云解析。"""
 
     context = router_context
     document = upload(
@@ -368,24 +368,18 @@ def test_explicit_mode_and_omitted_compatibility(router_context, mode):
         mode,
     )
     message = context.messages[-1]
-    assert (
-        ("kwargs" not in message)
-        if mode is None
-        else message["kwargs"] == {"parse_mode": mode}
-    )
+    assert message["kwargs"] == {"parse_mode": mode or "auto"}
     result = execute(document, mode)
     assert result.state == "SUCCESS"
-    if mode == "mineru":
+    if mode != "native":
         assert result.result["status"] == "delegated_to_mineru"
+        assert result.result["route_decision"]["parse_mode"] == (mode or "auto")
     else:
         assert (
             result.result["status"] == "awaiting_chunk"
             and not snapshot(context, document)[2]
         )
-        if mode == "native":
-            assert result.result["coverage"] == "explicit_native_scope"
-        else:
-            assert "route_decision" not in result.result
+        assert result.result["coverage"] == "explicit_native_scope"
 
 
 def test_resubmit_modes_batch_and_invalid_mode(router_context):
@@ -414,7 +408,7 @@ def test_resubmit_modes_batch_and_invalid_mode(router_context):
         {"parse_mode": "auto"}
     ] * 2
     document = upload(context, "md", b"![missing](missing.png)")
-    assert execute(document).result["status"] == "review"
+    assert execute(document).state == "FAILURE"
     current = context.api(
         "POST", base + f"/{document['doc_id']}/process?parse_mode=native"
     )

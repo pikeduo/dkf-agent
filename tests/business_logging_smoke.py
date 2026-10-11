@@ -58,7 +58,8 @@ def test_native_upload_parse_and_duplicate_logged(processing_context, event_stre
 
     document = native_upload(processing_context)
     result = documents.process_document.apply(
-        args=[document["doc_id"]], task_id=document["task_id"], throw=False
+        args=[document["doc_id"]], kwargs={"parse_mode": "native"},
+        task_id=document["task_id"], throw=False
     )
     assert result.state == "SUCCESS"
     api, kb_id, _ = processing_context
@@ -106,7 +107,8 @@ def test_native_persistence_failure_never_logs_success(
 
     monkeypatch.setattr(document_processing, "persist_blocks", failed_persist)
     result = documents.process_document.apply(
-        args=[document["doc_id"]], task_id=document["task_id"], retries=3, throw=False
+        args=[document["doc_id"]], kwargs={"parse_mode": "native"},
+        task_id=document["task_id"], retries=3, throw=False
     )
     assert result.state == "FAILURE"
     names = [event["event"] for event in events(event_stream)]

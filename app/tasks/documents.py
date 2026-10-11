@@ -60,8 +60,8 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
-    """保留旧 Native 默认行为；可选路由及 Hybrid 先提交检查点再投递云端任务。"""
+def process_document(self, doc_id: str, parse_mode: str | None = "auto") -> dict:
+    """默认自动路由；拒绝终态标记任务失败，云检查点提交后才投递短任务。"""
 
     try:
         identifier = UUID(doc_id)
@@ -71,14 +71,20 @@ def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
     started = perf_counter()
     try:
         with processing_session() as session, session.begin():
-            if parse_mode is None:
+            if parse_mode == "native":
+                # 管理员的显式 Native 是范围对照，保留前九阶段 Parser/事务/重试实现。
                 result = run_processing_step(session, identifier, task_id)
+                if result["status"] == "awaiting_chunk":
+                    result["coverage"] = "explicit_native_scope"
             else:
                 from app.services.routed_processing import run_routed_step
 
                 result = run_routed_step(
-                    session, identifier, task_id, parse_mode, get_settings()
+                    session, identifier, task_id, parse_mode or "auto", get_settings()
                 )
+        if result["status"] == "failed":
+            # 决策拒绝不是成功解析：数据库终态已提交，Celery 同样返回安全 FAILURE。
+            raise ParserError(result["error_message"])
         if result["status"] == "delegated_to_mineru":
             # 延迟导入避免短任务对 processing_session 的复用形成循环导入。
             from app.services.routed_processing import record_dispatch_error
@@ -95,9 +101,7 @@ def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
             "parse.persisted"
             if result["status"] == "awaiting_chunk"
             else "router.finished"
-            if parse_mode is not None
-            and result["status"]
-            in {"review", "delegated_to_mineru", "cloud_dispatch_failed"}
+            if result["status"] in {"delegated_to_mineru", "cloud_dispatch_failed"}
             else "parse.skipped",
             doc_id=identifier,
             task_id=task_id,
@@ -118,9 +122,9 @@ def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
             level=logging.ERROR,
             doc_id=identifier,
             task_id=task_id,
-            error_code=type(exc).__name__,
+            error_code=getattr(exc, "code", type(exc).__name__),
         )
-        message = str(exc)
+        message = f"{exc.code}：{exc}" if isinstance(exc, MinerUError) else str(exc)
         save_failure(identifier, task_id, message, final=True)
         raise DocumentProcessingError(message) from None
     except (OperationalError, OSError):

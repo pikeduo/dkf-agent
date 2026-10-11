@@ -4,9 +4,9 @@
 
 `ParsedDocument`、`ParsedBlock` 与 `BaseParser` 使用已有 Pydantic，契约及具体 Parser 均不依赖 SQLAlchemy、Celery、Redis、Embedding 或 RAG。任务服务负责状态机和数据库持久化，Parser 只读取原件并返回统一结构。
 
-已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式仍为旧 Native。
+已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式默认为 auto，管理员显式 Native 可做原生范围对照。
 
-可选 [XLSX Hybrid](SELECTIVE_HYBRID.md) 不改变 XlsxParser 或统一 Block 字段：保留完整 Sheet table，结构化 Chart 为 native_parser，云视觉增强映射回原 Sheet、逻辑 page=1、bbox=NULL。临时 Bundle 的 PDF 页码只在私有 manifest 使用，不作为原件页码。新增代码与测试待用户执行验收。
+自动路由内部的 [XLSX Hybrid](SELECTIVE_HYBRID.md) 不改变 XlsxParser 或统一 Block 字段：保留完整 Sheet table，结构化 Chart 为 native_parser，云视觉增强映射回原 Sheet、逻辑 page=1、bbox=NULL。临时 Bundle 的 PDF 页码只在私有 manifest 使用，不作为原件页码。新增代码与测试待用户执行验收。
 
 ## 统一结构
 
@@ -92,7 +92,7 @@ PDF 跳过真正空白页但保留其后文本页的原始页码。无原生文�
 - 编码失败负向 fixture 使用无 BOM 的 `b"\x81\x30\x81"`，先验证 UTF-8、GB18030 严格解码均失败，再验证 `read_text / CsvParser` 的安全 ParserError 与文档 FAILED、零 Block。带合法 UTF-16 BOM 的字节即使语义乱码也不能当作解码失败；第一版不做复杂语义乱码检测或针对具体字符串的拒绝。
 - XLSX `read_only=True / data_only=False / keep_links=False`，不执行宏、公式或外部链接；公式文本保留，未知特殊公式明确失败。空 Sheet 跳过、全空失败；Sheet ID 位置基于原工作表顺序（含跳过的空表），持久化 block_index 仍连续。
 - 保留内部空行空列，剔除末尾无值单元格范围；普通 `0% / 0.00%` 等格式输出百分比，复杂自定义格式不模拟 Excel 渲染，日期使用 ISO 格式。单元格数据不是视觉布局还原。
-- 第一版不解析 XLSX 图片、图表、SmartArt、复杂绘图，DOCX 原有限制不变。存在视觉对象也不自动检测/路由；显式 MinerU 对比使用独立知识库，完成 Native 文档不能借云入口 Reparse。
+- Native Parser 自身不解析 XLSX 图片/图表/复杂绘图，DOCX 原有限制不变；外层 auto 检测后选择云端或 XLSX Hybrid。XLSX Whole 也保留 Native 整表与公式原式，全部结果一次提交。对照使用独立知识库，完成文档不能借云入口 Reparse。
 - CSV/XLSX 最多 10 万行、1024 列、100 万单元格（XLSX 累计），XLSX 最多 1000 Sheet；OOXML 最多 10000 ZIP 项、256 MiB 总展开大小、单主部件 64 MiB。拒绝加密、重复项、不安全路径及类型混淆。这是基础保护，不是完整恶意文件扫描。
 - 统一校验 DOCX/PPTX/XLSX 的 `[Content_Types].xml` 和对应 `word/document.xml / ppt/presentation.xml / xl/workbook.xml`；olefile 严格打开 CFB 并识别根级 WordDocument / Workbook或Book / PowerPoint Document 主流。容器检查不等于旧 Office 正文已成功解析，最终可读性由 MinerU 判断。
 
@@ -142,6 +142,6 @@ WHERE doc_id = '实际文档 UUID'::uuid
 ORDER BY block_index;
 ```
 
-5. 核对 CSV table 的空字段/引号/数值；XLSX table 的 Sheet 原序、section、原式、百分比及空 Sheet 跳过；两者 page=1、bbox=NULL、source=native_parser。零字节文件在上传时返回 400，其他全空或畸形正文解析为 FAILED，不落部分块。上传旧 Office/PPTX/图片走 Native 应明确要求 MinerU，原件保留；不要把此入口当自动 Router。
+5. 核对 CSV table 的空字段/引号/数值；XLSX table 的 Sheet 原序、section、原式、百分比及空 Sheet 跳过；两者 page=1、bbox=NULL、source=native_parser。零字节文件在上传时返回 400，其他全空或畸形正文解析为 FAILED，不落部分块。管理员显式 native 上传旧 Office/PPTX/图片应明确要求 MinerU，原件保留；默认 auto 的自动路由验收见 Router 文档。
 
 阶段 1～10 已按用户确认完成人工验收；新增 CSV/XLSX 的自动测试不代替真实 Worker 与用户原件测试。新增 Office 云端验收见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，不继续接入火山 / 百度 OCR。

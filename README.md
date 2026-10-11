@@ -1,6 +1,6 @@
 # 数知融问智能体（DKF-Agent）
 
-`knowledge-service` 用于非结构化知识库建设与问答。当前可管理知识库、单选/多选上传文档、异步解析及查询状态，支持 Native、MinerU Cloud 和可选的整份自动路由。
+`knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
 **当前解析成功后停在 CHUNKING（等待切片），尚不能检索或问答。** 管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
@@ -44,8 +44,8 @@ MINERU_MODEL_VERSION=vlm
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
-# 可选 XLSX 视觉增强；只有人工对照确认需要后才开启。
-HYBRID_XLSX_ENABLED=false
+# auto 内部优先尝试 XLSX 视觉增强。
+HYBRID_XLSX_ENABLED=true
 HYBRID_MAX_CANDIDATES=64
 HYBRID_MAX_BUNDLE_PAGES=32
 HYBRID_MIN_IMAGE_SIDE=32
@@ -149,18 +149,14 @@ uvicorn app.main:app --reload
 ```
 
 ```powershell
-python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=threads --concurrency=2 --hostname=cpu@%h -l info
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
 ```
 
 默认访问 [Swagger](http://127.0.0.1:8000/docs) 和 [健康接口](http://127.0.0.1:8000/health)。监听地址/端口以 Uvicorn 参数为准；局域网访问加 `--host 0.0.0.0 --port 8000`，`--reload` 仅用于开发。
 
 CPU Worker 应显示 default_queue、process_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
 
-启用 XLSX Hybrid 时，Windows CPU Worker 使用下列串行命令处理 PDF Bundle，替换上面的 threads Worker（不要同时保留旧 Worker 消费该队列）：
-
-```powershell
-python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
-```
+自动模式默认可能生成 XLSX 的 PDF Bundle，因此 Windows 使用上面的串行 Worker；不要同时保留旧 threads Worker 消费该队列。
 
 可选 GPU Worker 当前不加载模型、不处理文档，可暂不启动：
 
@@ -216,18 +212,22 @@ Swagger 点击 Try it out，填写 kb_id，打开“选择文件”窗口单选�
 
 | 模式 | 行为 |
 |---|---|
-| 省略 / native | 仅 Native：TXT、MD、CSV、DOCX、XLSX、文本型 PDF；不自动产生云费用，Office 视觉内容可能遗漏 |
-| auto | 简单文档 Native；复杂 DOCX/PDF、图片、DOC/XLS/PPT/PPTX 整份 MinerU |
+| 省略 / auto | 默认自动：可完整覆盖的简单文档 Native；复杂 DOCX/PDF、图片及旧 Office/PPT 整份 MinerU；复杂 XLSX 优先 Hybrid |
+| native | 管理员仅 Native 对照；不自动产生云费用，Office 视觉内容可能遗漏，不代表完整解析 |
 | mineru | 强制云解析，仅 PDF、图片及六种 Office；不接受 TXT/MD/CSV |
 
-auto 默认对复杂 XLSX、缺附件的 Markdown 或预检超限要求人工复核。人工对照确认需要后，可设置 `HYBRID_XLSX_ENABLED=true` 并重启 API/Worker：受支持的 XLSX 图片进入单个云端 PDF Bundle，Native 单元格/公式保留；基础 Chart 优先本地结构化，零视觉页时不调用云端。不新增 hybrid 请求参数。未知绘图、外链、复杂 Chart 或超限仍 review；不抓取附件 URL。复核对应 Document=FAILED、错误前缀 ROUTER_REVIEW，不是成功。检测不能保证 OCR/复杂版式语义全部正确。
+普通上传无需选择模式；**auto 可能外传原件/视觉内容并消耗 MinerU 额度**，部署者须先配置 Token、直连与预算并确认外传权限。复杂 XLSX 默认优先尝试 Hybrid；可结构化 Chart 零云调用，图片聚合为一个 Bundle。仅提交前发现可受整份云端处理的能力缺口时才转 Whole；损坏、缺外部附件、云端不支持或超限明确 FAILED，不要求普通用户选择解析器。云提交后失败不会追加 Whole 或降级 Native。
+
+升级后队列中未带模式的旧消息也按 auto 处理；重启前请核对待处理文件的外传权限和预算。历史已完成结果不会自动重写。
+
+XLSX Whole 同样保留 Native Sheet/单元格/公式原式，云结果不覆盖原式；主结果与云结果全部通过校验后才一次入库。Whole 云块保留转换逻辑页与原章节，不猜原 Sheet/Anchor，对重复文本不做语义删块。关闭 `HYBRID_XLSX_ENABLED` 只改变内部增强方式，不关闭自动云解析；管理员可显式 `native/mineru` 覆盖。结构检测不保证 OCR/复杂版式语义全部正确。
 
 Hybrid 需有效 MinerU Token、直连和可写原件目录；临时 Bundle/manifest 位于原件目录下 `.hybrid`，应随原件备份，不在运行中删除。图片只按大小/纯色及精确 Hash 过滤、复用；自定义装饰或图表视觉语义仍需人工核对。成功块的 section 为原 Sheet、page=1、bbox 为空，增强块位于对应整 Sheet table 后按 Anchor 排序，不伪造 Excel 打印页或逐单元格交错布局。详见 [Hybrid 使用限制](docs/SELECTIVE_HYBRID.md)。
 
 多份文件重复 file 字段，每份有独立 doc_id；示例替换知识库 UUID 和文件名：
 
 ```powershell
-curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/你的知识库UUID/documents" -F "file=@第一份.txt" -F "file=@第二份.md" -F "parse_mode=auto"
+curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/你的知识库UUID/documents" -F "file=@第一份.txt" -F "file=@第二份.md"
 ```
 
 单份普通上传返回 201，显式云上传返回 202，均不代表解析成功。多份返回 200 及 total/accepted_count/failed_count/items，**需检查每项 status_code、doc_id 和 detail，不代表全批成功**；单项失败不撤销其他项。重复内容返回 409 和已有 doc_id，无需重传。队列/提交失败可能已保存原件，应先查文档列表再恢复。
@@ -240,7 +240,7 @@ MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换
 
 - 文档详情是业务状态依据；云解析另查 parse-jobs。成功为 Document=CHUNKING，云 job=done；Celery SUCCESS 或交接结果 delegated_to_mineru 不代表整份解析成功。
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
-- 仅 UPLOADED/FAILED 可通过 /process 重投，可用 `?parse_mode=auto|native|mineru`，省略仍 Native。活动云任务用 /mineru 恢复同一任务；非活动失败文档再云提交可能新建批次并消耗额度。
+- 仅 UPLOADED/FAILED 可通过 /process 重投，省略默认 auto；管理员可用 `?parse_mode=native|mineru` 覆盖。活动云任务用 /mineru 恢复同一任务；非活动失败文档再提交是人工新代次，可能产生费用。远端 failed 不自动新建批次。
 - 当前不提供 Delete/Reparse/Reindex 或后台自动补投，CHUNKING 等完成状态拒绝重解析；更新代码不会改写旧结果。
 - 常见错误：400 空文件/文件名，404 不存在，409 重复/状态冲突，413 超限，415 格式，422 参数/原件校验，503 服务/配置/迁移不可用，507 存储不可用；详情见响应 detail。
 

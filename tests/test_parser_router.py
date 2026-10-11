@@ -114,17 +114,15 @@ def test_docx_uncovered_structure_whole(tmp_path, content, code):
         ("xl/externalLinks/externalLink1.xml", "XLSX_HAS_EXTERNAL_LINK"),
     ],
 )
-def test_complex_xlsx_requires_review_not_cloud_assumption(tmp_path, name, code):
-    """复杂 XLSX 未真实 A/B 验证时统一 review，不从旧 XLS 成功推断覆盖。"""
+def test_complex_xlsx_hybrid_or_missing_asset_failure(tmp_path, name, code):
+    """复杂 XLSX 优先 Hybrid 预检；外部工作簿未上传则拒绝，不让普通用户选模式。"""
 
     content = office_with_part("xlsx", name, "<root/>")
     _, inspected, decision = inspect_sample(tmp_path, "xlsx", content)
-    assert decision.route_strategy == "review"
-    assert (
-        "XLSX_CLOUD_AB_REQUIRED" in decision.reason_codes
-        and code in decision.reason_codes
-    )
-    assert decide_route("xlsx", "mineru", inspected).route_strategy == "mineru_whole"
+    external = code == "XLSX_HAS_EXTERNAL_LINK"
+    assert decision.route_strategy == ("failed" if external else "hybrid_bundle")
+    assert code in decision.reason_codes
+    assert decide_route("xlsx", "mineru", inspected).route_strategy == ("failed" if external else "mineru_whole")
     assert decide_route("xlsx", "native", inspected).route_strategy == "native"
 
 
@@ -150,7 +148,7 @@ def test_pdf_page_level_risks(tmp_path, kind, code):
 
 
 def test_pdf_small_logo_threshold_and_limits(tmp_path):
-    """小 logo 不单独触发云端；阈值可调，资源超限明确 review 而非部分预检。"""
+    """小 logo 不单独触发云端；阈值可调，资源超限明确失败 而非部分预检。"""
 
     _, _, decision = inspect_sample(tmp_path, "pdf", router_pdf("logo"))
     assert decision.route_strategy == "native"
@@ -161,13 +159,13 @@ def test_pdf_small_logo_threshold_and_limits(tmp_path):
     _, _, limited = inspect_sample(
         tmp_path, "pdf", router_pdf("mixed_pages"), router_pdf_max_pages=1
     )
-    assert limited.route_strategy == "review" and limited.reason_codes == (
+    assert limited.route_strategy == "failed" and limited.reason_codes == (
         "PREFLIGHT_LIMIT",
     )
 
 
 @pytest.mark.parametrize(
-    "content,review",
+    "content,rejected",
     [
         ("# 文本\n\n![图](images/a.png)", True),
         ("![图](https://example.invalid/asset.png)", True),
@@ -178,15 +176,66 @@ def test_pdf_small_logo_threshold_and_limits(tmp_path):
         (r"\![普通文字]", False),
     ],
 )
-def test_markdown_assets_without_fetch(tmp_path, content, review):
-    """图片引用要求复核，围栏示例不误判；不把 MD 送往 MinerU 或抓取远程附件。"""
+def test_markdown_assets_without_fetch(tmp_path, content, rejected):
+    """图片引用明确失败，围栏示例不误判；不把 MD 送往 MinerU 或抓取远程附件。"""
 
     _, _, decision = inspect_sample(tmp_path, "md", content.encode())
-    assert decision.route_strategy == ("review" if review else "native")
+    assert decision.route_strategy == ("failed" if rejected else "native")
     assert (
         "https://" not in decision.model_dump_json()
         and "asset.png" not in decision.model_dump_json()
     )
+
+
+@pytest.mark.parametrize("kind", ["docx", "pptx", "xlsx"])
+def test_missing_external_attachment_is_terminal_even_for_cloud_override(kind):
+    """单文件无法覆盖外部附件时 auto/显式云均拒绝，不静默遗漏或抓取 URL。"""
+
+    inspection = Inspection(risks=("EXTERNAL_ATTACHMENT_MISSING",))
+    for mode in ("auto", "mineru"):
+        decision = decide_route(kind, mode, inspection)
+        assert decision.route_strategy == "failed"
+        assert decision.reason_codes == ("EXTERNAL_ATTACHMENT_MISSING",)
+
+
+def test_office_relationship_stub_distinguishes_attachment_and_hyperlink(monkeypatch):
+    """只用关系 XML 元数据检查外链/缺部件，不创建或打开 Office 文件。"""
+
+    from types import SimpleNamespace
+    from lxml import etree
+    from app.parsers.routing import inspector
+
+    relationship = {"Id": "rId1", "Target": "https://private.invalid/asset", "TargetMode": "External",
+                    "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"}
+
+    class PackageStub:
+        """仅提供关系摘要，不包含压缩包或真实文档。"""
+
+        def namelist(self):
+            """返回一个关系文件和一个本地目标名。"""
+            return ["xl/_rels/workbook.xml.rels", "xl/worksheets/s1.xml"]
+
+        def getinfo(self, name):
+            """提供固定安全大小，不访问文件。"""
+            return SimpleNamespace(file_size=1)
+
+    def xml_stub(archive, name, limit):
+        """直接构建内存关系节点，不解析 OOXML 文件。"""
+        root = etree.Element("Relationships")
+        etree.SubElement(root, "Relationship", **relationship)
+        return root
+
+    monkeypatch.setattr(inspector, "xml_part", xml_stub)
+    archive = PackageStub()
+    assert inspector.missing_external_assets(archive, "xl", 1024)
+    relationship["Type"] = relationship["Type"].rsplit("/", 1)[0] + "/hyperlink"
+    assert not inspector.missing_external_assets(archive, "xl", 1024)
+    relationship.update(TargetMode="Internal", Target="worksheets/s1.xml", Type="worksheet")
+    assert not inspector.missing_external_assets(archive, "xl", 1024)
+    relationship["Target"] = "worksheets/missing-private.xml"
+    with pytest.raises(ParserError) as caught:
+        inspector.missing_external_assets(archive, "xl", 1024)
+    assert "missing-private" not in str(caught.value) and "https://" not in str(caught.value)
 
 
 def test_explicit_overrides_and_fallback_once():
@@ -198,7 +247,7 @@ def test_explicit_overrides_and_fallback_once():
         "DOCX_HAS_DRAWING",
     )
     for kind in ("txt", "csv", "md"):
-        assert decide_route(kind, "mineru", Inspection()).route_strategy == "review"
+        assert decide_route(kind, "mineru", Inspection()).route_strategy == "failed"
     original = decide_route("pdf", "auto", Inspection())
     changed = fallback_route(original)
     assert changed.fallback_count == 1 and changed.route_strategy == "mineru_whole"
@@ -297,14 +346,14 @@ def test_damaged_or_entity_xml_safe_failure(tmp_path):
     assert str(tmp_path) not in str(caught.value) and "private" not in str(caught.value)
 
 
-def test_xml_inspection_limit_is_review(tmp_path):
-    """单部件超限转人工复核，不能因结构无法全检而静默 Native 或盲目送云。"""
+def test_xml_inspection_limit_is_failure(tmp_path):
+    """单部件超限安全失败，不能因结构无法全检而静默 Native 或盲目送云。"""
 
     content = office_with_part(
         "docx", "word/document.xml", "<root>" + "x" * (1024 * 1024) + "</root>"
     )
     _, _, decision = inspect_sample(tmp_path, "docx", content, router_xml_part_max_mb=1)
-    assert decision.route_strategy == "review" and decision.reason_codes == (
+    assert decision.route_strategy == "failed" and decision.reason_codes == (
         "PREFLIGHT_LIMIT",
     )
 

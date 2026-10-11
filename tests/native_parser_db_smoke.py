@@ -86,10 +86,11 @@ def upload_sample(context, file_name, content):
 
 
 def execute_document(document):
-    """同步执行指定 Celery 消息，不发送消息、不保存真实 Redis 任务结果。"""
+    """显式 Native 回归旧 Parser 范围，不将扫描件的自动云路由混入本组用例。"""
 
     return tasks.process_document.apply(
-        args=[document["doc_id"]], task_id=document["task_id"], throw=False
+        args=[document["doc_id"]], kwargs={"parse_mode": "native"},
+        task_id=document["task_id"], throw=False
     )
 
 
@@ -161,6 +162,7 @@ def test_native_upload_task_persists_ordered_uniform_blocks(
         "document_status": "CHUNKING",
         "status": "awaiting_chunk",
         "block_count": len(blocks),
+        "coverage": "explicit_native_scope",
     }
     assert [block["block_index"] for block in blocks] == list(range(1, len(blocks) + 1))
     assert len({block["block_id"] for block in blocks}) == len(blocks)

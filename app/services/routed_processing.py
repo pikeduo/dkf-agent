@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.core.file_formats import MINERU_TYPES
 from app.models import Document
 from app.parsers.common import OCRRequiredError, ParserError
-from app.parsers.hybrid import HybridReview, merge_hybrid
+from app.parsers.hybrid import HybridPreflightError, merge_hybrid
 from app.parsers.registry import get_parser
 from app.parsers.routing.contracts import ParseMode, RouteDecision
 from app.parsers.routing.guard import CompletenessError, guard_result
@@ -54,7 +54,7 @@ def log_decision(
 def run_routed_step(
     session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings
 ) -> dict:
-    """在当前代次路由和暂存；Hybrid 只有全部合并后写块，review 不调用云端。"""
+    """当前代次自动解析；只有 Hybrid 提交前的受控能力缺口可以转 Whole。"""
 
     if mode not in {"auto", "native", "mineru"}:
         raise ParserError("解析模式仅允许 auto、native 或 mineru")
@@ -85,28 +85,43 @@ def run_routed_step(
         try:
             plan, hybrid_context = prepare_checkpoint(document, task_id, settings, decision)
             hybrid_metrics = metrics(plan.manifest)
-        except HybridReview as exc:
+        except HybridPreflightError as exc:
+            log_event("hybrid.preflight_rejected", doc_id=doc_id, task_id=task_id,
+                      error_code=exc.code, route_strategy="mineru_whole" if exc.whole_compatible else "failed")
             decision = decision.model_copy(update={
-                "route_strategy": "review", "reason_codes": decision.reason_codes + (exc.code,)
+                "route_strategy": "mineru_whole" if exc.whole_compatible else "failed",
+                "fallback_count": 1 if exc.whole_compatible else 0,
+                "reason_codes": tuple(dict.fromkeys(decision.reason_codes + (exc.code,) + (
+                    ("HYBRID_PREFLIGHT_WHOLE_FALLBACK", "XLSX_WHOLE_WITH_NATIVE_PRIMARY")
+                    if exc.whole_compatible else ()
+                ))),
             })
+            # 尚未创建云 Job/POST；云端错误或恢复消息绝不进入此提交前分支。
+            if exc.whole_compatible:
+                log_decision("router.fallback", decision, doc_id, task_id)
     log_decision("router.decided", decision, doc_id, task_id)
     transition_document(document, "PARSING")
-    if decision.route_strategy == "review":
-        message = "ROUTER_REVIEW：无法确认完整覆盖，请核对路由理由并显式选择 Native / MinerU 对照"
+    if decision.route_strategy == "failed":
+        message = "当前文件无法在安全边界内完整解析，未提交云任务"
         if "MINERU_UNSUPPORTED_FORMAT" in decision.reason_codes:
             message = (
-                "ROUTER_REVIEW：当前格式不支持 MinerU，请选择 Native 或补齐原件所需附件"
+                "当前文件格式不受云端支持，未提交云任务"
             )
         elif "MD_ASSET_NOT_UPLOADED" in decision.reason_codes:
-            message = "ROUTER_REVIEW：Markdown 图片附件未上传，不自动获取 URL 或发送 MD 到 MinerU"
+            message = "Markdown 所需图片附件未上传，不自动获取外部 URL"
         elif "PREFLIGHT_LIMIT" in decision.reason_codes:
             message = (
-                "ROUTER_REVIEW：预检超出资源限制，未执行部分解析，请人工核对文件规模"
+                "预检超出资源限制，未提交云任务或保存部分结果"
             )
+        elif "EXTERNAL_ATTACHMENT_MISSING" in decision.reason_codes:
+            message = "Office 所需外部附件未提供，不能完整解析"
+        elif "XLSX_EXTERNAL_ASSET_MISSING" in decision.reason_codes:
+            message = "XLSX 外部工作簿附件未提供，不能完整解析"
+        message = f"ROUTER_FAILED[{','.join(decision.reason_codes)}]：{message}"
         transition_document(document, "FAILED", message)
-        log_decision("router.review", decision, doc_id, task_id)
+        log_decision("router.failed", decision, doc_id, task_id)
         return result | {
-            "status": "review",
+            "status": "failed", "error_message": message,
             "document_status": document.status,
             "route_decision": decision.model_dump(mode="json"),
             "mineru_file_submit_count": 0,

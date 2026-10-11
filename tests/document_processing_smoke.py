@@ -67,10 +67,11 @@ def document_detail(context, document):
 
 
 def execute_task(document):
-    """在当前进程执行指定代次的任务，保留 Celery 重试和失败状态而不连接 Broker。"""
+    """显式 Native 验证冻结基线的事务/重试；默认 auto 由路由用例单独验收。"""
 
     return tasks.process_document.apply(
-        args=[document["doc_id"]], task_id=document["task_id"], throw=False
+        args=[document["doc_id"]], kwargs={"parse_mode": "native"},
+        task_id=document["task_id"], throw=False
     )
 
 
@@ -84,11 +85,11 @@ def test_upload_publishes_after_commit_and_duplicate_does_not_publish(
     messages = []
     original_publish = admin_api.publish_document
 
-    def after_commit(session, doc_id, task_id):
+    def after_commit(session, doc_id, task_id, parse_mode="auto"):
         """发送之前上传会话必须已完成事务，保证生产 Worker 能读取提交后的记录。"""
 
         assert not session.in_transaction()
-        return original_publish(session, doc_id, task_id)
+        return original_publish(session, doc_id, task_id, parse_mode=parse_mode)
 
     def accepted(*args, **kwargs):
         """在发送点检查已提交事务和记录，避免 Worker 收到尚不存在的文档。"""
@@ -109,6 +110,7 @@ def test_upload_publishes_after_commit_and_duplicate_does_not_publish(
             "args": [document["doc_id"]],
             "task_id": document["task_id"],
             "queue": "default_queue",
+            "kwargs": {"parse_mode": "auto"},
         }
     ]
     assert (
@@ -131,6 +133,7 @@ def test_worker_native_parser_is_idempotent_without_chunks(
         "document_status": "CHUNKING",
         "status": "awaiting_chunk",
         "block_count": 1,
+        "coverage": "explicit_native_scope",
     }
     snapshot = document_detail(processing_context, document)
     assert snapshot["status"] == "CHUNKING"

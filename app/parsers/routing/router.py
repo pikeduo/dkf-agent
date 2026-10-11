@@ -1,4 +1,4 @@
-"""纯决策规则：整份解析、显式覆盖和保守 review，不调 HTTP 或写数据库。"""
+"""纯自动决策：Native、受控云增强或安全拒绝，不设置人工 Review 策略。"""
 
 from app.core.file_formats import MINERU_TYPES, FileType
 from app.parsers.routing.contracts import Inspection, ParseMode, RouteDecision
@@ -7,18 +7,28 @@ WHOLE_TYPES = {"jpg", "jpeg", "png", "doc", "xls", "ppt", "pptx"}
 
 
 def decide_route(
-    kind: FileType, mode: ParseMode, inspection: Inspection, *, hybrid_enabled: bool = False
+    kind: FileType, mode: ParseMode, inspection: Inspection, *, hybrid_enabled: bool = True
 ) -> RouteDecision:
-    """生成稳定理由；Hybrid 默认关闭，仅选择具备可进一步检查的 XLSX 视觉风险。"""
+    """生成固定理由；复杂 XLSX 优先预检 Hybrid，缺附件/资源超限直接失败。"""
 
     reasons = list(inspection.risks)
     if inspection.uncertain:
-        strategy = "review"
+        strategy = "failed"
+        if not reasons:
+            reasons.append("PREFLIGHT_UNCERTAIN")
+    elif mode != "native" and "EXTERNAL_ATTACHMENT_MISSING" in reasons:
+        strategy = "failed"
+    elif kind == "xlsx" and mode != "native" and (
+        "XLSX_HAS_EXTERNAL_LINK" in reasons or "XLSX_EXTERNAL_ASSET_MISSING" in reasons
+    ):
+        strategy = "failed"
+        if "XLSX_EXTERNAL_ASSET_MISSING" not in reasons:
+            reasons.append("XLSX_EXTERNAL_ASSET_MISSING")
     elif mode == "native":
         strategy = "native"
         reasons.insert(0, "EXPLICIT_NATIVE")
     elif mode == "mineru":
-        strategy = "mineru_whole" if kind in MINERU_TYPES else "review"
+        strategy = "mineru_whole" if kind in MINERU_TYPES else "failed"
         reasons.insert(
             0,
             "EXPLICIT_MINERU" if kind in MINERU_TYPES else "MINERU_UNSUPPORTED_FORMAT",
@@ -26,18 +36,14 @@ def decide_route(
     elif kind in WHOLE_TYPES:
         strategy = "mineru_whole"
         reasons.insert(0, "VISUAL_OR_LEGACY_FORMAT")
-    elif (
-        kind == "xlsx" and reasons and hybrid_enabled
-        and set(reasons).issubset({
-            "XLSX_HAS_EMBEDDED_IMAGE", "XLSX_HAS_DRAWING", "XLSX_HAS_CHART"
-        })
-    ):
+    elif kind == "xlsx" and reasons and hybrid_enabled:
         strategy = "hybrid_bundle"
         reasons.insert(0, "XLSX_HYBRID_ENABLED")
-    elif kind in {"md", "xlsx"} and reasons:
-        strategy = "review"
-        if kind == "xlsx":
-            reasons.insert(0, "XLSX_CLOUD_AB_REQUIRED")
+    elif kind == "md" and reasons:
+        strategy = "failed"
+    elif kind == "xlsx" and reasons:
+        strategy = "mineru_whole"
+        reasons.append("XLSX_WHOLE_WITH_NATIVE_PRIMARY")
     elif kind in {"docx", "pdf"} and reasons:
         strategy = "mineru_whole"
     else:

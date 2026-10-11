@@ -13,6 +13,8 @@ from app.core.config import Settings
 from app.models import Document, DocumentParseJob
 from app.parsers.routing.contracts import RouteDecision
 from app.parsers.routing.guard import CompletenessError, guard_result
+from app.parsers.routing.inspector import inspect_document
+from app.parsers.common import ParserError
 from app.services.document_processing import (
     persist_blocks,
     source_path,
@@ -23,6 +25,7 @@ from app.services.mineru.errors import MinerUError, api_error
 from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
 from app.parsers.hybrid import BundleManifest
+from app.services.xlsx_primary import prepare_primary, complete_primary
 
 
 def parse_options(settings: Settings) -> dict:
@@ -83,7 +86,7 @@ def create_job(
     identity = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
     if active:
         # 原 /mineru 恢复入口没有 Hybrid 参数；只恢复同原件、同配置和当前活动检查点。
-        if (hybrid_context is None and "_hybrid" in active.parse_options
+        if (hybrid_context is None
             and active.file_hash == document.file_hash
             and active.task_id == document.processing_task_id
             and {key: active.parse_options.get(key) for key in options} == options):
@@ -116,6 +119,22 @@ def create_job(
         options = options | {"_route_decision": checked.model_dump(mode="json")}
     elif hybrid_context is not None:
         raise MinerUError("ROUTE_INVALID", "Hybrid 必须由当前路由代次交接")
+    if document.file_type in {"docx", "pptx"}:
+        try:
+            inspection = inspect_document(source_path(document), document.file_type, settings)
+        except ParserError:
+            raise MinerUError("FILE_STRUCTURE", "Office 原件或附件结构损坏，未提交云任务") from None
+        if inspection.uncertain:
+            raise MinerUError("PREFLIGHT_LIMIT", "Office 预检超出安全资源限制，未提交云任务")
+        if "EXTERNAL_ATTACHMENT_MISSING" in inspection.risks:
+            raise MinerUError("EXTERNAL_ATTACHMENT_MISSING", "Office 所需外部附件未提供，未提交云任务")
+    if document.file_type == "xlsx" and hybrid_context is None:
+        options = options | {"_xlsx_primary": prepare_primary(
+            document, settings, RouteDecision.model_validate(route_decision) if route_decision else None
+        )}
+        identity = hashlib.sha256(json.dumps(
+            {key: value for key, value in options.items() if key != "_route_decision"},
+            sort_keys=True).encode()).hexdigest()
     job_id = uuid4()
     job = DocumentParseJob(
         job_id=job_id,
@@ -210,7 +229,13 @@ def submit_step(
         job.submission_started_at = datetime.now(UTC)
         # 必须在非幂等 POST 前提交意图；重启时不能无条件再创建远端批次。
         session.commit()
-        batch = provider.request_upload_urls([source], job.parse_options)
+        try:
+            batch = provider.request_upload_urls([source], job.parse_options)
+        except MinerUError as error:
+            if error.code.startswith("HTTP_5"):
+                # 网关/服务器 5xx 不能证明非幂等申请未被接受，禁止重发造成未知费用。
+                raise MinerUError("SUBMIT_UNCERTAIN", "MinerU 申请返回服务端异常，提交结果不确定，禁止自动重发") from None
+            raise
         locked = lock_job(session, job_id)
         if not locked:
             return "skipped", 0
@@ -290,20 +315,10 @@ def check_step(
     )
     if job.state == "failed":
         error = result_failure(result)
-        if "_route_decision" in job.parse_options:
-            # Router 每代次最多一份源文件任务；已终止的远端失败由管理员决定是否重新提交。
-            raise MinerUError(
-                "ROUTED_REMOTE_FAILED",
-                "MinerU 远端解析失败，未自动改用 Native 或追加新批次，请人工核对",
-            )
-        if error.retryable and job.retry_count < settings.mineru_max_retries:
-            # 仅远端明确终止后可申请新 batch；旧外部任务已终态，不同时存在有效任务。
-            job.batch_id = job.upload_url = job.upload_expires_at = None
-            job.submission_attempted = job.upload_complete = False
-            job.state = "waiting-file"
-            # 已确认远端失败的检查点不能随后续错误记录回滚，否则会不断查询旧批次。
-            session.commit()
-        raise error
+        # 远端已终止时禁止自动新建收费批次；可恢复的 PUT/GET/下载重试仍用旧批次。
+        raise MinerUError("ROUTED_REMOTE_FAILED" if "_route_decision" in job.parse_options
+                          else error.code,
+                          "MinerU 远端解析失败，未自动降级 Native 或追加新批次")
     if job.state != "done":
         job.error_code = job.error_message = document.error_message = None
         session.commit()
@@ -359,6 +374,12 @@ def check_step(
             job_id=job_id,
             route_strategy="mineru_whole",
         )
+    if "_xlsx_primary" in job.parse_options:
+        parsed = complete_primary(
+            document, job.parse_options["_xlsx_primary"], parsed,
+            RouteDecision.model_validate(job.parse_options["_route_decision"])
+            if "_route_decision" in job.parse_options else None,
+        )
     persist_blocks(session, document, parsed)
     transition_document(document, "CHUNKING")
     job.state, job.is_active = "done", False
@@ -377,6 +398,9 @@ def check_step(
     if hybrid_metrics:
         log_event("hybrid.persisted", doc_id=completed_doc_id, job_id=job_id,
                   block_count=len(parsed.blocks), status="CHUNKING", **hybrid_metrics)
+    if "_xlsx_primary" in job.parse_options:
+        log_event("xlsx.primary_persisted", doc_id=completed_doc_id, job_id=job_id,
+                  block_count=len(parsed.blocks), status="CHUNKING")
     return "done", len(parsed.blocks)
 
 

@@ -35,8 +35,8 @@ class Settings(BaseSettings):
     router_pdf_max_lines_per_page: int = Field(default=2000, ge=1, le=10000)
     router_xml_part_max_mb: int = Field(default=16, ge=1, le=64)
 
-    # 仅用户完成真实 XLSX 对照后手动启用；不改变省略模式和显式 Native 行为。
-    hybrid_xlsx_enabled: bool = False
+    # auto 下复杂 XLSX 默认尝试 Hybrid；关闭仅改为带 Native 主结果保护的 Whole。
+    hybrid_xlsx_enabled: bool = True
     hybrid_max_candidates: int = Field(default=64, ge=1, le=256)
     hybrid_max_bundle_pages: int = Field(default=32, ge=1, le=200)
     hybrid_min_image_side: int = Field(default=32, ge=1, le=4096)

@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.core.file_formats import FileType
 
 ParseMode = Literal["auto", "native", "mineru"]
-RouteStrategy = Literal["native", "mineru_whole", "hybrid_bundle", "review"]
+RouteStrategy = Literal["native", "mineru_whole", "hybrid_bundle", "failed"]
 REASON_CODES = frozenset(
     {
         "PREFLIGHT_LIMIT",
@@ -18,7 +18,21 @@ REASON_CODES = frozenset(
         "NATIVE_COVERAGE_SUPPORTED",
         "NATIVE_COMPLETENESS_FALLBACK",
         "MD_ASSET_NOT_UPLOADED",
-        "XLSX_CLOUD_AB_REQUIRED",
+        "PREFLIGHT_UNCERTAIN",
+        "EXTERNAL_ATTACHMENT_MISSING",
+        "XLSX_EXTERNAL_ASSET_MISSING",
+        "XLSX_WHOLE_WITH_NATIVE_PRIMARY",
+        "HYBRID_PREFLIGHT_WHOLE_FALLBACK",
+        "HYBRID_UNSUPPORTED_ANCHOR",
+        "HYBRID_UNSUPPORTED_CHART",
+        "HYBRID_UNSUPPORTED_IMAGE_TRANSFORM",
+        "HYBRID_UNSUPPORTED_IMAGE_FORMAT",
+        "HYBRID_UNSUPPORTED_DRAWING",
+        "HYBRID_UNSUPPORTED_SHEET",
+        "HYBRID_EXTERNAL_ASSET_MISSING",
+        "HYBRID_INVALID_PACKAGE",
+        "HYBRID_INVALID_IMAGE",
+        "HYBRID_ORPHAN_PART",
         "XLSX_HYBRID_ENABLED",
         "HYBRID_UNSUPPORTED_STRUCTURE",
         "HYBRID_RESOURCE_LIMIT",
@@ -80,7 +94,7 @@ class StructuralSignals(BaseModel):
 
 
 class RouteDecision(BaseModel):
-    """可解释的代次决策；Hybrid 仅用于人工开启的 XLSX 视觉增强。"""
+    """可解释的自动/管理员覆盖决策；failed 是拒绝终态，不是人工路由策略。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     decision_version: Literal["router-v1"] = "router-v1"

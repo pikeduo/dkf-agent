@@ -207,7 +207,8 @@ def test_cloud_pipeline_persists_blocks_and_skips_duplicate(
     assert context.provider.queries == 1 and context.provider.downloads == 0
     context.provider.state = "done"
     completed = execute(job, "check")
-    assert completed.state == "SUCCESS" and completed.result["block_count"] == 5
+    expected_blocks = 6 if name.endswith(".xlsx") else 5
+    assert completed.state == "SUCCESS" and completed.result["block_count"] == expected_blocks
     document, current = detail(context, job)
     assert document["status"] == "CHUNKING" and current["state"] == "done"
     assert not current["is_active"] and current["finished_at"]
@@ -219,8 +220,12 @@ def test_cloud_pipeline_persists_blocks_and_skips_duplicate(
             .order_by(DocumentBlock.block_index)
         ).all()
         identities = [block.block_id for block in blocks]
-        assert [block.block_index for block in blocks] == [1, 2, 3, 4, 5]
-        assert all(block.source == "mineru_cloud" for block in blocks)
+        assert [block.block_index for block in blocks] == list(range(1, expected_blocks + 1))
+        if name.endswith(".xlsx"):
+            assert blocks[0].source == "native_parser" and "=B2*2" in blocks[0].text
+            assert all(block.source == "mineru_cloud" for block in blocks[1:])
+        else:
+            assert all(block.source == "mineru_cloud" for block in blocks)
         if name.endswith((".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx")):
             assert all(block.bbox is None and block.page == 1 for block in blocks)
         assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 0
@@ -400,7 +405,7 @@ def test_put_retry_reuses_checkpoint_and_backoff(cloud_context, kind):
         blocks = session.scalars(
             select(DocumentBlock).where(DocumentBlock.doc_id == UUID(job["doc_id"]))
         ).all()
-        assert len(blocks) == len({block.block_id for block in blocks}) == 5
+        assert len(blocks) == len({block.block_id for block in blocks}) == (6 if kind == "xlsx" else 5)
         if kind != "pdf":
             assert all(block.bbox is None for block in blocks)
 
@@ -423,8 +428,8 @@ def test_429_retries_with_retry_after_and_no_raw_token(cloud_context):
     assert execute(job).state == "SUCCESS"
 
 
-def test_confirmed_remote_transient_failure_creates_new_batch(cloud_context):
-    """只有远端明确 failed 后才重建 batch，终止旧批次的检查点不被错误回滚丢失。"""
+def test_confirmed_remote_failure_never_creates_second_batch(cloud_context):
+    """显式云入口远端 failed 同样终止，不自动新建可能额外收费的批次。"""
 
     job = upload(cloud_context)
     execute(job)
@@ -432,12 +437,13 @@ def test_confirmed_remote_transient_failure_creates_new_batch(cloud_context):
         "failed",
         "模型服务暂时不可用",
     )
-    with pytest.raises(Retry):
-        tasks.execute_step(RetryTask(), job["job_id"], "check")
-    assert detail(cloud_context, job)[1]["batch_id"] is None
-    assert execute(job, "check").result["status"] == "scheduled_submit"
-    assert execute(job).state == "SUCCESS"
-    assert cloud_context.provider.submissions == 2
+    batch_id = detail(cloud_context, job)[1]["batch_id"]
+    assert execute(job, "check").state == "FAILURE"
+    document, current = detail(cloud_context, job)
+    assert document["status"] == "FAILED" and current["state"] == "failed"
+    assert current["batch_id"] == batch_id and not current["is_active"]
+    assert execute(job).result["status"] == "skipped"
+    assert cloud_context.provider.submissions == 1
 
 
 @pytest.mark.parametrize(

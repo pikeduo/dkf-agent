@@ -2,7 +2,7 @@
 
 本文件供开发与验收使用；部署说明和日常调用入口见 [README](../README.md)，开发路线见 [最新开发计划](DEVELOPMENT_PLAN_CODEX.md)，不把测试记录写入 README。
 
-当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 可选整份路由与默认关闭的 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
+当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 默认自动路由与内部 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
 
 ## 1. 官方契约与实现边界
 
@@ -44,9 +44,9 @@
 
 提交意图在 POST 前持久化；batch 和私有签名上传链接在 PUT 前持久化。上传网络失败或 Worker 重启沿用同一批次 PUT；链接成功使用后清除。若 POST 响应丢失或进程在响应持久化前退出，无法证明未创建远端批次，等待保护期限后记录 `SUBMIT_UNCERTAIN`，不自动再 POST。请先在供应商平台确认，再决定人工提交；此 API 没有已确认的幂等请求键，因此不声称绝对外部 exactly-once。
 
-未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 且原因匹配已确认临时分类时可以重建 batch；未知 err_msg 不透传也不猜测可重试。
+未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 终止本代次，不自动重建收费 batch；未知 err_msg 不透传。
 
-远端临时失败重建批次只保留在既有显式入口；11B.1 路由 Job 保存 `_route_decision` 后，远端明确 failed 不自动追加新 batch、不退 Native，由管理员核对后决定显式新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。
+所有入口远端 failed 都不自动追加 batch 或降级 Native；管理员核对后才可显式开启新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。
 
 没有 Outbox / 自动补投器。同代次的活动任务可通过显式 `POST .../documents/{doc_id}/mineru` 恢复投递，继续沿用已保存的 batch。任务已经失败且非活动时，该入口会建立新任务，可能重新申请云端批次、上传并消耗额度；它不是旧失败批次的“仅重新下载”入口。状态已完成或原生 PARSING 不允许借用它重新解析。更换参数不能覆盖活动任务。不对旧任务做后台扫描。
 
@@ -103,7 +103,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 3. 一份含表格 PDF，能人工核对表头、单元格、标题与脚注。
 4. 一份含数学公式 PDF，能人工核对 LaTeX 与相邻说明。
 
-在 `http://127.0.0.1:8000/docs` 创建一个新的验收知识库，避免与已有 Hash 冲突。本节验证显式路径，通过 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents` 上传，记录 doc_id/job_id；普通 `/documents` 省略 parse_mode 仍不自动路由，选择 auto 的新验收另见 Router 文档。
+在 `http://127.0.0.1:8000/docs` 创建一个新的验收知识库，避免与已有 Hash 冲突。本节验证显式路径，通过 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents` 上传，记录 doc_id/job_id；普通 `/documents` 省略 parse_mode 默认 auto，新自动路由验收另见 Router 文档。
 
 如果样本已经上传但处于 UPLOADED / FAILED，可调用 `POST .../documents/{doc_id}/mineru`；已经 CHUNKING 的样本不能以此重新解析，改用独立验收知识库。
 
@@ -259,4 +259,4 @@ ORDER BY d.file_name, b.block_index;
 
 阶段 10 已完成人工验收；最新开发计划记录 DOC/DOCX、PPT/PPTX 和 XLS 的真实云结果及质量边界，XLSX 云结果仍需独立对照，不能从 XLS 推断。本轮没有重新调用真实 API，11B.1 新路由仍需人工验收。Mock 不能替代真实鉴权、格式转换、页面语义和视觉质量，也不等于真实 429 或所有网络故障均已验证。
 
-已有 11B.1 路由和默认关闭的 11B.2 XLSX Hybrid，本次未调用真实云 API。复杂 XLSX 默认 auto 保守 review，人工开启后仅受支持候选进入单 Bundle。活动 Hybrid Job 用原 /mineru 入口恢复同一检查点，失败不自动第二次 Whole；公开参数仍 auto/native/mineru。未实现 Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期。下一步由用户验收，不提前开发后续阶段。
+已有默认 auto 路由及 XLSX Hybrid，本次未调用真实云 API；不使用 Review。复杂 XLSX 优先 Hybrid，明确能力缺口仅提交前可转带 Native 原式保护的 Whole，损坏/缺附件/超限失败。活动 Job 恢复同一检查点，失败不自动第二次 Whole；非幂等申请 5xx 按提交不确定处理，禁止盲目重发。公开参数仍 auto/native/mineru。未实现 Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期，等待用户验收。

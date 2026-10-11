@@ -10,9 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 
 from app.models import Document, DocumentBlock, DocumentParseJob
-from app.parsers.hybrid import HybridReview, digest
+from app.parsers.hybrid import HybridPreflightError, digest
 from app.parsers.routing.contracts import Inspection, StructuralSignals
 from app.services import hybrid_processing, routed_processing
+from app.services import xlsx_primary
 from app.services.mineru import jobs
 from app.services.mineru.errors import MinerUError
 from test_hybrid import metadata_plan, visual_result
@@ -207,17 +208,17 @@ def test_failure_no_partial_blocks_no_second_whole(hybrid_context, monkeypatch, 
     assert check(context, job_id) == ("skipped", 0)
 
 
-def test_review_limit_no_cloud_job(hybrid_context, monkeypatch):
-    """候选超限进入明确 review，零云身份、零最终 Block。"""
+def test_resource_limit_is_failure_without_cloud(hybrid_context, monkeypatch):
+    """候选超限进入可追踪失败，不借 Whole 绕过预算，零云身份、零最终 Block。"""
 
     def limit_stub(*arguments):
         """不生成大文档，直接注入资源限制异常。"""
-        raise HybridReview("HYBRID_RESOURCE_LIMIT")
+        raise HybridPreflightError("HYBRID_RESOURCE_LIMIT")
 
     monkeypatch.setattr(routed_processing, "prepare_checkpoint", limit_stub)
     result = route(hybrid_context)
     document, blocks, parse_jobs = snapshot(hybrid_context)
-    assert result["status"] == "review" and "HYBRID_RESOURCE_LIMIT" in result["route_decision"]["reason_codes"]
+    assert result["status"] == "failed" and "HYBRID_RESOURCE_LIMIT" in result["route_decision"]["reason_codes"]
     assert document.status == "FAILED" and not blocks and not parse_jobs
     assert hybrid_context.provider.submissions == 0
 
@@ -252,3 +253,167 @@ def test_changed_configuration_does_not_replace_active_bundle(hybrid_context):
             jobs.create_job(session, document,
                 context.settings.model_copy(update={"mineru_language": "en"}))
     assert context.provider.submissions == 0 and len(snapshot(context)[2]) == 1
+
+
+@pytest.fixture
+def whole_context(hybrid_context, monkeypatch):
+    """模拟提交前 Hybrid 能力缺口；Native 保护与 Office 云输出均为元数据 Stub。"""
+
+    context = hybrid_context
+
+    def unsupported_chart(*arguments):
+        """不解析文件，模拟无法结构化的复杂 Chart。"""
+        raise HybridPreflightError("HYBRID_UNSUPPORTED_CHART")
+
+    def primary_checkpoint(document, settings, decision):
+        """冻结 Native 摘要，不写主结果正文或临时文档。"""
+        return xlsx_primary.PrimaryCheckpoint(doc_id=document.doc_id, source_hash=document.file_hash,
+            native_hash=digest(context.plan.native.model_dump_json().encode()),
+            signals=decision.signals).model_dump(mode="json")
+
+    def primary_stub(document, signals):
+        """供合并恢复同一份公式原式 Stub，不执行 Native Parser。"""
+        return deepcopy(context.plan.native)
+
+    def geometry_stub(path, kind):
+        """Office 原件没有可映射坐标，不伪造 PDF geometry。"""
+        assert kind == "xlsx"
+        return None
+
+    def normalize_stub(self, archive, **kwargs):
+        """模拟整份云逻辑页结果，计算值不能覆盖 Native 原式。"""
+        assert kwargs["file_type"] == "xlsx"
+        result = visual_result(context.plan)
+        for block in result.blocks:
+            block.bbox, block.text = None, "246"
+        return result.model_copy(update={"file_type": "xlsx"})
+
+    monkeypatch.setattr(routed_processing, "prepare_checkpoint", unsupported_chart)
+    monkeypatch.setattr(jobs, "prepare_primary", primary_checkpoint)
+    monkeypatch.setattr(xlsx_primary, "primary_result", primary_stub)
+    monkeypatch.setattr(jobs, "page_geometry", geometry_stub)
+    monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", normalize_stub)
+    return context
+
+
+def test_preflight_fallback_one_whole_and_original_formulas(whole_context):
+    """提交前缺口只建一个 Whole Job；活动恢复同 Job，完成后 Native 公式不丢失。"""
+
+    context = whole_context
+    result = route(context)
+    decision = result["route_decision"]
+    assert decision["route_strategy"] == "mineru_whole" and decision["fallback_count"] == 1
+    assert "HYBRID_UNSUPPORTED_CHART" in decision["reason_codes"]
+    assert "HYBRID_PREFLIGHT_WHOLE_FALLBACK" in decision["reason_codes"]
+    job_id = UUID(result["job_id"])
+    assert context.provider.submissions == 0 and not snapshot(context)[1]
+    with context.session() as session:
+        job = session.get(DocumentParseJob, job_id)
+        assert "_hybrid" not in job.parse_options and "_xlsx_primary" in job.parse_options
+        assert jobs.local_file(session.get(Document, context.doc_id), job).name == "source.xlsx"
+        assert jobs.create_job(session, session.get(Document, context.doc_id), context.settings).job_id == job_id
+    assert route(context)["status"] == "stale_task"
+    submit(context, job_id)
+    context.provider.state = "done"
+    assert check(context, job_id) == ("done", 4)
+    document, blocks, parse_jobs = snapshot(context)
+    assert document.status == "CHUNKING" and parse_jobs[0].state == "done"
+    assert "=B2*2" in blocks[0].text and blocks[0].source == "native_parser"
+    assert [block.section for block in blocks[:2]] == ["第一表", "第二表"]
+    assert all(block.source == "mineru_cloud" and block.bbox is None for block in blocks[2:])
+    assert context.provider.submissions == 1 and check(context, job_id) == ("skipped", 0)
+
+
+@pytest.mark.parametrize("code", ["HYBRID_INVALID_PACKAGE", "HYBRID_INVALID_IMAGE",
+                                 "HYBRID_EXTERNAL_ASSET_MISSING", "HYBRID_ORPHAN_PART"])
+def test_corrupt_or_missing_assets_never_attempt_whole(hybrid_context, monkeypatch, code):
+    """损坏/缺附件/孤立部件给出具体安全理由，不创建付费云身份或半份 Block。"""
+
+    def rejected(*arguments):
+        """用固定原因模拟拒绝，不创建损坏测试文档。"""
+        raise HybridPreflightError(code)
+
+    monkeypatch.setattr(routed_processing, "prepare_checkpoint", rejected)
+    result = route(hybrid_context)
+    document, blocks, parse_jobs = snapshot(hybrid_context)
+    assert result["status"] == "failed" and code in document.error_message
+    assert not blocks and not parse_jobs and hybrid_context.provider.submissions == 0
+
+
+def test_whole_fallback_remote_failure_no_primary_partial_result(whole_context):
+    """回退 Whole 后远端失败，不把 Native 主表单独判成功，也不再新建批次。"""
+
+    context = whole_context
+    job_id = UUID(route(context)["job_id"])
+    submit(context, job_id)
+    context.provider.state = "failed"
+    with pytest.raises(MinerUError) as caught:
+        check(context, job_id)
+    with context.session() as session:
+        assert not jobs.record_error(session, job_id, caught.value, context.settings)
+    document, blocks, parse_jobs = snapshot(context)
+    assert document.status == "FAILED" and not blocks and not parse_jobs[0].is_active
+    assert context.provider.submissions == 1
+
+
+def test_whole_limits_checked_before_any_cloud_submission(whole_context, monkeypatch):
+    """Whole 原件同样受平台文件限制，不因 Hybrid 拒绝而绕过最终提交校验。"""
+
+    def too_large(source):
+        """模拟文件大小超限，不创建大文件。"""
+        raise MinerUError("FILE_SIZE", "MinerU 文件超过安全上限")
+
+    monkeypatch.setattr(jobs, "validate_local_file", too_large)
+    with pytest.raises(MinerUError, match="安全上限"):
+        route(whole_context)
+    assert snapshot(whole_context)[1:] == ([], [])
+    assert whole_context.provider.submissions == 0
+
+
+def test_uncertain_server_error_cannot_create_paid_duplicate(hybrid_context):
+    """非幂等申请 5xx 保留不确定检查点，停止重发，不因可重试 HTTP 分类追加费用。"""
+
+    context = hybrid_context
+    job_id = UUID(route(context)["job_id"])
+    context.provider.error = MinerUError("HTTP_503", "服务端暂时异常", retryable=True)
+    with pytest.raises(MinerUError) as caught:
+        submit(context, job_id)
+    assert caught.value.code == "SUBMIT_UNCERTAIN" and not caught.value.retryable
+    with context.session() as session:
+        assert not jobs.record_error(session, job_id, caught.value, context.settings)
+    assert context.provider.submissions == 1
+    assert submit(context, job_id) == ("skipped", 0)
+    assert not snapshot(context)[1]
+
+
+@pytest.mark.parametrize("failure", ["primary", "persist"])
+def test_whole_primary_or_persistence_failure_keeps_old_blocks(whole_context, monkeypatch, failure):
+    """主原式检查点或全量写库失败保留旧块，云批次不新增，不能提交 Native 半结果。"""
+
+    context = whole_context
+    with context.session() as session:
+        session.add(DocumentBlock(doc_id=context.doc_id, page=1, block_index=1,
+                                 block_type="text", text="旧完整证据", source="native_parser"))
+        session.commit()
+    job_id = UUID(route(context)["job_id"])
+    submit(context, job_id)
+    context.provider.state = "done"
+    if failure == "primary":
+        context.plan.native.blocks[0].text = "原式被修改"
+    else:
+        original = jobs.persist_blocks
+
+        def fail_after_flush(session, document, parsed):
+            """写入新块后故障，让上下文回滚真实隔离事务。"""
+            original(session, document, parsed)
+            raise OperationalError("PRIVATE_SQL", {}, RuntimeError("PRIVATE_PATH"))
+
+        monkeypatch.setattr(jobs, "persist_blocks", fail_after_flush)
+    with pytest.raises((MinerUError, OperationalError)):
+        check(context, job_id)
+    assert [block.text for block in snapshot(context)[1]] == ["旧完整证据"]
+    with context.session() as session:
+        jobs.record_error(session, job_id, MinerUError("WHOLE_RESULT_FAILED", "安全失败"), context.settings)
+    document, blocks, parse_jobs = snapshot(context)
+    assert document.status == "FAILED" and [block.text for block in blocks] == ["旧完整证据"]
+    assert len(parse_jobs) == 1 and context.provider.submissions == 1
