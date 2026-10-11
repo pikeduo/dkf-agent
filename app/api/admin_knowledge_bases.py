@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.file_formats import FILE_TYPES
 from app.db.session import get_session
 from app.models import Document, KnowledgeBase
 from app.schemas.batch_upload import BatchUploadResponse
@@ -28,7 +29,7 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseResponse,
     PageResponse,
 )
-from app.services.batch_upload import store_batch, validate_batch
+from app.services.batch_upload import MAX_BATCH_FILES, store_batch, validate_batch
 from app.services.document_dispatch import publish_document
 from app.services.document_processing import transition_document
 from app.services.document_upload import store_document
@@ -189,8 +190,14 @@ def upload_knowledge_base_document(
         list[UploadFile],
         File(
             description="可多选 1～50 份 PDF、Office、CSV、TXT、MD 或图片；每份独立 doc_id，只投递 Native",
-            # 明确二进制数组项，兼容 Swagger UI 的文件多选控件识别。
-            json_schema_extra={"items": {"type": "string", "format": "binary"}},
+            # 二进制数组负责 multipart；扩展元数据只供本地 Swagger 单控件多选使用。
+            json_schema_extra={
+                "items": {"type": "string", "format": "binary"},
+                "x-dkf-file-picker": {
+                    "extensions": sorted(FILE_TYPES),
+                    "maxFiles": MAX_BATCH_FILES,
+                },
+            },
         ),
     ],
 ) -> DocumentResponse | BatchUploadResponse:

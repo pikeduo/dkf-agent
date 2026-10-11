@@ -90,7 +90,7 @@ MAX_UPLOAD_SIZE_MB=50
 | `MINERU_RESULT_QUERY_LIMIT_PER_MINUTE` | 1000，批次查询次数 |
 | `MINERU_DAILY_FILE_LIMIT` | 5000，应用按滚动 24 小时保守保护 |
 | `MINERU_HIGH_PRIORITY_PAGE_LIMIT` | 1000，仅估计优先页消耗，超出不拒绝 |
-| `MINERU_UPLOAD_BATCH_MAX_FILES` | 50，Provider 单批最大文件数；管理接口每次上传一份 |
+| `MINERU_UPLOAD_BATCH_MAX_FILES` | 50，Provider 单批最大文件数；管理入口支持多选，但每份独立云任务 |
 | `MINERU_RATE_SAFETY_RATIO` | 0.9，实际分钟保护为 45 文件 / 900 查询；批量需满足安全额度 |
 | `MINERU_QUOTA_NAMESPACE` | `dkf-agent:mineru`，同一账户的所有 Worker 必须共用同一 Redis 与命名空间 |
 | `MINERU_REQUEST_TIMEOUT_SECONDS` | 60，单次 HTTP 超时 |
@@ -290,7 +290,9 @@ Get-ChildItem .\logs\*.log* | Select-String -SimpleMatch '你的文档UUID'
 
 ### 上传文件
 
-在 Swagger 中选择原上传接口，填写已有 `kb_id`，点击 `file` 的“选择文件”，可以一次多选后提交（Windows 文件选择窗口使用 Ctrl/Shift 多选）。请求类型为 `multipart/form-data`，文件字段名仍为 `file`；多份文件通过重复的 `file` 字段传递，不使用 JSON 或 Base64。
+在 Swagger 中展开原上传接口并点击 `Try it out`，填写已有 `kb_id`。`file` 区域只有一个“选择文件”控件：打开 Windows 文件选择窗口后可单选，或使用 Ctrl/Shift 一次多选，不需要点击 `Add string item` 逐个添加。
+
+选择完成后显示文件列表、大小和初检提示；初检只检查文件名、后缀、空文件、单文件大小与最多 50 份限制，不读取内容，不自动上传。确认后点击 `Execute`，服务端仍按实际内容进行最终校验和去重；初检不合格的文件不会被静默移除，多文件请求会在逐项结果中说明失败。可用“清空选择”重选；再次打开窗口选择会替换之前的整个列表。请求类型为 `multipart/form-data`，文件字段名仍为 `file`；多份文件通过重复的 `file` 字段传递，不使用 JSON 或 Base64。
 
 支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、CSV、TXT、MD、JPG、JPEG、PNG；不接受空文件、含路径或控制字符的文件名，文件名最多 255 字符。OOXML 检查对应 ZIP 主部件，旧 Office 检查 OLE 容器和对应主流，不能只改后缀冒充。相同知识库中内容相同的文件返回 409，错误信息包含已有 `doc_id`，无需再次上传。
 
@@ -331,7 +333,7 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 缺失 `file` 返回整批 422；数量超过 50 返回整批 413；无效知识库返回整批 404；数据库预检或 MinerU 配置不可用返回整批 503。这些预检失败不创建新文件。MinerU 每份文件独立进入已有短任务与共享频控，不将这 50 份文件合并为一个云任务；真实云调用会消耗额度。
 
-更新代码后重启 API，并刷新 `/docs` 以加载新的文件数组定义，必要时 Ctrl+F5 强制刷新；所有相关 CPU Worker 也应使用最新代码。后续按每项的 `doc_id` 查询文档详情或 `parse-jobs`，不要只看批次 HTTP 状态判断解析结果。之前新增的两个 `/batch` 路径已移除。
+更新代码后重启 API，并用 Ctrl+F5 强制刷新 `/docs` 以加载多选控件；所有相关 CPU Worker 也应使用最新代码。Swagger JS/CSS 通过 jsDelivr 加载，本地多选插件由 API 的 `/static/docs/swagger_upload.js` 提供；若仍出现 `Add string item`，先确认运行的是最新 API、刷新页面并检查该静态资源返回 200，不需要修改上传请求字段。后续按每项的 `doc_id` 查询文档详情或 `parse-jobs`，不要只看批次 HTTP 状态判断解析结果。之前新增的两个 `/batch` 路径已移除。
 
 ### 查询状态与重新投递
 

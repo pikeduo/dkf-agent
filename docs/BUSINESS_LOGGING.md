@@ -59,6 +59,6 @@ python -m pytest tests/business_logging_smoke.py tests/batch_upload_smoke.py -q
 5. 手动调用显式 MinerU 上传，用少量真实图片或 PDF 验证批次、上传、远端状态、ZIP、Adapter 和落库事件；按 job_id/doc_id 关联。必须对照 `document_blocks` 与原件，Mock 通过不能替代真实 API 验证。
 6. 查询一份已有失败任务的详情与安全错误码日志；若要验证重试，使用专门验收环境的可控临时错误，不为了测试中断共用 PostgreSQL/Redis 服务。失败日志不能出现落库成功事件。
 7. 检查业务文件不含 Token、密码、签名链接或完整正文。不要把真实密钥复制到搜索命令、终端输出或提交记录中。轮转在自动测试中已使用小容量验证；真实持续运行时检查备份和目录容量并安排历史文件归档。
-8. 在 Swagger 的原 `/documents` 入口点击 `file` 多选两份新 TXT/MD，以及一份重复文件和空文件，核对逐项 201/409/400 与汇总数量，不使用 `/batch` 路径。用响应 `X-Request-ID` 关联 `upload.batch_started / batch_item / batch_finished`；每个成功项独立 doc_id/task_id，后续 Worker 各有解析日志。原显式 `/mineru/documents` 同样多选少量新图片/PDF 验证各自 parse_job 与真实落库，不能以批次 200 当作解析成功。只选一份继续走原上传事件与单文件响应。
+8. 强制刷新 Swagger，在原 `/documents` 入口点击 `Try it out`，确认 `file` 只有一个文件控件、无 `Add string item`。打开选择窗口，用 Ctrl/Shift 一次选两份新 TXT/MD，以及一份重复文件和空文件；选择后应显示数量、名称/大小初检，尚无上传或落库日志。点击 Execute 后核对逐项 201/409/400 与汇总数量，不使用 `/batch` 路径。用响应 `X-Request-ID` 关联 `upload.batch_started / batch_item / batch_finished`；每个成功项独立 doc_id/task_id，后续 Worker 各有解析日志。原显式 `/mineru/documents` 同样多选少量新图片/PDF 验证各自 parse_job 与真实落库，不能以批次 200 当作解析成功。只选一份继续走原上传事件与单文件响应。界面初检不读取或上传文件正文，最终校验与安全日志仍由现有后端负责，不把仅打开文件窗口记成上传成功。
 
 真实 API 请求会消耗额度；本次日志功能不自动发起真实 MinerU 调用、不安装基础服务、不开发 Router、Cache、Chunk、Embedding 或 RAG。

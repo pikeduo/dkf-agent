@@ -18,7 +18,7 @@ from app.models import Document, DocumentParseJob
 from app.schemas.batch_upload import BatchUploadResponse
 from app.schemas.knowledge_base import DocumentResponse
 from app.schemas.parse_job import ParseJobResponse
-from app.services.batch_upload import store_batch, validate_batch
+from app.services.batch_upload import MAX_BATCH_FILES, store_batch, validate_batch
 from app.services.document_upload import store_document
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import create_job, lock_job
@@ -115,8 +115,14 @@ def upload_mineru_document(
         list[UploadFile],
         File(
             description="可多选 1～50 份 PDF、图片或 Office；每份独立 doc_id，将传至 MinerU 云端",
-            # 和原生入口共用数组形状，让 Swagger UI 生成可多选的文件控件。
-            json_schema_extra={"items": {"type": "string", "format": "binary"}},
+            # 和原生入口共用多选插件，但文件类型初检限于显式云解析支持范围。
+            json_schema_extra={
+                "items": {"type": "string", "format": "binary"},
+                "x-dkf-file-picker": {
+                    "extensions": sorted(MINERU_TYPES),
+                    "maxFiles": MAX_BATCH_FILES,
+                },
+            },
         ),
     ],
 ) -> ParseJobResponse | BatchUploadResponse:

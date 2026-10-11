@@ -1,4 +1,4 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.6 · 完整性优先 Parser Router + LlamaIndex RAG 编排）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.7 · 完整性优先 Router + Selective Hybrid Visual + LlamaIndex）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
@@ -6,9 +6,9 @@
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
 > 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
-> 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router**。  
+> 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
-> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B 采用“能证明 Native 完整覆盖才走 Native，否则走 MinerU / 显式人工决策”的保守路由；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
+> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -1308,63 +1308,120 @@ RAG
 
 ---
 
-# 17B. 阶段 11B：完整性优先 Parser Router 与混合文档路由
+# 17B. 阶段 11B：完整性优先 Parser Router + Selective Hybrid Visual Enhancement
 
 ## 目标
 
-阶段 11B 不再把 Router 定义为“Native 能解析就优先 Native，失败再回退 MinerU”，也不采用“所有文件全部交给 MinerU”的简单策略。
-
-Router 的核心判断是：
+阶段 11B 继续坚持“**完整性优先**”，但在整份 Native / 整份 MinerU 两种主路径之外，预留一个受控的第三种策略：
 
 ```text
-这个文件能不能被当前 Native Parser 完整覆盖其主要信息？
+native
+mineru_whole
+hybrid_bundle
 ```
 
-只有在 **Preflight Inspector 能合理证明 Native 不会静默漏掉主要信息** 时，`auto` 才选择 Native；只要存在重要视觉内容、复杂版式、当前 Native 明确不覆盖的结构，或无法可靠判断完整性，就应选择 MinerU Cloud，或者明确要求管理员人工指定解析模式。
+其中：
 
-核心原则：
+- `native`：只有能合理证明当前 Native Parser 可以完整覆盖主要信息时才使用。
+- `mineru_whole`：扫描、复杂版式、强视觉文档或无法可靠局部对齐时，整份文件一次性交给 MinerU。
+- `hybrid_bundle`：只在真实测试证明 Native 与 MinerU 明显互补、且可以稳定定位视觉元素时使用；Native 保留确定性结构，视觉候选集中打包后只调用 **一次 MinerU**，再按 Anchor 合并回原解析结果。
+
+阶段 11B 不采用：
 
 ```text
-能证明完整覆盖
-→ Native
-
-不能证明完整覆盖 / 存在显著视觉内容 / 判断不确定
-→ MinerU Cloud 或明确人工决策
+Native 能抽到文字就算成功
+所有文件无脑 MinerU
+每张图片 / 每个图表 / 每个公式各调用一次 MinerU
 ```
 
-这里判断的是“完整性”，不是“能否抽出一些文字”。禁止把“Native 没报错”等同于“文档已完整解析”。
-
-## 为什么不把所有文件都交给 MinerU
-
-阶段 10 与阶段 11A 的真实样本已经说明，MinerU 很适合 OCR、复杂版式、图片、表格、公式与 Office 视觉内容，但供应商解析也可能带来模型误差和结构损失；Native 对结构明确的原生数据仍有确定性优势。
-
-当前真实测试形成以下设计依据：
+Router 的核心问题仍然是：
 
 ```text
-Native TXT / CSV
-→ 文本确定性高、无云调用、低延迟
-
-Native XLSX
-→ 能精确保留 Sheet、单元格值和公式原式
-
-MinerU DOC / DOCX / PPT / PPTX
-→ 能补充图片 OCR、复杂视觉内容
-→ 但 Reading Order、公式字符、Block 边界可能存在模型波动
-
-MinerU XLS（当前复杂样本）
-→ 云端链路成功
-→ 但出现公式原式退化为计算结果、内嵌图片 OCR 缺失
+当前策略能否完整覆盖该文档对 RAG 有价值的主要信息？
 ```
 
-因此阶段 11B 的目标不是“尽可能少用 MinerU”，也不是“全部使用 MinerU”，而是：
+而不是：
+
+```text
+能不能抽出一些文字？
+```
+
+## 为什么不默认“全部 MinerU”
+
+真实样本已经说明，MinerU 很适合 OCR、复杂版式、图片、表格、公式与 Office 视觉内容，但也可能出现：
+
+```text
+OCR / 公式字符误差
+Block 边界漂移
+Reading Order 不稳定
+Excel 公式原式退化为计算结果
+某些内嵌图片没有被 OCR
+```
+
+同时 Native 对结构明确的内容具有确定性优势：
+
+```text
+TXT / CSV
+→ 原文确定性高
+
+XLSX Native
+→ Sheet / Cell / 公式原式确定性高
+
+简单 DOCX
+→ 标题 / 正文 / 原生表格顺序可控
+
+简单文本 PDF
+→ 原生文字与物理页码稳定
+```
+
+因此：
 
 ```text
 确定性结构 → Native
-复杂视觉结构 → MinerU
-两者均不能保证完整性的场景 → 明确暴露限制，再决定是否进入受控 Hybrid
+复杂视觉 / 复杂布局 → MinerU Whole
+Native 与 MinerU 明显互补且可稳定锚定 → Selective Hybrid Visual
 ```
 
-不得为了简化实现而牺牲 RAG 的证据完整性。
+## 为什么不逐元素调用 MinerU
+
+MinerU 提交额度按“文件数”计数。若一个 DOCX / XLSX 中包含：
+
+```text
+3 张截图
+2 个图表
+4 个公式图片
+```
+
+逐元素上传会把一份源文档放大为 9 个 MinerU 文件任务，显著增加：
+
+```text
+分钟提交额度消耗
+每日文件额度消耗
+任务管理复杂度
+网络与失败重试次数
+```
+
+因此阶段 11B.2 明确禁止：
+
+```text
+visual_001.png → MinerU task 1
+visual_002.png → MinerU task 2
+visual_003.png → MinerU task 3
+...
+```
+
+而采用：
+
+```text
+同一 source document
+→ 提取真正需要视觉理解的候选
+→ 去除明显装饰 / 重复候选
+→ 生成一个 visual_bundle.pdf
+→ 一次 MinerU 提交
+→ 按 bundle manifest 拆回并合并
+```
+
+注意：Visual Bundle 只降低“文件任务数”，并不会消除页面消耗。Bundle 页数仍影响解析耗时、200 页限制和平台高优先级页额度，因此必须继续控制候选数量。
 
 ## 总体流程
 
@@ -1376,9 +1433,10 @@ Format Validation
 Preflight Inspector
         ↓
 Route Decision
-        ├─ Native
-        ├─ MinerU Cloud
-        └─ Explicit Review / Unsupported Complete Auto Route
+        ├─ native
+        ├─ mineru_whole
+        ├─ hybrid_bundle   # 仅 11B.2 启用
+        └─ explicit_review
         ↓
 Parser / Provider
         ↓
@@ -1389,61 +1447,78 @@ DocumentBlock
 CHUNKING
 ```
 
-第一版 Router 仍以 **整份文档选择单一主解析路径** 为主，不做逐页 / 逐元素 Native + MinerU 自动合并。
+阶段 11B.1 只实现：
 
-## `parse_mode`
+```text
+native
+mineru_whole
+explicit_review
+```
 
-继续保留：
+阶段 11B.2 的 `hybrid_bundle` 必须在真实对照测试证明必要后再启用，不得和 11B.1 一次性开发。
+
+## 外部 `parse_mode` 与内部 `route_strategy`
+
+外部 API 继续保留：
 
 ```text
 parse_mode = auto | native | mineru
+```
+
+不在 11B.1 直接增加 `hybrid` 用户参数，避免公开尚未稳定的策略。
+
+内部 Router 可以产生：
+
+```text
+route_strategy = native | mineru_whole | hybrid_bundle | review
 ```
 
 语义：
 
 ```text
 auto
-→ 使用 Preflight Inspector 和 Router 决策
+→ Preflight + Router 自动选择
 
 native
-→ 管理员显式要求 Native，用于基线对比和排障
-→ 仍必须明确暴露 Native 不支持的视觉内容，不得把部分结果声明为完整解析
+→ 管理员显式要求 Native，用于基线对比 / 排障
+→ 必须暴露 Native 已知覆盖边界
 
 mineru
-→ 管理员显式要求 MinerU
-→ 仍遵守文件格式、配额、幂等、安全和真实 API 限制
+→ 管理员显式要求整份 MinerU
+→ 继续遵守配额、幂等、安全和文件限制
 ```
 
-显式覆盖主要用于人工验收、A/B 对比与故障排查，不代表可以绕过格式安全校验。
+如果未来 `hybrid_bundle` 稳定并需要管理员显式控制，再独立评估是否扩展 API 契约；不要提前污染公开接口。
 
 ## Route Decision 必须可解释
 
-Router 不能只返回一个布尔值。至少形成结构化决策信息，例如：
+至少形成结构化信息：
 
 ```json
 {
-  "decision_version": "router-v1",
+  "decision_version": "router-v2",
   "parse_mode": "auto",
-  "file_type": "docx",
-  "selected_provider": "mineru",
+  "file_type": "xlsx",
+  "route_strategy": "review",
   "reason_codes": [
-    "DOCX_HAS_MEDIA",
-    "DOCX_HAS_OMATH"
+    "XLSX_HAS_EMBEDDED_IMAGE",
+    "XLSX_HAS_CHART"
   ],
   "signals": {
-    "has_native_text": true,
-    "media_count": 2,
-    "has_formula": true
+    "sheet_count": 3,
+    "formula_count": 4,
+    "image_count": 1,
+    "chart_count": 1
   }
 }
 ```
 
 要求：
 
-- `reason_codes` 必须稳定、可测试，不使用自由文本替代全部逻辑。
-- `signals` 只保存结构判断需要的信息，不保存大段原文、Token、签名 URL 等敏感内容。
-- 不伪造“置信度”；第一版不需要给 Router 人为生成 0～1 confidence。
-- Route Decision 至少应进入结构化日志 / 任务结果；若实现时确认后续 Admin 与评测需要持久化，再设计最小数据库字段或独立表，不提前堆复杂 Schema。
+- `reason_codes` 稳定、可测试。
+- `signals` 只保存结构判断所需信息，不保存 Token、签名 URL 或大段原文。
+- 不人为伪造 0～1 Router confidence。
+- Route Decision 至少进入结构化日志 / 任务结果；是否持久化等 Admin 需求明确后再做最小 Schema。
 
 ## 第一版总体路由矩阵
 
@@ -1451,49 +1526,39 @@ Router 不能只返回一个布尔值。至少形成结构化决策信息，例�
 |---|---|---|
 | TXT | Native | 确定性文本 |
 | CSV | Native | 确定性表格文本 |
-| Markdown / MD | Native；发现未提供的图片附件时不得宣称完整 | Markdown 单文件本身无法让 MinerU恢复未上传的本地图片 |
-| JPG / JPEG / PNG | MinerU | OCR / 视觉解析 |
-| DOC | MinerU | 旧版 Word，不开发 Native 二进制正文 Parser |
-| DOCX 简单正文 / 原生表格 | Native | 仅在 Preflight 未发现 Native 未覆盖结构时 |
-| DOCX 含图片 / 公式 / 文本框 / 图表 / 嵌入对象等 | 整份 MinerU | 第一版不做元素级合并 |
-| PPT / PPTX | MinerU | 视觉布局为主，Native 第一版不承担 |
-| XLS | MinerU，但保留已知质量边界 | 兼容路径不等于保证公式和图片语义完整 |
-| XLSX 简单单元格 / 公式 | Native | 优先保留 Sheet、Cell 与公式原式 |
-| XLSX 含图片 / 图表 / 绘图等 | **先以真实 XLSX MinerU 对照测试决定最终策略** | 若单一 Provider 都无法完整覆盖，进入受控 Hybrid 评估，不静默宣称完整 |
+| Markdown / MD | Native；缺附件时不得宣称完整 | 单文件 `.md` 无法恢复未上传图片 |
+| JPG / JPEG / PNG | MinerU Whole | OCR / 视觉解析 |
+| DOC | MinerU Whole | 不开发旧 Word 二进制正文 Parser |
+| DOCX 简单正文 / 原生表格 | Native | Preflight 未发现 Native 未覆盖结构 |
+| DOCX 含图片 / 公式 / 文本框 / 图表 / 嵌入对象等 | 11B.1：MinerU Whole | 未来可在 11B.2 评估 Hybrid，但不是首选候选 |
+| PPT / PPTX | MinerU Whole | 高度依赖页面视觉布局，第一版不拆元素 |
+| XLS | MinerU Whole + 已知质量边界 | 兼容路径不等于完整语义解析 |
+| XLSX 简单单元格 / 公式 | Native | 保留 Sheet / Cell / 公式原式 |
+| XLSX 含图片 / 图表 / 绘图等 | 11B.1：Review / 已验证 Whole-MinerU；11B.2：优先候选 Hybrid Bundle | 必须由真实 XLSX MinerU 对照决定 |
 | PDF 简单原生文本 | Native | 必须通过页面级 Preflight |
-| PDF 扫描 / 混合 / 复杂版式 / 重要视觉内容 | 整份 MinerU | 第一版不做逐页混合 |
+| PDF 扫描 / 混合 / 复杂版式 / 重要视觉内容 | MinerU Whole | 第一版和 11B.2 都不做逐页混合 |
 
 ## Markdown 特殊边界
 
-Markdown 与 DOCX / PDF 不同。下面的内容：
+Markdown 中：
 
 ```markdown
 ![销售图](images/sales.png)
 ```
 
-只是图片引用，不代表图片字节包含在 `.md` 文件里。
+只保存引用路径，不等于图片字节已经上传。
 
 当前单文件上传模式下：
 
-- 无图片引用的 Markdown → Native。
-- Markdown 引用了本地附件，但附件没有随同上传 → 不得声称文档完整解析。
-- 不因为存在 Markdown 图片引用就直接把 `.md` 发送 MinerU；MinerU 无法凭空恢复未上传附件。
-- 第一版不自动抓取任意远程图片 URL，避免 SSRF、权限和内容漂移问题。
-- 后续如需要完整 Markdown + Assets 支持，应设计受控 Bundle（例如 ZIP + manifest）或附件关联机制，作为独立功能，不塞进 Router v1。
+- 无图片引用 → Native。
+- 引用了本地附件但附件未上传 → 不得宣称完整解析。
+- 不因为存在图片引用就直接把 `.md` 发给 MinerU。
+- 第一版不自动抓取任意远程 URL，避免 SSRF、权限和内容漂移。
+- 后续如需要完整 Markdown + Assets，单独设计 ZIP + manifest / attachment relation，不塞进 Router v1。
 
 ## DOCX Preflight Inspector
 
-DOCX 是 OOXML ZIP，可以在调用 Parser 前做低成本结构检查。
-
-Native DOCX 当前擅长：
-
-```text
-Heading
-Paragraph
-Native Table
-```
-
-只要发现 Native 当前不覆盖、且可能承载主要语义的结构，就应将 `auto` 路由到 MinerU，例如：
+DOCX 为 OOXML ZIP，可低成本检查：
 
 ```text
 word/media/*
@@ -1503,64 +1568,59 @@ m:oMath / m:oMathPara
 w:txbxContent
 charts / diagrams / SmartArt
 embedded object / OLE object
-header / footer / footnote / endnote 等当前 Native 未覆盖的重要内容
+header / footer / footnote / endnote
 ```
 
-要求：
+Native DOCX 当前稳定覆盖：
 
-- 不按文件名或测试 Marker 写特例。
-- 不因为文档已有大量 Native 正文就忽略图片、公式或文本框。
-- 发现显著视觉 / 未覆盖结构时，第一版整份 DOCX 交 MinerU，不做“Native 正文 + MinerU 图片”自动合并。
+```text
+Heading
+Paragraph
+Native Table
+```
+
+11B.1：
+
+- 发现显著视觉 / 未覆盖结构 → 整份 MinerU。
+- 不因为已有大量正文就忽略图片、公式或文本框。
+- 不做 Native 正文 + 单图 MinerU 自动拼接。
+
+11B.2：
+
+- 只有 XLSX Hybrid 验证稳定后，才评估 DOCX Hybrid。
+- 若评估，必须能从 OOXML 正文顺序中获得可靠 drawing / image anchor；仅凭 `word/media/image1.png` 文件名不足以回插。
 
 ## PDF Preflight Inspector
 
-不能继续使用简单规则：
+不能继续使用：
 
 ```text
 有文本层 → Native
 无文本层 → MinerU
 ```
 
-因为同一 PDF 可以同时包含：
-
-```text
-原生正文
-+
-扫描页
-+
-截图文字
-+
-复杂表格
-+
-公式
-+
-图表
-+
-多栏版式
-```
-
-Preflight 至少按页检查：
+至少按页检查：
 
 ```text
 原生文本是否存在且足够
 图片数量与面积占比
-是否存在无文本但有图片 / drawing / annotation 的页面
-是否存在明显扫描页
-是否存在复杂 drawing / table / formula / 多栏风险信号
-是否存在 Native Text + Image 的同页混合
+无文本但存在 image / drawing / annotation
+明显扫描页
+复杂 drawing / table / formula / 多栏风险
+Native Text + Image 同页混合
 ```
 
-路由原则：
+路由：
 
-- 每页均为简单原生文本、无显著视觉语义 → Native。
-- 任一页面存在明显扫描 / 混合 / 复杂视觉内容 → 第一版整份 PDF MinerU。
-- 不能因为一个很小的 logo 就无条件 MinerU；图片面积、重复性和页面语义需要形成可测试规则。
-- 阈值必须配置化并通过测试集校准，不写只适用于某个测试文件的 magic number。
-- 第一版不做 Page 1 Native + Page 2 MinerU + Page 3 Native 的自动拼接。
+- 全部页面均为简单原生文本且无显著视觉语义 → Native。
+- 任一页明显扫描 / 混合 / 复杂视觉 → 整份 MinerU。
+- 小 logo 不应单独触发 MinerU；阈值必须配置化并由测试校准。
+- 不做逐页 Native + MinerU 自动拼接。
+- 11B.2 的 Visual Bundle **不扩展到 PDF**；PDF 的页面、bbox、图文关系比 Office 元素更复杂，优先 Whole-MinerU。
 
 ## XLSX Preflight Inspector
 
-XLSX Native 的确定性优势必须保留：
+Native XLSX 的确定性优势：
 
 ```text
 Sheet 顺序
@@ -1568,14 +1628,14 @@ Cell 值
 公式原式
 ```
 
-Preflight 可以检查 OOXML 包中是否存在：
+Preflight 检查：
 
 ```text
 xl/media/*
 xl/drawings/*
 xl/charts/*
 xl/embeddings/*
-VML / shape / picture 等视觉对象
+VML / shape / picture
 ```
 
 路由：
@@ -1584,136 +1644,341 @@ VML / shape / picture 等视觉对象
 无显著视觉对象
 → Native
 
-存在图片 / 图表 / 绘图等视觉对象
-→ 标记 complex_xlsx
+存在视觉对象
+→ complex_xlsx
 ```
 
-`complex_xlsx` 在阶段 11B 实现前必须先完成真实 XLSX MinerU 对照验收。不能直接把 XLS 的解析结果等同于 XLSX。
+`complex_xlsx` 必须先完成真实 `XLSX → MinerU` 对照验收，不能从 XLS 结果类推。
 
 ### XLSX 决策分支
 
-如果真实 XLSX MinerU 验证结果证明：
+若真实 MinerU 验证证明：
 
 ```text
 Cell / Formula / Visual
 均能满足 RAG 完整性要求
 ```
 
-则第一版可以：
+则可以：
 
 ```text
-complex XLSX → 整份 MinerU
+complex XLSX → MinerU Whole
 ```
 
-如果验证结果显示：
+若验证证明：
 
 ```text
-Native 保留公式 / Cell 更可靠
-MinerU 能补图表 / 图片，但会损失公式原式或其他确定性结构
+Native：Sheet / Cell / Formula 原式更可靠
+MinerU：图片 / 图表 /视觉信息更强
+单一路径都存在明显缺失
 ```
 
-则不能让 `auto` 静默选择任一单一路径并宣称完整，应进入 **阶段 11B.2：受控 XLSX Hybrid Parsing** 评估。
+则进入 11B.2 的 `hybrid_bundle` 评估。
 
-在 Hybrid 被验证前，可以要求管理员显式选择 `native` 或 `mineru`，并在结果中暴露覆盖边界；不要用一个“看起来成功”的 `CHUNKING` 掩盖已知重要信息缺失。
+在 Hybrid 真正验收前：
+
+- `auto` 不得静默宣称复杂 XLSX 已完整解析。
+- 可以进入 `review`，或按真实测试结论使用已验证的 Whole-MinerU。
+- 管理员仍可显式 `native` / `mineru` 做 A/B 对比。
 
 ## 阶段 11B.1：Whole-document Router v1
 
-第一版优先完成：
+第一版只完成：
 
 ```text
-Preflight
-→ 可解释 Route Decision
-→ 整份 Native 或整份 MinerU
+Preflight Inspector
+→ Route Decision
+→ Native 或 MinerU Whole
+→ Completeness Guard
 ```
 
 不做：
 
 ```text
-逐页 Native + MinerU 合并
-逐元素 OCR 合并
-XLSX Cell + MinerU Visual 自动去重
-跨 Provider Block 对齐
+逐页 Native + MinerU
+逐图片 / 逐图表 MinerU
+Visual Bundle
+跨 Provider Block 自动合并
+XLSX Native + MinerU Visual 去重
 复杂 Reading Order 重建
 ```
 
-这样先保证 Router 决策本身正确、可解释、可回归。
+11B.1 的目标是先把“什么时候应该整份 Native、什么时候应该整份 MinerU”做对并可解释。
 
-## 阶段 11B.2：受控 Hybrid（仅在真实测试证明必要时）
+## 阶段 11B.2：Selective Hybrid Visual Enhancement
 
-Hybrid 不是 11B 的默认目标，只在单一 Provider 明确无法完整覆盖、且两条路径具有互补价值时才进入。
+### 启动条件
 
-优先候选是复杂 XLSX：
+11B.2 不是默认必做项。只有同时满足以下条件才启动：
+
+1. 真实 Ground Truth 证明单一 Provider 无法完整覆盖。
+2. Native 与 MinerU 能力具有明确互补性。
+3. 可以稳定定位需要视觉增强的元素在源文档中的 Anchor。
+4. 可以通过单个 Visual Bundle 控制 MinerU 文件任务数。
+5. 可以做到事务原子性、稳定 Block ID 和来源可追溯。
+
+**优先候选：复杂 XLSX。**
+
+DOCX 只能在 XLSX Hybrid 已证明可控后再评估；PDF 与 PPT/PPTX 第一版继续 Whole-MinerU。
+
+### Hybrid 总体流程
 
 ```text
-Native
-→ Cell / Sheet / Formula
-
-MinerU
-→ Image / Chart / Visual
+Source XLSX
+   ↓
+Native Primary Parse
+   ├─ Sheet
+   ├─ Cell
+   ├─ Formula
+   └─ Native Table Blocks
+   ↓
+Visual Candidate Extractor
+   ├─ embedded image
+   ├─ screenshot
+   ├─ formula image
+   └─ only-if-needed visual chart candidate
+   ↓
+Visual Filter / Dedup
+   ↓
+visual_bundle.pdf + bundle_manifest.json
+   ↓
+ONE MinerU submission
+   ↓
+MinerU Visual Blocks
+   ↓
+Anchor-based Merge
+   ↓
+Unified DocumentBlock
 ```
 
-只有满足以下条件才允许实施：
+Native 是 Hybrid 的“主解析结果”，MinerU 是“视觉增强结果”，不得反过来用 MinerU 结果覆盖确定性公式原式或单元格真值。
 
-- 已有真实 Ground Truth 对照，证明两路确实互补。
-- 可以区分来源并避免重复正文。
-- Block ID、section、page 语义和 Citation 不被破坏。
-- 失败时不会留下半份混合结果。
-- 能明确回答“这段 Evidence 来自 Native 还是 MinerU”。
+### Visual Candidate 不等于所有媒体对象
 
-在满足前，不为了“功能看起来更强”提前做双路合并。
+不是所有图片都值得提交 MinerU。
+
+至少过滤：
+
+```text
+极小装饰图标
+重复 logo
+纯色背景
+完全重复内容 hash
+明确无知识语义的页眉 / 装饰图片
+```
+
+保留候选：
+
+```text
+截图
+含文字图片
+图表截图
+公式图片
+业务流程图
+其他可能承载独立知识的视觉对象
+```
+
+过滤规则必须配置化、可测试，不按测试 Marker 硬编码。
+
+### XLSX Chart 的处理优先级
+
+Excel 原生 Chart 不应一律先渲染成图片再送 MinerU。
+
+优先级：
+
+```text
+1. 能通过 OOXML / openpyxl 确定性读取的 chart title / series / category / value reference
+   → 优先结构化提取，零 MinerU 调用
+
+2. 只有视觉表达本身承载额外语义、或结构化读取不足时
+   → 才进入 Visual Candidate
+```
+
+这样可以进一步减少 MinerU 页数和额度消耗。
+
+如果当前运行环境无法可靠渲染原生 Excel Chart，不能伪造截图；应保留结构化 Chart 信息或明确进入 review，而不是为了 Hybrid 引入不稳定的 GUI 自动化。
+
+### Bundle Manifest
+
+每个视觉候选必须有稳定 `visual_id`，例如：
+
+```text
+visual_id
+source_doc_id
+source_type
+source_section
+source_anchor
+content_hash
+media_type
+width
+height
+bundle_page
+```
+
+例如 XLSX：
+
+```text
+visual_id      = visual-0003
+source_section = 销售分析
+source_anchor  = sheet=销售分析;anchor=D5:J20
+source_type    = embedded_image
+bundle_page    = 2
+```
+
+要求：
+
+- Bundle Page 只用于 MinerU 返回结果映射，不是原文档物理页码。
+- 不依赖 MinerU OCR 识别 `visual_id` 字符串来建立映射；映射来自本地 manifest。
+- 第一版建议“一候选一 Bundle Page”，简化映射和失败诊断。
+- Bundle 页数不得超过 MinerU 当前页限制；超过本地配置阈值时转 `mineru_whole` 或 `review`，不得继续生成超限任务。
+
+### Visual Bundle 文件额度原则
+
+对同一源文档、同一解析代次：
+
+```text
+hybrid_bundle
+→ 最多一个 MinerU Visual Bundle 提交
+```
+
+禁止：
+
+```text
+每个 image 一个 MinerU task
+每个 chart 一个 MinerU task
+每个 formula image 一个 MinerU task
+```
+
+同一文档内相同 `content_hash` 的视觉对象：
+
+- MinerU 只解析一次。
+- 可以在多个 Anchor 复用同一标准化视觉结果。
+
+未来阶段 12 Parse Cache 可进一步跨文档复用相同 `visual_hash`，但 11B.2 不提前实现完整缓存系统。
+
+### Merge 原则
+
+Hybrid Merge 必须以“原文档语义”为准，而不是以临时 Bundle 语义为准。
+
+XLSX Visual Block 合并后：
+
+```text
+section = 原 Sheet 名
+page = 1（沿用 XLSX 逻辑页约定，不把 bundle_page 当文档页）
+bbox = NULL
+source = mineru_cloud
+```
+
+顺序通过原始 `source_anchor` 插入 Native Block 流。
+
+稳定 Block ID 应基于：
+
+```text
+original doc_id
++ hybrid version
++ visual_id
++ visual-local block order
+```
+
+不得使用临时 Bundle 的随机文档 ID 作为最终业务 Block ID。
+
+### 去重原则
+
+Hybrid 最容易产生：
+
+```text
+Native Cell 已有文本
++ 图片 / 图表 OCR 又重复同一数字和标签
+```
+
+第一版只做保守去重：
+
+- 同一 `visual_id` 内精确 / 规范化文本重复可以去除。
+- Anchor 邻域内完全相同文本可以避免重复插入。
+- 不用 LLM 做不可解释的全文语义去重。
+- 不因为相似度高就删除可能承载新语义的视觉内容。
+
+### 原子性与失败处理
+
+Hybrid 必须事务化：
+
+```text
+Native 临时结果
++ Visual Bundle MinerU 结果
++ Merge
+→ 全部成功
+→ 一次事务替换最终 document_blocks
+```
+
+若 Visual Bundle：
+
+```text
+鉴权失败
+配额失败
+网络失败
+供应商失败
+映射失败
+Merge 失败
+```
+
+则：
+
+- 不持久化半份 Hybrid Block。
+- 不把 Native 半结果偷偷标为完整 `CHUNKING`。
+- Document 进入失败 / 明确 review 状态语义，并保留安全错误。
+- 不自动再追加第二次 Whole-MinerU 调用消耗额度；是否改用整份 MinerU 由显式重试 / 管理员决策。
 
 ## Fallback 规则
 
-Router 必须避免“悄悄降级”：
-
-- `auto` 经过 Preflight 选择 Native 后，如果 Parser 抛出明确的 `OCRRequiredError` / 内容完整性错误，可以 **最多一次** 改走 MinerU，并记录 fallback reason。
-- Preflight 已判断复杂并选择 MinerU 后，如果 MinerU 因鉴权、配额、网络、供应商失败而不可用，不得静默回退 Native 并把部分文本当完整结果；应失败并暴露原因。
+- `auto` 选择 Native 后，如果 Parser 抛出明确 `OCRRequiredError` / 完整性错误，可 **最多一次** 转 MinerU Whole，并记录 fallback reason。
+- Preflight 已选择 MinerU Whole 后，MinerU 失败不得静默退回已知不完整 Native。
+- Hybrid Bundle 失败不得逐元素重试，也不得自动升级为第二个 Whole-MinerU 文件任务。
 - 禁止 Native ↔ MinerU 循环回退。
-- Provider 未成功完成前不得持久化半份新 Block。
+- Provider 未成功完成前不得持久化半份最终 Block。
 
 ## Completeness Guard
 
-Parser 成功返回结构不等于完整性通过。
-
 至少检查：
 
-- Block 非空且存在有效正文。
+- Block 非空且有有效正文。
 - 页面 / Sheet / Slide 逻辑范围基本合理。
-- Preflight 发现的“需要视觉解析”信号不能在 Native 成功后被悄悄忽略。
-- Office MinerU 的 `bbox` 仍按阶段 11A 约定保持 `NULL`，不伪造原始坐标。
-- 不通过具体 Marker 字符串硬编码完整性判断；Marker 只属于测试 Ground Truth。
+- Preflight 的视觉风险信号没有被 Native 成功静默忽略。
+- Hybrid manifest 中每个 required visual candidate 都有明确结果：`parsed / filtered / reused / failed`。
+- Office MinerU `bbox = NULL` 约定不被破坏。
+- 不按 Marker 字符串硬编码完整性规则。
 
-复杂文档无法自动证明完整时，应保留明确的已知限制，不将“接口成功”误写为“语义完整”。
+复杂文档无法自动证明完整时，应暴露限制或进入 review，不把“API 成功”写成“语义完整”。
 
 ## Reading Order 原则
 
-阶段 10 / 11A 已观察到扫描 PDF、PPT/PPTX 等文件存在 Provider Reading Order 与视觉阅读顺序不完全一致的情况。
+阶段 10 / 11A 已观察到扫描 PDF、PPT/PPTX 等存在 Provider Reading Order 与视觉顺序不完全一致。
 
 因此：
 
-- 不用简单 `y` 坐标全局排序覆盖供应商顺序。
+- 不用简单全局 `y-sort` 覆盖供应商顺序。
 - 不跨页面重排。
 - 表格、公式等结构块不拆散排序。
-- 单栏页面如后续增加安全归一化，必须有独立测试并证明不会破坏双栏、表格、图文混排。
-- Reading Order Normalizer 若需要实现，应与 Router 决策解耦，不把复杂重排逻辑塞进 Preflight。
+- Reading Order Normalizer 与 Router / Hybrid Merge 解耦。
+- Hybrid XLSX 依赖 Anchor 插入，不依赖 MinerU 对整个文档的 Reading Order。
 
 ## 混合文档测试矩阵
 
-阶段 11B 开始前 / 实现过程中至少准备：
+阶段 11B 至少准备：
 
 ```text
 mixed.docx
-- Native 标题 / 正文
-- Native 表格
+- Native 标题 / 正文 / 原生表格
 - 图片文字
 - 图片公式
-- 后续 Native 正文
+- 后续正文
 
 mixed.xlsx
+- 多 Sheet
 - 单元格
 - 公式原式
-- 图表
-- 图片 / 截图
+- 原生 Chart
+- 嵌入图片 / 截图
+- 重复图片 hash
 
 mixed_page.pdf
 - Page 1 原生文本
@@ -1725,74 +1990,144 @@ mixed_same_page.pdf
 - 同页截图 / OCR-only 文字
 
 two_column.pdf
-- 明确双栏阅读顺序 Ground Truth
-
 complex_layout.pdf
-- 标题 / 多栏 / 表格 / 图片 / 页脚
 
 mixed.pptx
-- 文本框
-- 表格
-- 图表
-- 图片文字
+- 文本框 / 表格 / 图表 / 图片文字
 
 markdown_with_image_ref.md
-- Markdown 正文
 - 本地图片引用但附件未上传
-- 验证系统不会把缺附件误判为完整成功
 ```
 
-每份测试必须记录：
+11B.2 额外准备：
+
+```text
+xlsx_hybrid_bundle_1.xlsx
+- 5+ 视觉候选
+- 2 个完全重复图片
+- 原生公式
+- 原生 Chart
+- 图片 OCR Marker
+
+xlsx_hybrid_bundle_over_limit.xlsx
+- 视觉候选数量超过本地 Bundle 上限
+- 验证不会生成超限 MinerU 任务
+```
+
+每份测试记录：
 
 ```text
 expected_route
 expected_reason_codes
 expected_required_content
 expected_missing_if_native
+expected_missing_if_mineru
+expected_visual_candidates
+expected_bundle_submit_count
 expected_page / section / slide semantics
 ```
 
-先用真实结果决定阈值和策略，再固化 Router，不反过来为代码构造测试答案。
-
 ## 自动测试
+
+### 11B.1
 
 至少覆盖：
 
 ```text
 TXT / CSV → Native
 简单 DOCX → Native
-DOCX + media → MinerU
-DOCX + formula / drawing → MinerU
-PPT / PPTX → MinerU
-DOC / XLS → MinerU
+DOCX + media / formula / drawing → MinerU Whole
+PPT / PPTX → MinerU Whole
+DOC / XLS → MinerU Whole
 简单 XLSX → Native
-complex XLSX → 进入已验证的复杂策略 / 明确人工决策
+complex XLSX → 已验证 Whole-MinerU 或 Review
 简单 PDF → Native
-扫描 PDF → MinerU
-混合页 PDF → MinerU
-同页 Native + Image PDF → MinerU
+扫描 / 混合 PDF → MinerU Whole
 Markdown 无图片引用 → Native
-Markdown 缺本地图片附件 → 不得宣称完整成功
-parse_mode=native 显式覆盖
-parse_mode=mineru 显式覆盖
+Markdown 缺附件 → 不得宣称完整
+parse_mode=native / mineru 显式覆盖
 Native → MinerU 单次安全 fallback
 MinerU 失败不静默回退 Native
 Route Decision reason_codes 稳定
-阶段 1～11A 全量回归继续通过
+阶段 1～11A 回归全部继续通过
+```
+
+### 11B.2（只有启用 Hybrid 时）
+
+至少覆盖：
+
+```text
+一个 XLSX 有多个 visual candidates → 只产生 1 个 MinerU 文件提交
+重复 visual hash → 云端只解析一次，但可回插多个 Anchor
+Native 公式原式不会被 MinerU 计算结果覆盖
+Bundle page → visual_id → source anchor 映射稳定
+bundle_page 不写成 XLSX 文档 page
+MinerU visual block 的 section 回到原 Sheet
+bbox = NULL
+Hybrid Block ID 重试稳定
+Visual Bundle 失败 → 不写半份 blocks
+Hybrid 失败 → 不逐元素补发 MinerU
+超本地 visual / page 上限 → review 或已定义安全策略
+装饰 / 小图 / 重复 logo 不进入 Bundle
+Chart 可结构化读取时不无条件发送 MinerU
 ```
 
 ## 人工验收
 
+### 11B.1
+
 至少验证：
 
-1. 简单 Native 文档不会产生 MinerU 调用。
-2. 含视觉内容的 DOCX / PDF 能被 Preflight 识别并整份路由 MinerU。
-3. PPT/PPTX 默认 MinerU。
-4. 简单 XLSX 保留公式原式与 Sheet 信息。
-5. complex XLSX 使用真实 MinerU 结果决定 Whole-MinerU 或 Hybrid 分支，不允许凭猜测完成 Router。
-6. Route Decision 能看出为什么选择某 Provider。
-7. MinerU 配额 / 网络失败不会导致复杂文件静默降级成部分 Native 内容。
-8. 混合文档最终 Block 可追溯，不伪造页码 / bbox。
+1. 简单 Native 文档不产生 MinerU 调用。
+2. 含视觉内容的 DOCX / PDF 被识别并整份 MinerU。
+3. PPT/PPTX 默认 MinerU Whole。
+4. 简单 XLSX 保留公式原式与 Sheet。
+5. `XLSX → MinerU` 真实结果完成后，complex XLSX 得到明确 Whole / Review / Hybrid 候选结论。
+6. Route Decision 可解释。
+7. 配额 / 网络失败不会导致复杂文件静默降级。
+8. 最终 Block 不伪造页码 / bbox。
+
+### 11B.2
+
+只有真实对照证明 Hybrid 必要时再验收：
+
+1. 同一 XLSX 中多个图片 /视觉元素只产生 **1 个 Visual Bundle MinerU 文件任务**。
+2. Native Sheet / Cell / Formula 与视觉 OCR 结果均保留。
+3. 视觉结果按原 Sheet / Anchor 插回，不使用 Bundle Page 作为业务页码。
+4. 重复图片不重复消耗 MinerU 解析。
+5. Bundle 页数、文件大小与平台限制均被本地保护。
+6. 失败场景无半份最终 Block。
+7. 比较 Whole-MinerU、Native、Hybrid 三种结果的完整性与 MinerU 消耗，证明 Hybrid 确有收益后才保留该功能。
+
+## 配额与效率约束
+
+阶段 11B 必须同时记录“解析完整性”和“云端消耗”，不能只优化其一。
+
+建议指标：
+
+```text
+source_document_count
+mineru_file_submit_count
+mineru_files_per_source_document
+mineru_page_count
+native_route_count
+mineru_whole_route_count
+hybrid_bundle_route_count
+hybrid_visual_candidate_count
+hybrid_visual_filtered_count
+hybrid_visual_dedup_count
+hybrid_bundle_page_count
+```
+
+目标原则：
+
+```text
+普通 Native 文档 → 0 MinerU file
+MinerU Whole 文档 → 1 source document ≈ 1 MinerU file
+Hybrid 文档 → 1 source document ≈ 1 Visual Bundle MinerU file
+```
+
+除显式 Reparse / 人工重试外，不允许一个源文档因为多个视觉元素自动产生 N 个 MinerU 文件任务。
 
 ## 本阶段禁止事项
 
@@ -1801,25 +2136,35 @@ Route Decision reason_codes 稳定
 ```text
 把所有文件无脑交 MinerU
 把 Native 成功等同于完整解析
-按单个测试 Marker 写路由规则
-全局 y-sort 修复 Reading Order
-未经验证就做 XLSX 双路自动合并
-逐页 PDF Native/MinerU 自动拼接
-为了 Router 提前进入 Parse Cache / Chunk / Embedding / RAG
+每个图片 / 图表 / 公式单独发 MinerU
+按测试 Marker 写路由规则
+全局 y-sort 修 Reading Order
+未经真实 XLSX 对照就启用 Hybrid
+把 PDF / PPTX 一开始就做逐元素 Hybrid
+为了 Hybrid 引入不稳定 GUI 自动化截图
+Hybrid 失败后自动再提交 Whole-MinerU 造成不可控额度翻倍
+为了 Router 提前进入 Chunk / Embedding / RAG
 ```
 
 ## 完成标准
 
-- `auto` 基于“完整覆盖能力”而不是“是否能抽到文字”做决策。
-- 所有支持格式都有明确、可解释的 Route Decision。
-- 简单 Native 文档不额外消耗 MinerU API。
-- 扫描 / 复杂 / 混合文档不会因 Native 文本存在而静默漏掉主要视觉内容。
-- `parse_mode` 显式覆盖有效且不会绕过安全校验。
-- MinerU 失败时不会静默降级为已知不完整的 Native 成功。
-- complex XLSX 在真实云测试后明确选择 Whole-MinerU、Hybrid 或人工决策路径。
-- 混合 DOCX、XLSX、PDF、PPTX 与 Markdown 附件边界都有真实测试记录。
-- Router 决策与 Reading Order 问题分层处理，不用高风险排序逻辑掩盖 Provider 输出问题。
+### 11B.1 完成标准
 
+- `auto` 基于完整覆盖能力做决策。
+- 所有支持格式有可解释 Route Decision。
+- 简单 Native 文档 0 MinerU 调用。
+- 扫描 / 复杂 / 混合文档不会因 Native 能提取部分文本而静默漏主要视觉内容。
+- MinerU 失败不静默降级成已知不完整 Native。
+- complex XLSX 在真实云测试后明确进入 Whole-MinerU、Review 或 11B.2 候选。
+
+### 11B.2 完成标准（仅在启用时）
+
+- 同一源文档视觉增强默认最多一次 MinerU Visual Bundle 提交。
+- Native 确定性结构不被 MinerU 覆盖或降级。
+- Visual Candidate / Bundle / Manifest / Merge 全链路可解释。
+- Bundle 临时页语义不会污染原文档 page / section / Citation。
+- Merge 幂等、失败原子、Block ID 稳定。
+- 实测证明 Hybrid 相比 Native / Whole-MinerU 在“内容完整性 vs MinerU 消耗”上确有可量化收益。
 
 ---
 
@@ -1830,7 +2175,7 @@ Route Decision reason_codes 稳定
 
 ## Cache Key
 
-至少包含：
+Whole-document 解析至少包含：
 
 ```text
 file_hash
@@ -1842,13 +2187,28 @@ enable_table
 enable_formula
 ```
 
+如果阶段 11B.2 最终启用 Hybrid Visual Bundle，缓存还需要区分：
+
+```text
+route_strategy
+visual_extractor_version
+bundle_manifest_hash
+visual_content_hash
+```
+
+其中 `visual_content_hash` 用于后续复用完全相同的图片 / 截图视觉结果；不能只按临时 Bundle 文件 hash 缓存，否则不同 Bundle 中的同一视觉对象无法复用。
+
 解析结果需要本地持久化，例如：
 
 ```text
 data/parsed/{doc_id}/
 ├── raw/mineru_result.zip
 ├── content_list.json
-└── full.md
+├── full.md
+└── hybrid/                 # 仅启用 Hybrid 时
+    ├── bundle_manifest.json
+    ├── visual_bundle.pdf
+    └── normalized_visual_blocks.json
 ```
 
 实际目录通过配置管理。
@@ -1857,11 +2217,19 @@ data/parsed/{doc_id}/
 
 ```text
 文件未变化
-+ Provider 未变化
++ Provider / Route Strategy 未变化
 + 模型和解析参数未变化
 → 命中 Parse Cache
 → 不调用 MinerU
 → 复用解析结果
+
+Hybrid 场景进一步允许：
+
+相同 visual_content_hash
++ 相同 MinerU model / options
++ 相同 visual extractor version
+→ 复用已标准化视觉结果
+→ 不把同一图片再次提交 MinerU
 ```
 
 `Reindex` 默认：
@@ -1876,7 +2244,7 @@ Parse Cache
 只有明确的 `Reparse / Force Reparse` 才允许重新调用 MinerU。
 
 ## 完成标准
-正常 Reindex 不增加 MinerU 提交次数；强制 Reparse 才重新消耗云 API。
+正常 Reindex 不增加 MinerU 提交次数；强制 Reparse 才重新消耗云 API。若启用 Hybrid，相同视觉对象的缓存命中也不得增加 MinerU 文件任务数。
 
 ---
 
@@ -2807,10 +3175,15 @@ Table Recognition Accuracy
 Formula Recognition Accuracy
 Parser Route Decision Accuracy
 Native Safe Hit Rate
-MinerU Route Rate
+MinerU Whole Route Rate
+Hybrid Bundle Route Rate（若启用）
 Critical False-Native Count（应为 0）
 Route Fallback Count
+Hybrid Visual Recall（若有 Ground Truth）
+Hybrid Duplicate Block Rate
+MinerU Files Per Source Document
 Parse Cache Hit Rate
+Visual Cache Hit Rate（若启用 Hybrid Cache）
 MinerU API Retry Count
 MinerU Rate Limit / 429 Count
 ```
@@ -2845,6 +3218,9 @@ total_ms
 ```text
 router_preflight_ms
 parse_ms
+visual_extract_ms
+visual_bundle_build_ms
+hybrid_merge_ms
 mineru_submit_ms
 mineru_wait_ms
 mineru_download_normalize_ms
@@ -2853,7 +3229,13 @@ embedding_ms
 index_ms
 mineru_api_submit_count
 mineru_api_query_count
+mineru_file_submit_count
+mineru_page_count
+hybrid_visual_candidate_count
+hybrid_visual_dedup_count
+hybrid_bundle_page_count
 parse_cache_hit
+visual_cache_hit
 ```
 
 至少设计两组不同知识库规模进行对比。
@@ -2901,7 +3283,8 @@ Demo 5：
 
 ```text
 上传 CSV / XLSX / PPTX / DOC 等多格式文档
-→ Native 或 MinerU 自动路由
+→ 完整性优先 Router
+→ Native / MinerU Whole /（若启用）Hybrid Visual Bundle
 → READY
 → 跨格式知识库统一问答与 Evidence
 ```
@@ -3032,29 +3415,35 @@ Codex 必须遵守：
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
 26. 阶段 11B 的 Router 必须遵循“完整性优先”：只有能合理证明 Native 完整覆盖主要信息时才走 Native；复杂 / 不确定内容不得因为 Native 能抽到部分文本就判成功。
-27. 阶段 11B 第一版以整份文档单 Provider 路由为主，不提前实现逐页 / 逐元素 Native + MinerU 自动合并。
-28. MinerU 失败不得静默回退到已知不完整的 Native 结果；Native 明确触发 OCR / 完整性错误时，`auto` 最多允许一次 Native → MinerU 安全 fallback，并记录原因。
-29. XLSX 保留 Native 的 Sheet / Cell / 公式原式优势；复杂 XLSX 是否 Whole-MinerU 或 Hybrid 必须由真实 XLSX MinerU 对照测试决定，不能从 XLS 结果类推。
-30. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
-31. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
-32. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
-33. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
-34. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
-35. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
-36. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
-37. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
+27. 阶段 11B.1 第一版以整份文档单 Provider 路由为主，不提前实现逐页 / 逐元素 Native + MinerU 自动合并。
+28. MinerU 失败不得静默回退到已知不完整的 Native 结果；Native 明确触发 OCR / 完整性错误时，`auto` 最多允许一次 Native → MinerU Whole 安全 fallback，并记录原因。
+29. XLSX 保留 Native 的 Sheet / Cell / 公式原式优势；复杂 XLSX 是否 Whole-MinerU、Review 或进入 11B.2 Hybrid 必须由真实 XLSX MinerU 对照测试决定，不能从 XLS 结果类推。
+30. 阶段 11B.2 若启用 Hybrid，禁止按图片 / 图表 / 公式逐元素创建 MinerU 文件任务；同一源文档的视觉候选必须优先聚合成单个 Visual Bundle，一次提交，再通过本地 manifest 回插。
+31. Visual Bundle 只降低文件任务数，不等于不消耗页面额度；必须同时保护 bundle 页数、文件大小、MinerU 200 页限制和平台高优先级页额度。
+32. Hybrid Merge 必须保留 Native 的确定性结构，不得用 MinerU 计算结果覆盖 XLSX 公式原式；临时 bundle_page 不得作为原文档业务页码。
+33. Hybrid 失败不得逐元素补发 MinerU，也不得自动再提交 Whole-MinerU 造成不可控额度翻倍；失败后由显式重试 / 管理员决策处理。
+34. PDF 与 PPT/PPTX 第一版继续 Whole-MinerU，不因 Hybrid 能力存在就提前做逐页 / 逐元素拼接；DOCX Hybrid 只在 XLSX Hybrid 验证稳定后再评估。
+35. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
+36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
+37. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
+38. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
+39. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
+40. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
+41. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
+42. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
 
 
 ---
 
 
-# 46.1 当前工程基线（V0.5）
+# 46.1 当前工程基线（V0.7）
 
 ```text
 阶段 1～9：已完成并回归通过
 阶段 10：MinerU Cloud Provider 已完成真实 API 人工验收
 阶段 11A：当前开发阶段
-阶段 11B：等待 11A 和多格式真实样本验收后开始
+阶段 11B.1：等待 11A 和多格式真实样本验收后开始；先做 Whole-document Conservative Router
+阶段 11B.2：仅在真实对照证明必要时，评估 Selective Hybrid Visual Bundle
 阶段 12～15：未开始
 阶段 15A：计划中的 LlamaIndex Adapter，等待 pgvector 基线完成后开始
 阶段 16+：未开始
@@ -3087,7 +3476,15 @@ XLS MinerU：云链路成功，但复杂样本出现公式原式退化为计算�
 XLSX MinerU：必须单独真实测试，不能用 XLS 结果推断。
 ```
 
-因此阶段 11B 已明确采用“完整性优先的保守 Router”，而不是简单 Native-first 或 Everything-to-MinerU；11B 尚未开始。
+当前对 Hybrid 的计划边界：
+
+```text
+11B.1：simple → Native；complex → MinerU Whole / Review
+11B.2：只有真实 XLSX 对照证明两路互补时，才做 Native Primary + Visual Bundle + Anchor Merge
+同一源文档多个视觉元素 → 默认最多 1 个 MinerU Bundle 文件任务，而不是 N 个元素 N 次提交
+```
+
+因此阶段 11B 已明确分两步：11B.1 先做“完整性优先”的 Whole-document Conservative Router；11B.2 仅在单一 Provider 确实无法完整覆盖、且 Native 与 MinerU 可稳定互补时，才启用 Selective Hybrid Visual Enhancement。Hybrid 以 XLSX 为首选候选，同一源文档的多个视觉元素通过单个 Visual Bundle 一次 MinerU 提交，禁止逐元素消耗文件额度。11B 尚未开始。
 
 LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：完成 Parse Cache、Chunk、BGE-M3 和 pgvector 后，在阶段 15A 建立 `DocumentChunk ↔ TextNode / NodeWithScore` 适配边界，再进入 Dense / BM25 / Query Fusion / Reranker / DeepSeek RAG。
 
@@ -3109,7 +3506,7 @@ LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：�
 → 进入下一阶段
 ```
 
-每个阶段以“能运行、能测试、能解释”为完成标准，不以“代码写完”为完成标准。
+每个阶段以“能运行、能测试、能解释”为完成标准，不以“代码写完”为完成标准。11B.2 还必须额外证明 Hybrid 在内容完整性与 MinerU 文件 / 页面消耗之间具有真实收益，否则不保留该复杂度。
 
 LlamaIndex 相关开发同样遵循阶段闸门：未完成阶段 15 的 pgvector 真相表前，不提前进入阶段 15A；阶段 15A 只验证 Adapter，不直接跳到完整 RAG。
 
