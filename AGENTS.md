@@ -4,9 +4,24 @@
 
 DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独立运行、测试和演示的非结构化 Knowledge Base Service。未经用户要求，不开发 NL2SQL、Schema Linking、Coordinator、Fusion 或其他成员模块。
 
-- 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.7）；历史计划仅供参考，不重新实现阶段 1～11A。
-- 当前为 **11B.1：整份文档 Router v1**，代码已建立，真实路由验收与 XLSX Native/MinerU A/B 仍待完成。
-- 已有 FastAPI、数据库模型与迁移、管理员接口、多选上传、Celery、六类 Native Parser、MinerU Cloud 和业务日志。迁移 head 为 `0004_mineru_jobs`；阶段 10 图片、扫描、表格、公式与顺序已完成真实 API 人工验收。
+- 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.8）；历史计划仅供参考，不重新实现已有阶段。
+
+### 当前开发进度
+
+当前阶段：**11B.1：整份文档 Router v1，已实现，待真实人工验收。**
+
+| 阶段 | 已完成任务 / 当前状态 |
+|---|---|
+| 0～3 | 工程初始化、Python 3.11、FastAPI、PostgreSQL/pgvector/Redis 连接、Celery 双队列 |
+| 4～7 | 知识库数据模型与迁移、管理员 API、文件上传/存储/去重、异步任务及状态查询/重投 |
+| 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
+| 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
+| 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
+| 配套功能 | 已实现原接口多选上传、中文业务日志及按日期合并日志文件 |
+| 11B.1 | 已实现预检、整份 Native/MinerU/review 路由、完整性 Guard；待真实路由验收及 XLSX A/B 对照 |
+| 11B.2 及后续 | 未开展，等待用户确认 |
+
+- 当前迁移 head 为 `0004_mineru_jobs`；“已实现”不等于已完成真实 API 人工验收。
 - 成功解析只写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`，不等于可检索或 `READY`。
 - 未经用户确认，不进入 11B.2 Selective Hybrid、Parse Cache、Chunk、Embedding、Retrieval、RAG；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 
@@ -42,7 +57,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 分组顺序：应用运行 → 数据库与缓存 → 异步任务 → 模型与 LLM → OCR/外部服务 → 存储与可选功能。
 - 启动、部署、API 路径/参数/响应/错误、Worker/迁移、模型下载/加载或配置变化时，**同次更新 README**；给出可执行命令、地址和必要限制，不把计划当成已实现。
 - README 是用户说明书，只保留用途、环境、配置、部署、启动、接口和故障排查；不放阶段总结、内部设计、业务测试脚本、pytest 命令或验收统计。
-- AGENTS 只保留开发规则、关键约束与简短当前基线，不追加逐次开发记录。详细路线、契约、设计与人工验收放 `docs/`，测试代码放 `tests/`；根目录说明文档仅保留 README/AGENTS，旧计划放 `docs/archive/`。
+- 阶段有实际进展时，同步更新本文件第 1 节进度清单，简要记录已完成任务、当前阶段和待验收事项，区分已实现与已验收，不追加逐次开发记录或实现细节。详细路线、契约、设计与人工验收放 `docs/`，测试代码放 `tests/`；根目录说明文档仅保留 README/AGENTS，旧计划放 `docs/archive/`。
 - 新增或移动文件/目录时判断是否更新 `.gitignore`；工程文档必须可提交，素材和本地资料按需忽略，移动文档同步修复链接。源代码与配置不因文档规则迁出根目录。
 - 不自动提交或 `git push`，除非用户明确要求；实际变更后提供中文 Commit Message。
 - 用户可见的本地文件必须用可点击 Markdown 链接：正斜杠绝对路径以 `/D:/` 等驱动器开头，含空格的目标用尖括号包裹，不使用反斜杠或裸路径。
