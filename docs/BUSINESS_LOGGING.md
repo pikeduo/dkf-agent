@@ -19,6 +19,8 @@
 | `upload.stored` | 原件和 Document 已提交，包含文件名、格式、实际字节数、doc_id/kb_id/task_id；不代表任务执行成功 |
 | `upload.failed` | 磁盘、数据库或提交结果不确定等安全分类 |
 | `upload.constraint_conflict / cleanup_failed` | 数据库唯一约束冲突、失败上传的文件补偿清理失败；需结合最终 HTTP 状态及数据库核对 |
+| `upload.batch_rejected / batch_started` | 批次数量拒绝/预检后开始逐文件处理，包含 `file_count`；知识库或配置预检失败仅有 HTTP 请求日志 |
+| `upload.batch_item / batch_finished` | 逐文件的输入序号、状态码、已知 doc_id、耗时；最终的总数、接收/失败数量和批次耗时，不记录结果正文 |
 | `document.dispatched / dispatch_failed` | 原生消息投递确认/失败；确认成功不代表 Worker 已消费 |
 | `task.started / finished` | Celery 本次执行及状态/耗时；云端短任务 SUCCESS 不代表整份文档完成 |
 | `parse.started / validated` | 原生 Parser 开始/统一输出校验通过；仍可能写库失败 |
@@ -43,7 +45,7 @@ python -m pytest tests/test_business_logging.py -q
 数据库测试复用现有临时 schema 与事务回滚夹具，Mock MinerU/Broker，不消耗真实 API 额度、不向 public 写业务数据：
 
 ```powershell
-python -m pytest tests/business_logging_smoke.py -q
+python -m pytest tests/business_logging_smoke.py tests/batch_upload_smoke.py -q
 ```
 
 同时执行现有 Parser、接口、任务、迁移及 MinerU 回归测试。自动测试不会证明真实 Windows Worker 重启、Linux prefork 或真实 MinerU 网络链路已验收。
@@ -57,5 +59,6 @@ python -m pytest tests/business_logging_smoke.py -q
 5. 手动调用显式 MinerU 上传，用少量真实图片或 PDF 验证批次、上传、远端状态、ZIP、Adapter 和落库事件；按 job_id/doc_id 关联。必须对照 `document_blocks` 与原件，Mock 通过不能替代真实 API 验证。
 6. 查询一份已有失败任务的详情与安全错误码日志；若要验证重试，使用专门验收环境的可控临时错误，不为了测试中断共用 PostgreSQL/Redis 服务。失败日志不能出现落库成功事件。
 7. 检查业务文件不含 Token、密码、签名链接或完整正文。不要把真实密钥复制到搜索命令、终端输出或提交记录中。轮转在自动测试中已使用小容量验证；真实持续运行时检查备份和目录容量并安排历史文件归档。
+8. 在 Swagger 的普通批量入口选择两份新 TXT/MD，以及一份重复文件和空文件，核对逐项 201/409/400 与汇总数量。用响应 `X-Request-ID` 关联 `upload.batch_started / batch_item / batch_finished`；每个成功项独立 doc_id/task_id，后续 Worker 各有解析日志。显式 MinerU 批量入口用少量新图片/PDF 验证各自 parse_job 与真实落库，不能以批次 200 当作解析成功。
 
 真实 API 请求会消耗额度；本次日志功能不自动发起真实 MinerU 调用、不安装基础服务、不开发 Router、Cache、Chunk、Embedding 或 RAG。

@@ -15,7 +15,10 @@ from app.api.admin_knowledge_bases import (
 from app.core.config import get_settings
 from app.core.file_formats import MINERU_TYPES
 from app.models import Document, DocumentParseJob
+from app.schemas.batch_upload import BatchUploadResponse
+from app.schemas.knowledge_base import DocumentResponse
 from app.schemas.parse_job import ParseJobResponse
+from app.services.batch_upload import store_batch, validate_batch
 from app.services.document_upload import store_document
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import create_job, lock_job
@@ -124,6 +127,43 @@ def upload_mineru_document(
         return start_job(session, session.get(Document, saved.doc_id), settings)
     finally:
         file.file.close()
+
+
+@router.post(
+    "/{kb_id}/mineru/documents/batch",
+    response_model=BatchUploadResponse,
+    summary="批量上传并逐文件显式提交 MinerU 云端解析",
+    responses={
+        404: {"description": "知识库不存在"},
+        413: {"description": "批次超过 50 个文件"},
+    },
+)
+def upload_mineru_documents(
+    kb_id: UUID,
+    session: AdminSession,
+    files: Annotated[
+        list[UploadFile],
+        File(description="1～50 份 PDF、图片或 Office；每份独立云任务"),
+    ],
+) -> BatchUploadResponse:
+    """只扩展显式上传入口，不合并云任务、不改变共享频控；单项错误不撤销已提交文件。"""
+
+    try:
+        validate_batch(files)
+        require_knowledge_base(session, kb_id)
+        settings = require_configuration()
+
+        def dispatch(response: DocumentResponse) -> ParseJobResponse:
+            """复用当前单文档云任务建立与投递，仍为每份原件保留独立任务身份。"""
+
+            return start_job(session, session.get(Document, response.doc_id), settings)
+
+        return store_batch(
+            session, kb_id, files, settings, dispatch, allowed_types=MINERU_TYPES
+        )
+    finally:
+        for upload in files:
+            upload.file.close()
 
 
 @router.post(

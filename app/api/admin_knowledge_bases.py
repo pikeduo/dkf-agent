@@ -12,12 +12,14 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_session
 from app.models import Document, KnowledgeBase
+from app.schemas.batch_upload import BatchUploadResponse
 from app.schemas.knowledge_base import (
     DocumentResponse,
     KnowledgeBaseCreate,
     KnowledgeBaseResponse,
     PageResponse,
 )
+from app.services.batch_upload import store_batch, validate_batch
 from app.services.document_dispatch import publish_document
 from app.services.document_processing import transition_document
 from app.services.document_upload import store_document
@@ -181,13 +183,53 @@ def upload_knowledge_base_document(
     try:
         require_knowledge_base(session, kb_id)
         response = store_document(session, kb_id, file, get_settings())
-        if not publish_document(session, response.doc_id, response.task_id):
-            session.expire_all()
-            document = session.get(Document, response.doc_id)
-            return DocumentResponse.model_validate(document)
-        return response
+        return dispatch_uploaded_document(session, response)
     finally:
         file.file.close()
+
+
+def dispatch_uploaded_document(
+    session: Session, response: DocumentResponse
+) -> DocumentResponse:
+    """复用单文件的提交后投递行为，投递失败时返回数据库中的真实文档状态。"""
+
+    if not publish_document(session, response.doc_id, response.task_id):
+        session.expire_all()
+        return DocumentResponse.model_validate(session.get(Document, response.doc_id))
+    return response
+
+
+@router.post(
+    "/{kb_id}/documents/batch",
+    response_model=BatchUploadResponse,
+    summary="批量上传文档并逐文件投递 Native 任务",
+    responses={
+        404: {"description": "知识库不存在"},
+        413: {"description": "批次超过 50 个文件"},
+    },
+)
+def upload_knowledge_base_documents(
+    kb_id: UUID,
+    session: AdminSession,
+    files: Annotated[
+        list[UploadFile], File(description="1～50 个文件，每个文件独立创建 Document")
+    ],
+) -> BatchUploadResponse:
+    """批次预检后逐文件上传；HTTP 200 表示逐项报告，具体成功或失败见 items。"""
+
+    try:
+        validate_batch(files)
+        require_knowledge_base(session, kb_id)
+
+        def dispatch(response: DocumentResponse) -> DocumentResponse:
+            """只投递当前单文件的 Native 任务，不自动回退云端解析。"""
+
+            return dispatch_uploaded_document(session, response)
+
+        return store_batch(session, kb_id, files, get_settings(), dispatch)
+    finally:
+        for upload in files:
+            upload.file.close()
 
 
 def require_document(

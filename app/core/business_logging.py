@@ -42,6 +42,10 @@ FIELDS = {
     "task_name",
     "step",
     "upload_complete",
+    "file_count",
+    "file_index",
+    "accepted_count",
+    "failed_count",
 }
 LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
