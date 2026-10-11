@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentParseJob
+from app.parsers.routing.contracts import RouteDecision
+from app.parsers.routing.guard import CompletenessError, guard_result
 from app.services.document_processing import (
     persist_blocks,
     source_path,
@@ -42,9 +44,14 @@ def local_file(document: Document, job: DocumentParseJob) -> LocalFile:
 
 
 def create_job(
-    session: Session, document: Document, settings: Settings
+    session: Session,
+    document: Document,
+    settings: Settings,
+    *,
+    routing_task_id: UUID | None = None,
+    route_decision: dict | None = None,
 ) -> DocumentParseJob:
-    """在文档行锁内创建有效解析身份；相同活动任务返回原记录，不做完成结果缓存。"""
+    """创建有效云解析身份；只允许当前路由代次从 PARSING 交接，不提供完成结果缓存。"""
 
     document = session.scalar(
         select(Document)
@@ -68,10 +75,24 @@ def create_job(
         ):
             return active
         raise MinerUError("ACTIVE_JOB", "文档已有其他有效解析任务，不重复提交")
-    if document.status not in {"UPLOADED", "FAILED"}:
+    handoff = (
+        document.status == "PARSING"
+        and routing_task_id is not None
+        and document.processing_task_id == routing_task_id
+    )
+    if document.status not in {"UPLOADED", "FAILED"} and not handoff:
         raise MinerUError(
             "DOCUMENT_STATE", "文档已进入处理阶段，不提供 Reparse 或 Reindex"
         )
+    if route_decision is not None:
+        # 决策只作内部元数据，不进入官方请求参数，也不改变供应商解析身份 Hash。
+        checked = RouteDecision.model_validate(route_decision)
+        if (
+            checked.route_strategy != "mineru_whole"
+            or checked.file_type != document.file_type
+        ):
+            raise MinerUError("ROUTE_INVALID", "路由决策与云解析原件不一致")
+        options = options | {"_route_decision": checked.model_dump(mode="json")}
     job_id = uuid4()
     job = DocumentParseJob(
         job_id=job_id,
@@ -183,6 +204,8 @@ def submit_step(
         # 申请结果先提交，再开始 PUT；临时上传失败继续使用同一 URL 与 batch。
         session.commit()
         log_event("mineru.batch_created", **batch_log)
+        if "_route_decision" in job.parse_options:
+            log_event("router.cloud_submitted", **batch_log, mineru_file_submit_count=1)
         locked = lock_job(session, job_id)
         if not locked:
             return "skipped", 0
@@ -244,6 +267,12 @@ def check_step(
     )
     if job.state == "failed":
         error = result_failure(result)
+        if "_route_decision" in job.parse_options:
+            # Router 每代次最多一份源文件任务；已终止的远端失败由管理员决定是否重新提交。
+            raise MinerUError(
+                "ROUTED_REMOTE_FAILED",
+                "MinerU 远端解析失败，未自动改用 Native 或追加新批次，请人工核对",
+            )
         if error.retryable and job.retry_count < settings.mineru_max_retries:
             # 仅远端明确终止后可申请新 batch；旧外部任务已终态，不同时存在有效任务。
             job.batch_id = job.upload_url = job.upload_expires_at = None
@@ -279,6 +308,26 @@ def check_step(
         job_id=job_id,
         block_count=len(parsed.blocks),
     )
+    if "_route_decision" in job.parse_options:
+        try:
+            guard_result(
+                parsed,
+                RouteDecision.model_validate(job.parse_options["_route_decision"]),
+            )
+        except CompletenessError as exc:
+            log_event(
+                "router.guard_failed",
+                doc_id=document.doc_id,
+                job_id=job_id,
+                error_code="COMPLETENESS",
+            )
+            raise MinerUError("COMPLETENESS", str(exc)) from None
+        log_event(
+            "router.guard_passed",
+            doc_id=document.doc_id,
+            job_id=job_id,
+            route_strategy="mineru_whole",
+        )
     persist_blocks(session, document, parsed)
     transition_document(document, "CHUNKING")
     job.state, job.is_active = "done", False

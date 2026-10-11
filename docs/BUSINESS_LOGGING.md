@@ -4,6 +4,8 @@
 
 现有 FastAPI、上传与 Celery 解析链路采用 Python 标准库业务日志，不增加依赖、不改变 API 请求体、任务参数、状态机、重试次数、限流或落库约束。启动和 `LOG_*` 配置见 [README](../README.md#运行日志)。
 
+上述限制指日志设施自身；11B.1 的可选路由接口和任务约定见 [Router 说明](PARSER_ROUTER.md)。路由继续复用每日合并文件，不新增分散的日志。
+
 每行使用 UTF-8 中文可读文本，固定前缀为“本机时间（含毫秒及 UTC 偏移） | 级别 | API/Worker | 中文事件说明 | event=事件码 | pid=进程号”，后接适用的白名单字段。关联编号保留 `request_id / doc_id / kb_id / task_id / job_id / batch_id` 原名，其他摘要按固定顺序使用中文标签，例如 `文件 / 接口 / HTTP状态 / 状态 / Block数 / 耗时_ms / 错误码`。未知合法事件显示“业务事件”并保留事件码；非法事件显示 unknown，不格式化任意消息参数或异常堆栈。字段标量独立引用，字符串清理控制字符、限制长度并转义竖线，不能伪造新行或分隔字段；不是整行 JSON，不在行尾附加 JSON 对象。非有限浮点数舍弃，不因此丢掉事件。
 
 所有进程按事件发生时的本机日期写入同一 `knowledge-service-YYYY-MM-DD.log`，跨日切换目标文件，不重命名/覆盖旧文件，重启不会再增加 PID 文件。时间与文件日期使用同一本机时区。HTTP 使用路由模板，不写用户原始路径、查询串、请求头或正文。响应通常含服务生成的 `X-Request-ID`，不信任客户端提供的同名头；框架兜底未处理异常的 500 响应可能没有该头。Celery 投递头携带请求编号，连续的短任务和重试可关联；旧消息和命令行直接提交的任务没有 HTTP 请求编号。进程崩溃、队列确认丢失、磁盘故障等情况下不能保证每个事件都记录，这是排障信息，不是强一致审计或恢复机制。
@@ -35,6 +37,10 @@
 | `mineru.batch_created / upload_complete / remote_state` | 已提交批次检查点、上传完成检查点、收到供应商单文件状态；远端 done 仍可能下载或落库失败 |
 | `mineru.result_downloaded / adapter_validated / blocks_persisted` | ZIP 下载完成、统一结构校验通过、Block 与任务/文档状态已事务提交 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
+| `router.decided / review / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
+| `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |
+| `router.cloud_submitted` | 已确认源文件 batch，云文件提交数=1；重复日志需按 job_id/batch_id 去重 |
+| `router.cloud_dispatch_failed / finished` | 云交接确认失败/路由任务结束，不等于最终解析完成 |
 
 `parse.persisted / mineru.blocks_persisted` 只表示代码校验与事务成功，不保证 OCR 全量识别、公式语义或任意复杂布局顺序正确，不代表 READY。真实正文、页码与 bbox 仍需查询 `document_blocks` 并对照原件。
 

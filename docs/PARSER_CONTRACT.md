@@ -4,7 +4,7 @@
 
 `ParsedDocument`、`ParsedBlock` 与 `BaseParser` 使用已有 Pydantic，契约及具体 Parser 均不依赖 SQLAlchemy、Celery、Redis、Embedding 或 RAG。任务服务负责状态机和数据库持久化，Parser 只读取原件并返回统一结构。
 
-已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。该路径不调用 OCR 或外部 API，不生成 Chunk、Embedding、索引或 `READY`。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)，六种 Office 可以显式提交，不自动路由。
+已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式仍为旧 Native。
 
 ## 统一结构
 

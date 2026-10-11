@@ -64,6 +64,13 @@ def execute_step(task, job_id: str, step: str) -> dict:
             action, value = (submit_step if step == "submit" else check_step)(
                 session, identifier, provider, settings
             )
+            job = session.get(DocumentParseJob, identifier)
+            route_summary = {}
+            if job is not None and "_route_decision" in job.parse_options:
+                route_summary = {
+                    "route_decision": job.parse_options["_route_decision"],
+                    "mineru_file_submit_count": int(job.batch_id is not None),
+                }
         if action in {"submit", "check"}:
             publish_step(identifier, action, value)
         summary = {
@@ -75,6 +82,7 @@ def execute_step(task, job_id: str, step: str) -> dict:
                 "check": "scheduled_check",
             }[action],
             **({"block_count": value} if action == "done" else {}),
+            **route_summary,
         }
         log_event(
             "mineru.step_finished",

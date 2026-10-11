@@ -28,6 +28,7 @@ docs/*
 !docs/MINERU_CLOUD.md
 !docs/PARSER_CONTRACT.md
 !docs/BUSINESS_LOGGING.md
+!docs/PARSER_ROUTER.md
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

@@ -15,12 +15,15 @@ from app.tasks.documents import process_document
 PUBLISH_ERROR = "异步任务投递失败，请检查 Redis 与 CPU Worker 配置后重新投递"
 
 
-def publish_document(session: Session, doc_id: UUID, task_id: UUID) -> bool:
-    """投递携带当前任务标识的消息；投递失败仅标记尚未开始的当前任务为 FAILED。"""
+def publish_document(
+    session: Session, doc_id: UUID, task_id: UUID, parse_mode: str | None = None
+) -> bool:
+    """提交后投递当前代次及可选模式；省略模式保持旧消息格式，失败不删原件。"""
 
     try:
+        options = {} if parse_mode is None else {"kwargs": {"parse_mode": parse_mode}}
         process_document.apply_async(
-            args=[str(doc_id)], task_id=str(task_id), queue="default_queue"
+            args=[str(doc_id)], task_id=str(task_id), queue="default_queue", **options
         )
         log_event(
             "document.dispatched", doc_id=doc_id, task_id=task_id, queue="default_queue"

@@ -2,9 +2,9 @@
 
 DKF-Agent（Data-Knowledge Fusion Agent）的 `knowledge-service` 用于非结构化知识库建设与问答。本文说明安装、配置、启动和接口使用。
 
-当前提供知识库管理、上传、原生解析与显式 MinerU Cloud 解析入口。TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 支持原生解析；DOC/DOCX、PPT/PPTX、XLS/XLSX、图片及扫描/复杂 PDF 可显式提交 MinerU 官方精准解析 API V4（需配置 Token）。PDF/图片主链路已完成人工验收，新增 Office 云解析仍需用真实文件验证。尚无自动 Parser 路由、切片、索引或问答，上传和解析成功不代表可以检索。
+当前提供知识库管理、上传、原生解析、显式 MinerU Cloud 与可选的整份文档自动路由。TXT、Markdown、CSV、DOCX、XLSX 和简单文本型 PDF 支持原生解析；图片、Office 及扫描/复杂 PDF 可提交 MinerU 官方精准解析 API V4（需配置 Token）。复杂 XLSX 在自动模式下先要求人工复核；不提供 Hybrid、切片、索引或问答，上传和解析成功不代表可以检索。
 
-开发与验收文档统一放在 `docs/`：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)、[Parser 契约](docs/PARSER_CONTRACT.md)、[MinerU Cloud 人工验收](docs/MINERU_CLOUD.md)。本文仅保留部署和使用说明。
+开发与验收文档统一放在 `docs/`：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)、[Parser 契约](docs/PARSER_CONTRACT.md)、[MinerU Cloud 人工验收](docs/MINERU_CLOUD.md)、[整份路由验收](docs/PARSER_ROUTER.md)。本文仅保留部署和使用说明。
 
 ## 1. 运行环境
 
@@ -68,6 +68,14 @@ MINERU_IS_OCR=true
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
+# 路由预检：PDF 面积为页面占比；其余上限沿用模板
+ROUTER_PDF_IMAGE_AREA_RATIO=0.01
+ROUTER_PDF_DRAWING_AREA_RATIO=0.01
+ROUTER_PDF_DRAWING_COUNT=6
+ROUTER_PDF_MIN_TEXT_CHARS=20
+ROUTER_PDF_MAX_PAGES=1000
+ROUTER_PDF_MAX_LINES_PER_PAGE=2000
+ROUTER_XML_PART_MAX_MB=16
 ```
 
 - 将 `your_password` 替换为本地密码；连接 URL 中的特殊字符需进行百分号编码。真实密码、密钥及 `.env` 不得提交到仓库。
@@ -77,6 +85,7 @@ MAX_UPLOAD_SIZE_MB=50
 - 原生解析无需 MinerU 或 DeepSeek 密钥。云解析仅需要在本机 `.env` 填写 `MINERU_API_TOKEN`，从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取；API 与 Worker 使用同一配置。Token 错误或过期由你手动替换，程序不自动刷新。
 - `POSTGRES_*`、`REDIS_PORT`、`OCR_PROVIDER`、`VOLCENGINE_*` 为历史配置，应用不读取；当前不接入火山 / 百度 OCR。
 - 修改配置后重启 API 和 Worker。使用 Uvicorn 命令启动时，监听地址和端口以命令行参数为准。
+- `ROUTER_PDF_*` 控制逐页预检：图片/绘图面积占比默认 1%，绘图数量阈值 6，视觉页少于 20 个文本字符视为文本不足；最多检查 1000 页、每页 2000 行。`ROUTER_XML_PART_MAX_MB` 默认 16 MiB，超限明确要求人工复核，不执行部分预检。这些阈值只是风险指标，不保证语义完整，降低视觉敏感度可能遗漏内容；MinerU 的 200 页限制仍独立生效。
 
 ### MinerU 调用保护配置
 
@@ -267,6 +276,8 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 
 详细事件语义和人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。
 
+选择自动路由时，日志另记解析模式、路由策略、固定理由码及结构数量；完整 `route_decision` 可在最初上传任务的结果中查询。云任务交接成功不表示解析成功，应继续看文档详情和 `parse-jobs`。
+
 ## 6. 接口使用
 
 完整请求参数和响应结构可在 Swagger 查看。
@@ -280,9 +291,9 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | GET | `/api/admin/knowledge-bases` | 知识库分页列表 |
 | GET | `/api/admin/knowledge-bases/{kb_id}` | 知识库详情 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档分页列表 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传一份或多份文件；multipart `file`，单份返回 201，多份返回 200 与逐项报告 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传一份或多份文件；multipart `file`、可选 `parse_mode`，单份 201、多份 200 与逐项报告 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、失败原因及任务 ID |
-| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递任务，无请求体，成功返回 202 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递任务；可选 Query `parse_mode`，无请求体，成功返回 202 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份或多份 PDF / 图片 / Office；multipart `file`，单份返回 202，多份返回 200 与逐项报告 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 显式提交已有待处理 / 失败文档，或恢复同代次云任务；无请求体，返回 202 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 最近 20 条云端任务、安全错误及外部状态；无签名 URL 或 Token |
@@ -321,13 +332,13 @@ TXT/Markdown/CSV 支持 UTF-8、带 BOM 的 UTF-16/32 和 GB18030；其他编码
 
 CSV/XLSX 的安全上限为 10 万行、1024 列、100 万单元格（XLSX 累计）；XLSX 最多 1000 个工作表，Office ZIP 总解压规模最多 256 MiB。全空或超限文件解析失败。PDF 保留真实页码；TXT、Markdown、CSV、DOCX 和 XLSX 的 Native 页码为逻辑页 1，不等同于 Office 排版或打印页码，bbox 为空。
 
-此上传入口仍只投递原生 Parser，图片、纯扫描及包含无文本扫描页的混合 PDF 会记录需要云端解析的失败原因并保留原件；不会自动回退 MinerU。文本与图片同页时仅提取已有文本，不识别图片内文字。需要复杂文档解析时使用下方显式 MinerU 入口；加密、损坏、空文本文件也会失败。
+省略 `parse_mode` 时保留上述旧 Native 行为，不自动调用云端。显式 `native` 也只使用 Native，并在任务结果说明能力范围；视觉内容可能未覆盖，不能据此判断文档完整。选择 `auto` 才启用下方整份路由；加密、损坏、空文本文件仍会失败。
 
 只选一份时保持原单文件响应，包含 `doc_id`、`status`、`error_message`、`task_id` 等元信息。**201 表示原件及文档记录创建成功，不代表任务执行成功。** 队列投递失败时文件和记录可能已保留，应先查询文档详情，再决定是否重新投递。选择多份时返回下方逐项报告。
 
 ### 批量上传
 
-批量上传直接使用原 `/documents` 接口的 `file` 多选控件，**不新增 `/batch` 接口**。普通入口仍只使用 Native；需要云端解析时明确选择原 `/mineru/documents` 接口，同样支持多选，但只接受 PDF、图片与 Office，不接受 TXT/MD/CSV。
+批量上传直接使用原 `/documents` 接口的 `file` 多选控件，**不新增 `/batch` 接口**。可选 `parse_mode` 对本次每份文件分别生效，省略保持 Native。原 `/mineru/documents` 显式云入口保持不变，同样支持多选，但不接受 TXT/MD/CSV。
 
 每批 1～50 个文件；每份文件独立校验、去重、保存和投递，每个新 `doc_id` 只对应一个原件及独立任务。相同文件名但不同内容允许上传；同库相同内容（包含同批重复）返回已有 `doc_id`，不再创建文件或任务。单文件大小和格式限制沿用前文，部署到内网/服务器时还应在网关限制整个 multipart 请求大小；此处的数量和单文件检查不能阻止框架事先接收较大的请求体。
 
@@ -339,7 +350,7 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 一次选择两份及以上文件时，正常处理后返回 **HTTP 200**，不代表全部成功。响应包含 `total / accepted_count / failed_count / items`；`items` 按上传顺序排列，从 1 开始的 `index` 可区分同名文件。每项含 `file_name / status_code / doc_id`，Native 成功附 `document`，MinerU 成功附 `parse_job`，错误附安全 `detail`。只选一份时继续返回原 201/202 和单文件对象，校验错误也沿用原 HTTP 状态；已有单文件调用无需改字段或解析方式。
 
-- 项内 `201`：Native 文件已创建并投递；项内 `202`：本地云任务已建立并投递。均不表示解析成功。
+- 项内 `201`：普通上传文件已创建并投递；项内 `202`：显式云任务已建立并投递。均不表示解析成功，普通上传选择 `auto` 后路由在 Worker 中执行。
 - 项内 `409`：重复内容，使用返回的已有 `doc_id` 查询状态；其他校验和服务错误沿用单文件状态码，意外单项错误为 `500`。
 - 一个文件失败不会撤销之前成功的文件，后续文件仍继续处理；这不是整批事务。
 - 项内失败仍可能已保存文件或云任务。已知时返回 `doc_id`，云投递失败的 `detail` 还含 `job_id`；数据库提交确认丢失时可能无法返回 `doc_id`，必须先查文档列表，不能盲目重新上传。
@@ -350,13 +361,35 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 ### 查询状态与重新投递
 
-- 使用文档详情接口查看持久化状态及 `error_message`；使用 `task_id` 查询 Celery 执行结果，结果默认保留 24 小时。
+- 使用文档详情接口查看持久化状态及 `error_message`；最初上传/重投响应的 `task_id` 可查询 Celery 结果，默认保留 24 小时。路由转云端后 Document 的任务标识会变成云解析代次，不是短任务 Celery 结果 ID；保存最初响应，并继续查 `parse-jobs`。
 - 原生文本解析成功后保存解析结果，文档停在 `CHUNKING`（等待切片）；任务结果为 `awaiting_chunk`，并包含 `block_count`。当前不会继续切片或索引，Celery `SUCCESS` 不等于文档 `READY`。
 - 未知或已过期的任务结果可能显示 `PENDING`，不一定表示排队，文档状态以详情接口为准。
 - 修复基础服务或文件问题后，仅 `UPLOADED / FAILED` 文档可通过 `/process` 重新投递；已进入 `PARSING` 或后续状态时返回 409。该接口不是重新索引接口。
+- `/process?parse_mode=auto` 可让失败/待处理原件进入路由；`native / mineru` 可显式选择路径，省略仍 Native。活动云任务不能用 `/process` 覆盖，用已有 `/mineru` 入口恢复。
 - 旧版任务留下的 `PARSING` 记录不会因更新代码自动解析，也不能通过 `/process` 重新投递；升级后的首次使用请上传新文档，不要假定历史记录已处理。
 
 常见错误：400 文件名无效或文件为空；404 资源不存在；409 名称、内容重复或状态不允许；413 文件超限；415 格式不支持或标识不匹配；422 参数校验失败；503 基础服务、配置或迁移不可用；507 文件存储不可用。错误提示位于响应的 `detail`，具体模型见 Swagger。
+
+### 选择整份解析路径
+
+普通上传的 multipart `parse_mode` 可选 `auto / native / mineru`，不支持 `hybrid`。Swagger 中选择模式后再 `Execute`；省略参数保持旧 Native 行为，不会突然产生云端费用。
+
+| `auto` 的文件结构 | 处理方式 |
+|---|---|
+| TXT、CSV、无图片引用 MD、简单 DOCX/XLSX/PDF | Native |
+| DOCX 图片/公式/文本框等；PDF 扫描、图文混合、明显多栏/复杂绘图 | 整份 MinerU |
+| 图片、DOC、XLS、PPT、PPTX | 整份 MinerU；旧 XLS 保留公式/视觉质量边界 |
+| 有视觉对象的 XLSX；缺图片附件的 MD；预检超限 | 人工复核，不产生部分解析结果 |
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/你的知识库UUID/documents" -F "file=@你的文件.docx" -F "parse_mode=auto"
+```
+
+所有云路径需要配置 MinerU Token；此普通上传仍返回 201，路由与云服务错误在异步任务/文档中体现，不保证 HTTP 当场返回 503。`mineru` 模式仅接受 PDF、图片和六种 Office，TXT/CSV/MD 会要求复核，不发送平台请求。显式模式也不绕过文件和预检安全上限。
+
+查询最初 `GET /tasks/{task_id}` 的 `result.route_decision` 可见策略、理由和结构摘要。`delegated_to_mineru` 表示已交接，仍需等待 `parse-jobs=done` 与 Document=`CHUNKING`；`review` 对应 Document=`FAILED`、`ROUTER_REVIEW` 原因，不表示成功解析。复杂 XLSX 可在两个知识库分别选择 `native`、`mineru` 对照，未验证前不自动宣称云端完整。Markdown 不抓取任何附件 URL。
+
+auto Native 只有明确 OCR/完整性缺失时最多回退一次整份 MinerU；云失败不降级、不自动再申请新批次。交接投递失败保留原件与活动 Job，用已有 `/documents/{doc_id}/mineru` 恢复同一任务。结构检查不能证明 OCR/公式识别全正确，也不保证所有复杂版式都能检测到；不使用逐页拼接或全局坐标排序。
 
 ### 显式使用 MinerU Cloud
 
@@ -372,7 +405,7 @@ Office 云解析的 `page` 是 MinerU 转换后的逻辑 `page_idx + 1`，不是
 
 未配置 Token 返回 503；不支持格式返回 415；云端原件可读性校验失败返回 422（如文件已保存，detail 含 doc_id）；队列投递失败返回 503 与已保存的 doc_id / job_id。先查现有状态再恢复任务，不要重复上传。日额度、鉴权、损坏文件不盲目重试；若提示提交结果不确定，先在 MinerU 平台核对是否已创建批次，不能直接反复申请。
 
-目前没有自动路由、结果缓存、Admin Markdown 预览或后台补投器。更新版本不会自动处理历史记录；使用新知识库 / 新文档验证，或对符合状态条件的已有记录显式提交。管理员接口尚无鉴权，包含会产生云端调用的入口，仅限本机或可信内网。
+目前只有选择 `parse_mode=auto` 才启用整份路由，没有结果缓存、Hybrid、Admin Markdown 预览或后台补投器。更新版本不会自动处理历史记录；使用新知识库 / 新文档验证，或对符合状态条件的已有记录显式提交。管理员接口尚无鉴权，包含会产生云端调用的入口，仅限本机或可信内网。
 
 ## 7. 部署成功检查与常见问题
 

@@ -85,7 +85,7 @@ def test_static_plugin_is_available_and_docs_routes_stay_hidden():
     "suffix, allowed", [("documents", FILE_TYPES), ("mineru/documents", MINERU_TYPES)]
 )
 def test_only_original_upload_arrays_are_marked_for_picker(suffix, allowed):
-    """保留原上传路径和 file 二进制数组，初检格式来自现有统一定义。"""
+    """保留 file 多选标记；普通上传额外暴露可选模式，显式云入口契约不变。"""
 
     schema = docs_request("/openapi.json").json()
     operation = schema["paths"][f"/api/admin/knowledge-bases/{{kb_id}}/{suffix}"][
@@ -95,7 +95,13 @@ def test_only_original_upload_arrays_are_marked_for_picker(suffix, allowed):
         "$ref"
     ]
     body = schema["components"]["schemas"][reference.rsplit("/", 1)[1]]
-    assert list(body["properties"]) == ["file"]
+    assert list(body["properties"]) == (
+        ["file", "parse_mode"] if suffix == "documents" else ["file"]
+    )
+    assert body["required"] == ["file"]
+    if suffix == "documents":
+        mode = body["properties"]["parse_mode"]
+        assert mode["anyOf"][0]["enum"] == ["auto", "native", "mineru"]
     file = body["properties"]["file"]
     assert file["type"] == "array"
     assert file["items"] == {"type": "string", "format": "binary"}

@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     max_upload_size_mb: int = Field(default=50, gt=0)
 
+    # 预检阈值是结构风险指标，不是解析置信度；不触发逐页/逐图云端调用。
+    router_pdf_image_area_ratio: float = Field(default=0.01, gt=0, le=1)
+    router_pdf_drawing_area_ratio: float = Field(default=0.01, gt=0, le=1)
+    router_pdf_drawing_count: int = Field(default=6, ge=1, le=1000)
+    router_pdf_min_text_chars: int = Field(default=20, ge=1, le=1000)
+    router_pdf_max_pages: int = Field(default=1000, ge=1, le=2000)
+    router_pdf_max_lines_per_page: int = Field(default=2000, ge=1, le=10000)
+    router_xml_part_max_mb: int = Field(default=16, ge=1, le=64)
+
     # 云端精准解析单独启用；空 Token 不影响原生 Parser 和基础服务启动。
     mineru_api_base_url: str = "https://mineru.net/api/v4"
     mineru_api_token: SecretStr = SecretStr("")

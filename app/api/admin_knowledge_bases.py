@@ -8,6 +8,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Response,
@@ -22,6 +23,7 @@ from app.core.config import get_settings
 from app.core.file_formats import FILE_TYPES
 from app.db.session import get_session
 from app.models import Document, KnowledgeBase
+from app.parsers.routing.contracts import ParseMode
 from app.schemas.batch_upload import BatchUploadResponse
 from app.schemas.knowledge_base import (
     DocumentResponse,
@@ -189,7 +191,7 @@ def upload_knowledge_base_document(
     file: Annotated[
         list[UploadFile],
         File(
-            description="可多选 1～50 份 PDF、Office、CSV、TXT、MD 或图片；每份独立 doc_id，只投递 Native",
+            description="可多选 1～50 份 PDF、Office、CSV、TXT、MD 或图片；每份独立 doc_id，可选 parse_mode",
             # 二进制数组负责 multipart；扩展元数据只供本地 Swagger 单控件多选使用。
             json_schema_extra={
                 "items": {"type": "string", "format": "binary"},
@@ -200,8 +202,14 @@ def upload_knowledge_base_document(
             },
         ),
     ],
+    parse_mode: Annotated[
+        ParseMode | None,
+        Form(
+            description="auto 启用完整性路由；native/mineru 显式覆盖；省略保持旧 Native 行为"
+        ),
+    ] = None,
 ) -> DocumentResponse | BatchUploadResponse:
-    """原上传入口支持多选；单文件保留原响应，多文件返回逐项报告且各自提交投递。"""
+    """原上传入口逐文件投递可选路由模式；省略参数保持 Native，响应和独立事务不变。"""
 
     try:
         validate_batch(file)
@@ -209,12 +217,12 @@ def upload_knowledge_base_document(
         settings = get_settings()
         if len(file) == 1:
             saved = store_document(session, kb_id, file[0], settings)
-            return dispatch_uploaded_document(session, saved)
+            return dispatch_uploaded_document(session, saved, parse_mode)
 
         def dispatch(saved: DocumentResponse) -> DocumentResponse:
-            """只投递当前单文件的 Native 任务，不自动回退云端解析。"""
+            """为当前单文件投递相同显式模式，不云端合批或合并 Document。"""
 
-            return dispatch_uploaded_document(session, saved)
+            return dispatch_uploaded_document(session, saved, parse_mode)
 
         response.status_code = status.HTTP_200_OK
         return store_batch(session, kb_id, file, settings, dispatch)
@@ -224,11 +232,12 @@ def upload_knowledge_base_document(
 
 
 def dispatch_uploaded_document(
-    session: Session, response: DocumentResponse
+    session: Session, response: DocumentResponse, parse_mode: ParseMode | None = None
 ) -> DocumentResponse:
-    """复用单文件的提交后投递行为，投递失败时返回数据库中的真实文档状态。"""
+    """提交后携带可选模式投递；旧调用保留三参数，失败返回持久化状态。"""
 
-    if not publish_document(session, response.doc_id, response.task_id):
+    options = {} if parse_mode is None else {"parse_mode": parse_mode}
+    if not publish_document(session, response.doc_id, response.task_id, **options):
         session.expire_all()
         return DocumentResponse.model_validate(session.get(Document, response.doc_id))
     return response
@@ -271,9 +280,15 @@ def get_document(kb_id: UUID, doc_id: UUID, session: AdminSession) -> DocumentRe
     },
 )
 def resubmit_document(
-    kb_id: UUID, doc_id: UUID, session: AdminSession
+    kb_id: UUID,
+    doc_id: UUID,
+    session: AdminSession,
+    parse_mode: Annotated[
+        ParseMode | None,
+        Query(description="auto/native/mineru；省略保持旧 Native 行为"),
+    ] = None,
 ) -> DocumentResponse:
-    """为待处理或失败文档分配新任务标识并提交后投递，旧消息因标识不符自动跳过。"""
+    """待处理/失败文档以可选模式分配新代次，提交后投递；不重解析已完成文档。"""
 
     document = require_document(session, kb_id, doc_id, lock=True)
     if document.status not in {"UPLOADED", "FAILED"}:
@@ -285,7 +300,8 @@ def resubmit_document(
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
-    if not publish_document(session, response.doc_id, response.task_id):
+    options = {} if parse_mode is None else {"parse_mode": parse_mode}
+    if not publish_document(session, response.doc_id, response.task_id, **options):
         raise HTTPException(
             status_code=503, detail="任务投递失败，文件已保留，请查询文档状态后重试"
         )

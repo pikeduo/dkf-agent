@@ -54,6 +54,17 @@ FIELDS = {
     "file_index",
     "accepted_count",
     "failed_count",
+    "decision_version",
+    "parse_mode",
+    "route_strategy",
+    "reason_codes",
+    "fallback_count",
+    "mineru_file_submit_count",
+    "page_count",
+    "sheet_count",
+    "image_count",
+    "chart_count",
+    "source_document_count",
 }
 LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
@@ -103,6 +114,14 @@ EVENT_LABELS = {
     "mineru.retry": "MinerU 任务等待重试",
     "mineru.failed": "MinerU 任务失败",
     "mineru.error_record_failed": "MinerU 失败原因未能写入数据库",
+    "router.decided": "文档完整性路由决策已生成",
+    "router.review": "文档路由需要人工复核",
+    "router.fallback": "Native 完整性检查要求一次整份云解析",
+    "router.guard_passed": "解析结构覆盖检查通过",
+    "router.guard_failed": "解析覆盖检查未通过",
+    "router.finished": "路由任务处理结束",
+    "router.cloud_submitted": "路由整份云解析批次已确认",
+    "router.cloud_dispatch_failed": "路由云任务投递确认失败",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
@@ -136,6 +155,17 @@ FIELD_LABELS = {
     "duration_ms": "耗时_ms",
     "error_code": "错误码",
     "error_type": "错误类型",
+    "decision_version": "路由版本",
+    "parse_mode": "解析模式",
+    "route_strategy": "路由策略",
+    "reason_codes": "路由理由",
+    "fallback_count": "回退次数",
+    "mineru_file_submit_count": "云文件提交数",
+    "page_count": "物理页数",
+    "sheet_count": "Sheet数",
+    "image_count": "图片数",
+    "chart_count": "图表数",
+    "source_document_count": "源文档数",
 }
 
 

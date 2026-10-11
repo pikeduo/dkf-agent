@@ -5,10 +5,10 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
+> 当前进度：**阶段 1～11A 工程基线保留；依用户当前指令实施 11B.1 整份路由，真实路由及 XLSX A/B 验收仍待完成。**
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
-> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
+> 当前新增目标：保留多格式与混合内容测试基线，只实施 11B.1 整份文档路由；11B.2 仅在真实对照证明必要时另行确认，对 XLSX 等少数格式评估“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不提前推进当前 11B.1。
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -1051,7 +1051,7 @@ Block 入库
 
 ---
 
-# 17A. 阶段 11A：多格式文档支持扩展（当前阶段）
+# 17A. 阶段 11A：多格式文档支持扩展（已有基线）
 
 ## 目标
 
@@ -3411,7 +3411,7 @@ Codex 必须遵守：
 20. Reindex 必须优先复用 Parse Cache；重新调用 MinerU 必须使用明确的 Reparse 语义。
 21. 当前不部署 MinerU 本地模型，不新增 MinerU 本地推理依赖。
 22. 阶段 1～10 已完成并作为冻结基线。阶段 11A 及之后若因新增格式需要修改上传白名单、统一 FileType、格式校验等前置公共代码，属于兼容性扩展，不视为“重做旧阶段”；但必须先说明原因并保证阶段 1～10 回归测试继续通过。
-23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
+23. 依用户最新阶段指令当前仅实施 11B.1；真实 XLSX A/B 与路由验收未完成，不进入 11B.2 或阶段 12。
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
 26. 阶段 11B 的 Router 必须遵循“完整性优先”：只有能合理证明 Native 完整覆盖主要信息时才走 Native；复杂 / 不确定内容不得因为 Native 能抽到部分文本就判成功。
@@ -3424,7 +3424,7 @@ Codex 必须遵守：
 33. Hybrid 失败不得逐元素补发 MinerU，也不得自动再提交 Whole-MinerU 造成不可控额度翻倍；失败后由显式重试 / 管理员决策处理。
 34. PDF 与 PPT/PPTX 第一版继续 Whole-MinerU，不因 Hybrid 能力存在就提前做逐页 / 逐元素拼接；DOCX Hybrid 只在 XLSX Hybrid 验证稳定后再评估。
 35. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
-36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
+36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11B.1 不安装、不实现、不提前改造 Retrieval。
 37. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
 38. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
 39. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
@@ -3441,8 +3441,8 @@ Codex 必须遵守：
 ```text
 阶段 1～9：已完成并回归通过
 阶段 10：MinerU Cloud Provider 已完成真实 API 人工验收
-阶段 11A：当前开发阶段
-阶段 11B.1：等待 11A 和多格式真实样本验收后开始；先做 Whole-document Conservative Router
+阶段 11A：已有多格式工程基线与真实样本质量记录，XLSX 云解析仍需单独对照
+阶段 11B.1：当前范围；只做整份文档路由、review 与 Guard，等待真实路由人工验收
 阶段 11B.2：仅在真实对照证明必要时，评估 Selective Hybrid Visual Bundle
 阶段 12～15：未开始
 阶段 15A：计划中的 LlamaIndex Adapter，等待 pgvector 基线完成后开始
@@ -3484,7 +3484,7 @@ XLSX MinerU：必须单独真实测试，不能用 XLS 结果推断。
 同一源文档多个视觉元素 → 默认最多 1 个 MinerU Bundle 文件任务，而不是 N 个元素 N 次提交
 ```
 
-因此阶段 11B 已明确分两步：11B.1 先做“完整性优先”的 Whole-document Conservative Router；11B.2 仅在单一 Provider 确实无法完整覆盖、且 Native 与 MinerU 可稳定互补时，才启用 Selective Hybrid Visual Enhancement。Hybrid 以 XLSX 为首选候选，同一源文档的多个视觉元素通过单个 Visual Bundle 一次 MinerU 提交，禁止逐元素消耗文件额度。11B 尚未开始。
+因此阶段 11B 已明确分两步：11B.1 只做整份 Native / MinerU / Review、预检和 Guard；复杂 XLSX 未有真实 A/B 结论先 Review。11B.2 仍未启动，必须以真实互补性、锚点和单 Bundle 收益为前提并由用户另行确认。当前接口兼容性、限制、人工步骤见 [Router 验收说明](PARSER_ROUTER.md)。
 
 LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：完成 Parse Cache、Chunk、BGE-M3 和 pgvector 后，在阶段 15A 建立 `DocumentChunk ↔ TextNode / NodeWithScore` 适配边界，再进入 Dense / BM25 / Query Fusion / Reranker / DeepSeek RAG。
 

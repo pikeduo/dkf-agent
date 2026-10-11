@@ -2,7 +2,7 @@
 
 本文件供开发与验收使用；部署说明和日常调用入口见 [README](../README.md)，开发路线见 [最新开发计划](DEVELOPMENT_PLAN_CODEX.md)，不把测试记录写入 README。
 
-当前基线：阶段 1～10 已完成；阶段 10 的图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收。当前只扩展阶段 11A 的六种 Office 显式支持；新增 Office 真实 API 仍需单独验收，不进入 11B Router。
+当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。当前只扩展 11B.1 可选整份路由，旧显式入口不变；真实路由与 XLSX A/B 仍待人工完成，见 [Router 验收说明](PARSER_ROUTER.md)，不实现 Hybrid。
 
 ## 1. 官方契约与实现边界
 
@@ -45,6 +45,8 @@
 提交意图在 POST 前持久化；batch 和私有签名上传链接在 PUT 前持久化。上传网络失败或 Worker 重启沿用同一批次 PUT；链接成功使用后清除。若 POST 响应丢失或进程在响应持久化前退出，无法证明未创建远端批次，等待保护期限后记录 `SUBMIT_UNCERTAIN`，不自动再 POST。请先在供应商平台确认，再决定人工提交；此 API 没有已确认的幂等请求键，因此不声称绝对外部 exactly-once。
 
 未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 且原因匹配已确认临时分类时可以重建 batch；未知 err_msg 不透传也不猜测可重试。
+
+远端临时失败重建批次只保留在既有显式入口；11B.1 路由 Job 保存 `_route_decision` 后，远端明确 failed 不自动追加新 batch、不退 Native，由管理员核对后决定显式新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。
 
 没有 Outbox / 自动补投器。同代次的活动任务可通过显式 `POST .../documents/{doc_id}/mineru` 恢复投递，继续沿用已保存的 batch。任务已经失败且非活动时，该入口会建立新任务，可能重新申请云端批次、上传并消耗额度；它不是旧失败批次的“仅重新下载”入口。状态已完成或原生 PARSING 不允许借用它重新解析。更换参数不能覆盖活动任务。不对旧任务做后台扫描。
 
@@ -101,7 +103,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 3. 一份含表格 PDF，能人工核对表头、单元格、标题与脚注。
 4. 一份含数学公式 PDF，能人工核对 LaTeX 与相邻说明。
 
-在 `http://127.0.0.1:8000/docs` 创建一个新的验收知识库，避免与已有 Hash 冲突。每次通过 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents` 上传一份，字段为 multipart `file`；不要用旧 `/documents` 入口期待自动路由。记录返回的 doc_id / job_id。
+在 `http://127.0.0.1:8000/docs` 创建一个新的验收知识库，避免与已有 Hash 冲突。本节验证显式路径，通过 `POST /api/admin/knowledge-bases/{kb_id}/mineru/documents` 上传，记录 doc_id/job_id；普通 `/documents` 省略 parse_mode 仍不自动路由，选择 auto 的新验收另见 Router 文档。
 
 如果样本已经上传但处于 UPLOADED / FAILED，可调用 `POST .../documents/{doc_id}/mineru`；已经 CHUNKING 的样本不能以此重新解析，改用独立验收知识库。
 
@@ -255,6 +257,6 @@ ORDER BY d.file_name, b.block_index;
 
 ## 6. 当前验证边界
 
-根据用户确认，阶段 10 已完成真实 API 人工验收，包括图片入库与扫描顺序。11A 六种 Office 仅完成代码、Mock 和隔离数据库验证，尚未用真实云 API 上传真实 Office 文件；CSV/XLSX 用户原件仍需人工核对。Mock 不能替代真实鉴权、格式转换、页面语义和供应商视觉质量验收，也不等于真实 429 或所有网络故障均已验证。
+阶段 10 已完成人工验收；最新开发计划记录 DOC/DOCX、PPT/PPTX 和 XLS 的真实云结果及质量边界，XLSX 云结果仍需独立对照，不能从 XLS 推断。本轮没有重新调用真实 API，11B.1 新路由仍需人工验收。Mock 不能替代真实鉴权、格式转换、页面语义和视觉质量，也不等于真实 429 或所有网络故障均已验证。
 
-未实现 11B Parser Router、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或自动 Token 续期。本阶段停在 11A，真实多格式人工验收并经用户确认后才进入 11B。
+已有 11B.1 可选整份路由但本轮未调用真实云 API验证新链路，复杂 XLSX auto 保守 review。未实现 11B.2 Hybrid、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期。下一步先真实路由和 XLSX A/B，不提前开发后续阶段。

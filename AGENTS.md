@@ -411,13 +411,13 @@ concurrency = 1
 - 原件与 Document 提交后才投递 `process_document` 到 `default_queue`。任务使用晚确认、文档行锁和当前 `processing_task_id` 检查，重复或过期消息不能回退状态、覆盖新任务或重复生成数据。
 - 临时数据库或文件访问错误最多自动重试 3 次，含首次共 4 次，退避为 5、10、20 秒；原件缺失或为空立即失败。失败记录 `error_message`，成功重试清除旧错误。数据库不可用时可能无法持久化失败原因，仍需保留安全的 Worker 日志和任务失败状态，不泄露凭据。
 - 重新投递只接收 `UPLOADED / FAILED`，提交新任务标识并清除旧错误；不能绕过状态限制将其当作 Reindex。旧消息与失败回调不得覆盖新一轮任务。
-- 当前原生任务解析 TXT、Markdown、CSV、DOCX、XLSX、文本型 PDF，将 Block 写入 `document_blocks` 后推进到 `CHUNKING / awaiting_chunk`。图片、旧 Office、演示文稿与需要 OCR 的 PDF 明确要求显式 MinerU，不自动路由。此状态不生成 Chunk、Embedding 或 `READY`。
+- 省略 `parse_mode` 的旧原生任务解析 TXT、Markdown、CSV、DOCX、XLSX、文本型 PDF；图片、旧 Office、演示文稿与需要 OCR 的 PDF 明确要求 MinerU。新调用只有显式选择 `auto` 才按第 6.6.4 节路由。所有成功解析写入 `document_blocks` 后停在 `CHUNKING / awaiting_chunk`，不生成 Chunk、Embedding 或 `READY`。
 - 解析、该文档旧 Block 的整体替换和状态推进在同一文档行锁与数据库事务内完成；失败必须回滚全部写入，再以独立事务记录安全原因。长事务中的 `PARSING` 不保证实时可见。当前代次完成后的重复消息跳过，结果可能为 `skipped`，业务状态以 Document 为准。
 - 同一原件和 Parser 版本使用稳定 Block ID，入库将块列表映射为从 1 开始的 `block_index`；保持文档内序号唯一和正数约束。历史块序号允许空值，不伪造历史阅读顺序；后续查询新解析结果应按 `block_index` 排序。
 - 当前没有事务 Outbox、自动扫描或后台补投器；数据库提交与消息投递并非原子操作。进程中断可能留下已有原件和记录但未投递的文档，应使用已有重新投递入口处理，不能宣称系统会自动补投。
 - 文件系统与数据库也非同一事务。普通写盘或入库失败清理本次文件；提交结果不确定时保留原件，避免误删可能已提交的数据。异常和崩溃恢复不得假设文件与记录天然保持原子一致。
 - 上传按实际内容计算 SHA256、检查大小和基本格式标识，不依赖客户端大小或 MIME 声明；这些检查不是完整格式解析或恶意文件扫描，文本编码留待 Parser 判断。
-- 普通与显式 MinerU 上传均在原 `/documents`、`/mineru/documents` 路径支持多选，保留 multipart `file` 字段并将其声明为文件数组，不另建 `/batch` 接口。每次最多 50 份，单份保持原 201/202 与单文件响应及错误语义；多份 HTTP 200 仅是逐项报告，按输入序号返回成功、重复及失败。复用现有单文件存储和调度，每份原件独立 Document/doc_id、事务及任务，不合为一个文档，不新增自动 Parser Router 或云端合批。单项失败不撤销其他已提交文件，已知时保留可恢复 doc_id/job_id。提交结果不确定时可能无法返回 doc_id，必须先查询现有记录，不盲目重传；数量限制不替代网关总请求体限制。
+- 普通与显式 MinerU 上传均在原 `/documents`、`/mineru/documents` 路径支持多选，保留 multipart `file` 文件数组，不另建 `/batch`。每次最多 50 份，单份原 201/202、多份 200 逐项报告语义不变，每份独立 Document/doc_id、事务及任务，不云端合批。普通入口的可选 Form `parse_mode` 对每份分别生效；省略保持旧 Native。单项失败不撤销其他已提交文件，已知时保留可恢复 doc_id/job_id。提交结果不确定先查已有记录，不盲目重传；数量限制不替代网关总请求体限制。
 - Swagger 文件数组使用本地插件替换为一个原生 `input[type=file][multiple]`，打开窗口后支持单选或一次多选，不允许把逐行 `Add string item` 当作已实现窗口多选。仅包装显式标记的上传数组，普通数组行为不变，固定 Swagger UI 版本并保留 root_path 支持。选择后的名称/大小初检不读取内容、不自动上传、不静默删掉失败文件；服务端仍负责实际内容和去重校验。插件必须保留原生 File 对象与输入顺序，并以实际页面/文件选择事件验收，不能只检查 OpenAPI。
 - CPU Worker 在 Windows 使用线程池仅作开发验证，正式 Linux 环境使用 prefork 并发 2～4；GPU Worker 单进程串行，当前不加载模型。不能把线程池等同于 CPU 密集任务的多进程加速。
 
@@ -431,13 +431,13 @@ concurrency = 1
 - Redis Lua 原子共享频控：提交按文件数计量、查询按次数计量；默认平台上限为 50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9。日额度使用保守的滚动 24 小时；1000 优先页按 UTC 日估计，只观测不硬拒绝。相同账户的所有 Worker 必须使用同一 Redis 与命名空间，Redis 故障时关闭云端调用。
 - `submit_mineru_parse / check_mineru_result` 是 CPU 短任务。只查一次，未完成通过 countdown 再投递；禁止 while/sleep 等待。已确认临时错误有限指数退避加抖动，并尊重 Retry-After；永久错误立即记录 FAILED，总等待时间有上限。
 - `document_parse_jobs` 保存外部六种状态、batch / data / trace 标识、参数快照、重试、错误及提交检查点；Document 保持供应商无关状态。`task_id` 为本地处理代次，不是外部单文件 task_id，也不表示整份文档的 Celery 执行结果。
-- 文档行锁、活动解析身份部分唯一索引、当前代次检查和稳定 Block ID 共同保证幂等。POST 前保存申请意图、PUT 前保存 batch，上传恢复沿用同一 batch；已确认远端失败后才自动申请新 batch。POST 响应丢失时安全失败，禁止盲目重复申请；官方接口无已确认的幂等请求键，不得宣称跨数据库与云端绝对 exactly-once。
+- 文档行锁、活动解析身份部分唯一索引、当前代次检查和稳定 Block ID 共同保证幂等。POST 前保存申请意图、PUT 前保存 batch，上传恢复沿用同一 batch。旧显式入口保留已确认远端临时失败后重建 batch 的规则；11B.1 路由任务即使远端明确临时失败也不自动追加批次，由管理员决定。POST 响应丢失安全失败，不盲目重复申请，不宣称跨数据库与云端绝对 exactly-once。
 - 优先读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，通过 `MinerUResultAdapter` 输出现有 ParsedDocument 契约。保留正文原序，0 基页码转 1 基，0～1000 bbox 转原件点数 / 像素；未知置信度保留空值。未知结构、空正文、恶意或超量 ZIP 明确失败，不以 full.md 冒充结构化结果。
 - 阅读顺序仅允许按可选旧版 `layout.json` 的父块 `index` 恢复明确的 `header / footer`：同页类型与 bbox 必须全量唯一关联、索引唯一且非负、位置符合页边界，候选结果不能改变任何正文项的相对顺序。bbox 仅用于关联与保护条件，禁止按 y 全局排序。缺少 bbox / 可信索引、关联歧义、多栏并排、纵向回跳或超量页保留整页原序；不宣称能够可靠重建任意多栏布局。结构块保持整体，原 page / bbox / block_type / source 不变；ID 始终基于原数组位置，最终顺序写入 block_index。可选顺序元数据失败不能替代或绕过正文校验。
 - 上游漏识别、公式名称误识别及普通正文被归入 table_footnote 属于解析质量边界；不得按文件名、验收标记或具体字符串补 OCR、修公式名称、强行拆表。公式语义标准化留待阶段 27。旧 CHUNKING 结果不因更新 Adapter 自动重写；终态失败任务也不自动恢复，重新提交非活动 FAILED 文档可能创建新批次并消耗额度。
 - Block 替换与 Document=CHUNKING、job=done 在同一事务内提交；失败回滚所有块修改，再独立记录安全错误。full.md 仅供供应商平台人工核对，当前未新增 Admin Markdown 预览接口。
-- 阶段 10 使用显式 MinerU 上传 / 已有文档提交入口，不改变阶段 9 原生接口的行为；重复活动请求仅恢复同一任务，完成文档拒绝重解析。没有 Router、Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
-- 11A 的六种 Office 仅通过显式 MinerU 入口；page_idx+1 为转换后的逻辑页，bbox 固定为空，不套用 PyMuPDF 原件页几何。Office 保留 content_list 原序与原数组位置 ID，不使用 PDF 页边界顺序恢复。限流、Token、短任务、事务幂等设计不变。
+- 阶段 10 显式 MinerU 上传 / 已有文档提交入口保持兼容；重复活动请求仅恢复同一任务，完成文档拒绝重解析。11B.1 可在普通上传选择路由，但仍没有 Parse Cache、自动补投器或事务 Outbox；进程中断 / 队列失败通过显式入口恢复，不声称后台自动恢复。
+- 六种 Office 的云解析可由显式入口或 11B.1 路由提交；page_idx+1 为转换后的逻辑页，bbox 固定为空，不套用原件页几何。Office 保留 content_list 原序与原数组位置 ID，不使用 PDF 页边界顺序恢复。限流、Token、短任务、事务幂等设计不变。
 - 详细接口边界、Mock 与真实 API 人工验收见 [MinerU Cloud 验收说明](docs/MINERU_CLOUD.md)。必须真实检查鉴权、上传、结果结构、四类样本和 Block 入库，不能以 Mock 通过代替真实 API 验证。
 
 ### 6.6.3 业务日志约定
@@ -448,6 +448,18 @@ concurrency = 1
 - 上传、投递、解析、校验、结果下载、落库、重试/失败分开记录；只在数据库事务提交后记 `parse.persisted / mineru.blocks_persisted`，日志不得新增事务、改变任务结果或吞掉业务异常。解析落库不代表 OCR 内容质量正确。
 - 禁止记录 Token、密码、连接串、签名 URL、上游错误原文、文件及结果正文；错误以安全分类码/类型记录，不传任意异常对象。日志含文件名和资源标识，需限制目录访问；旧消息无 request_id 时仍按 doc_id/job_id 关联。日志不是数据库审计、补投器或结果缓存。
 - 运维配置见 README；事件契约与人工验收见 [业务日志说明](docs/BUSINESS_LOGGING.md)。这项可观测性补充不推进阶段 11B 或后续阶段。
+
+### 6.6.4 完整性优先 Router v1（11B.1）
+
+- 外部只接收 `auto / native / mineru`；普通上传 Form、重新投递 Query 可选，省略保留旧 Native 行为，不能让旧调用突然付费。显式 MinerU 旧入口不变，内部 `hybrid_bundle` 只预留名字，不实现或返回该策略。
+- 预检与路由在 Worker 中只读执行。TXT/CSV、无附件引用 MD、简单 DOCX/XLSX/PDF走 Native；复杂 DOCX/PDF、图片、旧 Office、PPT/PPTX 整份 MinerU。复杂 XLSX 未有真实 A/B 结论先 review，MD 缺附件也 review，不抓 URL、不把 MD/CSV 发送 MinerU。显式 Native 对照结果只能声称 Native 范围，不证明视觉完整。
+- DOCX 检查 OOXML 图片、绘图、数学、文本框、图表、嵌入对象、辅助内容和已知未覆盖正文结构；XLSX 检查媒体、绘图、图表、嵌入、VML 和外链。PDF 按页检查文本、图片面积、绘图、批注、多栏/公式风险；小 logo 阈值配置化。超预检资源上限 review，坏原件安全失败，不以部分预检放行。
+- RouteDecision 固定版本、模式、格式、策略、白名单理由、结构计数/物理页摘要和 fallback_count；禁止正文、地址、密钥或虚构 Router confidence。完整决策进入任务结果，云任务复用 parse_options 内 `_route_decision` 元数据，不参与原供应商参数 Hash、不透传官方请求，不新增业务 Schema。
+- auto Native 仅在明确 OCRRequiredError/CompletenessError 时、受支持云格式最多回退一次；非法编码/损坏/普通 ParserError 不回退。云失败不得降 Native，不自动为路由任务追加第二批。预检和 Guard 是结构风险保护，不能证明任意版式、OCR、公式语义全部正确。
+- Guard 在任何块替换前检查有效正文、非空 PDF 物理页覆盖、XLSX 有效 Sheet 数、来源、逻辑页及 Office 空 bbox；不得改页码、排序、拆表/公式或补 Marker。现有 Parser、Adapter、Block ID 算法与阅读顺序规则保持不变。
+- Native 解析、Guard、整体替换和 CHUNKING 同事务。云交接仅当前文档行锁和 Native 代次可从 PARSING 创建检查点，分配新云代次使旧消息/失败回调失效，提交后才投递现有 MinerU 短任务。队列确认失败保留活动 Job，已有 `/mineru` 恢复；不宣称数据库与 Broker 原子或自动补投。
+- review 不新增数据库状态：Document=FAILED、安全原因前缀 ROUTER_REVIEW，任务结果 status=review，不写新块、不调云。记录最初 Celery task_id；云代次 task_id 不等同短任务结果 ID。路由成功交接不是解析成功，最终仍查 Document 与 Parse Job。
+- 费用摘要以 doc_id/job_id 关联：初始计划为 1 份源文件、尚未提交为 0；确认 batch 后记录一次云文件提交。重试/重复日志不应直接累加为真实配额，提交不确定仍以平台核对。真实 XLSX 对照和路由人工验收见 [Router 验收说明](docs/PARSER_ROUTER.md)。不开发 11B.2、Parse Cache 或后续阶段。
 
 ### 6.7 数据和证据规则
 
@@ -480,13 +492,14 @@ text
 
 ## 7. 开发顺序
 
-以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.4 · 多格式文档与混合解析）为最新路线；历史计划不作为开发依据。最新计划不覆盖第 5.1 节的 Windows 本地服务约束。阶段 1～10 已完成，其中 MinerU 已完成真实 API 人工验收，不重新实现。当前只实施 11A：
+以 `docs/DEVELOPMENT_PLAN_CODEX.md`（V0.7 · 完整性优先路由）为最新路线；历史计划不作为开发依据，不覆盖第 5.1 节 Windows 服务约束。阶段 1～11A 现有代码作为回归基线，不重新实现；依用户本次指令只实施 11B.1，复杂 XLSX 云解析完整性仍需专项真实对照：
 
 ```text
 01～09. 已有 FastAPI、基础服务、数据模型、管理员 API、上传、异步入口与原生 Parser
 10. MinerU Cloud Provider（已完成真实 API 人工验收）
-11A. 多格式文档支持扩展（当前阶段）
-11B. Parser Router 与混合文档路由（等待 11A 人工验收）
+11A. 多格式文档支持扩展（已有工程基线）
+11B.1. Whole-document Router v1（当前；等待真实路由验收）
+11B.2. Selective Hybrid（仅真实对照证明必要后另行确认）
 12. Parse Cache
 13. Chunk
 14. BGE-M3 Embedding
@@ -527,9 +540,10 @@ text
 | 8：统一解析结构 | 已建立 `ParsedDocument / ParsedBlock`、Parser 公共校验入口及独立契约测试；契约不耦合数据库、Celery、RAG 或模型部署。 |
 | 9：原生文本解析 | TXT、Markdown、DOCX、文本型 PDF 输出统一 Block，PDF 保留物理页码，其他格式使用逻辑页 1；`0003_block_order` 增加块顺序及约束。任务事务性落库后停在 `CHUNKING / awaiting_chunk`；不执行 OCR、Chunk、Embedding 或 RAG。 |
 | 10：MinerU Cloud | 官方 V4 主链路及 `0004_mineru_jobs` 已完成图片、扫描、表格、公式与页边界顺序的真实 API 人工验收；事务写块后停在 CHUNKING，仍保留供应商解析质量边界。 |
-| 11A：多格式扩展 | CSV/XLSX Native、十三种 FileType、OOXML/OLE 校验及六种 Office 显式 MinerU 支持已建立；Office 使用逻辑页与空 bbox。新增格式真实文件和真实 Office API 等待人工验收，不进入 11B。 |
+| 11A：多格式扩展 | CSV/XLSX Native、十三种 FileType、OOXML/OLE 校验及六种 Office 显式 MinerU 支持已建立；Office 使用逻辑页与空 bbox。最新计划已有真实 Office 质量记录，XLSX 云解析仍需独立 A/B，不从 XLS 类推。 |
+| 11B.1：整份路由 | 已有只读预检、可解释整份 Native/MinerU/review 决策、一次明确完整性回退及落库 Guard；普通接口可选 parse_mode，旧默认 Native 不变。复杂 XLSX 保守 review，无 Hybrid；真实路由验收仍待用户完成。 |
 
-当前只实施阶段 11A：CSV/XLSX Native 与六种 Office 显式 MinerU 支持；Parser 目录为 `app/parsers/`。不实施自动路由或视觉检测，不新增 DOC/XLS/PPT/PPTX Native Parser，不引入 LibreOffice 转换。DOCX/XLSX 允许显式云解析，CSV 不发送 MinerU。11A 人工验收通过并经用户确认后才进入 11B；阶段 12 及以后编号不变，不提前开发 Parse Cache、Chunk、Embedding、RAG。
+当前只实施阶段 11B.1；真实 XLSX A/B 和整份路由人工验收后再由用户决定是否需要 11B.2，不自动启动 Hybrid。阶段 12 及以后编号不变，不提前开发 Parse Cache、Chunk、Embedding、RAG，不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 
 ---
 

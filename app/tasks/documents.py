@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
+from app.core.config import get_settings
 from app.db.session import get_engine
 from app.parsers.common import ParserError
 from app.services.document_processing import (
@@ -18,6 +19,7 @@ from app.services.document_processing import (
     record_failure,
     run_processing_step,
 )
+from app.services.mineru.errors import MinerUError
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +60,8 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
     acks_late=True,
     reject_on_worker_lost=True,
 )
-def process_document(self, doc_id: str) -> dict[str, str | int]:
-    """处理当前文档阶段；临时数据库或 I/O 错误最多重试三次，永久失败立即记录。"""
+def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
+    """保留旧 Native 默认行为；显式模式启用整份路由，云端只在检查点提交后投递。"""
 
     try:
         identifier = UUID(doc_id)
@@ -69,21 +71,44 @@ def process_document(self, doc_id: str) -> dict[str, str | int]:
     started = perf_counter()
     try:
         with processing_session() as session, session.begin():
-            result = run_processing_step(session, identifier, task_id)
+            if parse_mode is None:
+                result = run_processing_step(session, identifier, task_id)
+            else:
+                from app.services.routed_processing import run_routed_step
+
+                result = run_routed_step(
+                    session, identifier, task_id, parse_mode, get_settings()
+                )
+        if result["status"] == "delegated_to_mineru":
+            # 延迟导入避免短任务对 processing_session 的复用形成循环导入。
+            from app.services.routed_processing import record_dispatch_error
+            from app.tasks.mineru import publish_step
+
+            try:
+                publish_step(UUID(result["job_id"]))
+            except MinerUError:
+                with processing_session() as session, session.begin():
+                    record_dispatch_error(session, UUID(result["job_id"]))
+                result["status"] = "cloud_dispatch_failed"
         # 事务上下文退出完成提交后才报告成功；验证通过不等同于落库完成。
         log_event(
             "parse.persisted"
             if result["status"] == "awaiting_chunk"
+            else "router.finished"
+            if parse_mode is not None
+            and result["status"]
+            in {"review", "delegated_to_mineru", "cloud_dispatch_failed"}
             else "parse.skipped",
             doc_id=identifier,
             task_id=task_id,
             status=result["status"],
             state=result.get("document_status"),
             block_count=result.get("block_count"),
+            mineru_file_submit_count=result.get("mineru_file_submit_count"),
             duration_ms=round((perf_counter() - started) * 1000, 2),
         )
         return result
-    except (DocumentSourceError, ParserError) as exc:
+    except (DocumentSourceError, ParserError, MinerUError) as exc:
         log_event(
             "parse.failed",
             level=logging.ERROR,
