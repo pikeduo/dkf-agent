@@ -6,6 +6,7 @@ from zipfile import ZipFile
 
 import pymupdf
 import pytest
+from csv_samples import invalid_encoding_bytes
 from docx import Document as WordDocument
 from office_samples import office_bytes
 from sqlalchemy import func, inspect, select, text
@@ -350,6 +351,8 @@ def invalid_content(file_type):
 
     if file_type == "txt":
         return b"\xff\xd0\x80"
+    if file_type == "csv":
+        return invalid_encoding_bytes()
     if file_type == "pdf":
         return b"%PDF-1.4\ninvalid document fixture\n%%EOF"
     buffer = BytesIO()
@@ -359,11 +362,11 @@ def invalid_content(file_type):
     return buffer.getvalue()
 
 
-@pytest.mark.parametrize("file_type", ["txt", "docx", "pdf"])
+@pytest.mark.parametrize("file_type", ["txt", "csv", "docx", "pdf"])
 def test_invalid_native_document_records_safe_failure_without_blocks(
     processing_context, migrated_connection, file_type
 ):
-    """编码或文档结构错误永久失败，任务与数据库不泄漏文件路径且不保留半成品。"""
+    """编码或结构错误永久失败；CSV 使用真正不可解码字节，错误安全且不保留块。"""
 
     document = upload_sample(
         processing_context, f"无效内容.{file_type}", invalid_content(file_type)
@@ -374,6 +377,12 @@ def test_invalid_native_document_records_safe_failure_without_blocks(
     assert detail["status"] == "FAILED" and detail["error_message"]
     assert detail["error_message"] == str(result.result)
     assert str(processing_context[2]) not in str(result.result)
+    if file_type == "csv":
+        message = detail["error_message"]
+        assert message == "文本编码无法识别，请转换为 UTF-8 后重新上传"
+        assert repr(invalid_encoding_bytes()) not in message and "\\x81" not in message
+        assert document["file_name"] not in message
+        assert "file_path" not in detail
     assert block_snapshot(migrated_connection, document) == []
     assert_no_chunks(migrated_connection, document)
 

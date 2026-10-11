@@ -1,16 +1,19 @@
 """CSV/XLSX Native 契约、字段保真、错误处理及稳定标识的离线测试。"""
 
+import codecs
 import csv
 from io import BytesIO, StringIO
 from uuid import uuid4
 
 import pytest
+from csv_samples import invalid_encoding_bytes, regenerate_manual_fixture
 from office_samples import office_bytes
 from openpyxl import Workbook
 
 from app.parsers.common import ParserError
 from app.parsers.csv import CsvParser
 from app.parsers.registry import get_parser
+from app.parsers.text import read_text
 from app.parsers.xlsx import XlsxParser
 
 
@@ -66,7 +69,7 @@ def test_csv_preserves_fields_and_stable_ids(tmp_path, encoding):
         b"",
         b"\xef\xbb\xbf",
         b",,\n,,",
-        b"\xff\xff",
+        invalid_encoding_bytes(),
         b"a,b\n1",
         b'a,b\n"unclosed,2',
         b'a,b\n"x"bad,2',
@@ -78,6 +81,87 @@ def test_csv_invalid_inputs_fail_safely(tmp_path, content):
 
     with pytest.raises(ParserError):
         parsed_file(tmp_path, content, "csv")
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "gb18030"])
+def test_invalid_encoding_fixture_is_really_undecodable(encoding):
+    """先验证负向字节本身无 BOM 且严格解码失败，防止合法编码误当负向样本。"""
+
+    content = invalid_encoding_bytes()
+    assert content == b"\x81\x30\x81"
+    assert not content.startswith(
+        (
+            codecs.BOM_UTF8,
+            codecs.BOM_UTF16_LE,
+            codecs.BOM_UTF16_BE,
+            codecs.BOM_UTF32_LE,
+            codecs.BOM_UTF32_BE,
+        )
+    )
+    with pytest.raises(UnicodeDecodeError):
+        content.decode(encoding, errors="strict")
+
+
+@pytest.mark.parametrize("entry_point", ["read_text", "CsvParser"])
+def test_invalid_encoding_errors_are_safe(tmp_path, entry_point):
+    """真实解码失败返回固定安全 ParserError，不泄漏输入字节、文件名或本机路径。"""
+
+    content = invalid_encoding_bytes()
+    path = tmp_path / "私有路径样本.csv"
+    path.write_bytes(content)
+    with pytest.raises(ParserError) as error:
+        if entry_point == "read_text":
+            read_text(path)
+        else:
+            CsvParser().parse(
+                doc_id=uuid4(), file_path=path, file_name=path.name, file_type="csv"
+            )
+    message = str(error.value)
+    assert message == "文本编码无法识别，请转换为 UTF-8 后重新上传"
+    assert repr(content) not in message and "\\x81" not in message
+    assert str(path) not in message and path.name not in message
+    assert error.value.__cause__ is None
+
+
+def test_valid_utf16_unreadable_text_is_not_encoding_failure(tmp_path):
+    """合法 UTF-16 即使语义不可读也不是解码失败；第一版不按具体字符串猜测乱码。"""
+
+    content = codecs.BOM_UTF16_LE + "\u8180\u8382".encode("utf-16-le")
+    parsed = parsed_file(tmp_path, content, "csv")
+    assert rows_of(parsed.blocks[0]) == [[content.decode("utf-16", errors="strict")]]
+
+
+@pytest.mark.parametrize("prefix", ["", "samples/"])
+def test_manual_fixture_regeneration_preserves_other_zip_entries(tmp_path, prefix):
+    """更新二进制负向样本与说明时，ZIP 内其他验收素材、压缩方式和注释保持不变。"""
+
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    sample_dir = tmp_path / "samples"
+    sample_dir.mkdir()
+    name = "04_negative_invalid_encoding.csv"
+    old_content = codecs.BOM_UTF16_LE + "\u8180\u8382".encode("utf-16-le")
+    (sample_dir / name).write_bytes(old_content)
+    (sample_dir / "README_TEST_EXPECTATIONS.md").write_text(
+        "修正后的说明", encoding="utf-8"
+    )
+    archive_path = tmp_path / "samples.zip"
+    with ZipFile(archive_path, "w", compression=ZIP_DEFLATED) as archive:
+        archive.comment = b"preserve-comment"
+        archive.writestr(prefix + name, old_content)
+        archive.writestr(prefix + "README_TEST_EXPECTATIONS.md", b"old expectations")
+        archive.writestr(prefix + "other.xlsx", b"OTHER_SAMPLE_BYTES")
+    regenerate_manual_fixture(sample_dir, archive_path)
+    assert (sample_dir / name).read_bytes() == invalid_encoding_bytes()
+    with ZipFile(archive_path) as archive:
+        assert archive.read(prefix + name) == invalid_encoding_bytes()
+        assert (
+            archive.read(prefix + "README_TEST_EXPECTATIONS.md").decode()
+            == "修正后的说明"
+        )
+        assert archive.read(prefix + "other.xlsx") == b"OTHER_SAMPLE_BYTES"
+        assert archive.getinfo(prefix + "other.xlsx").compress_type == ZIP_DEFLATED
+        assert archive.comment == b"preserve-comment"
 
 
 def test_xlsx_cells_formulas_and_percentages(tmp_path):
