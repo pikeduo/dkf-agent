@@ -1,2 +1,0 @@
-"file_name","file_type","document_status","document_error","doc_id","kb_id","mineru_job_state","mineru_error_code","route_decision","block_index","page","section","block_type","parsed_text","bbox","source","block_id"
-"17_invalid_encoding.csv","csv","FAILED","文本编码无法识别，请转换为 UTF-8 后重新上传","713e29bf-ec78-4848-b839-939a6e1e5dff","6d883154-6e3c-461c-8419-17a0940d3207",NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL

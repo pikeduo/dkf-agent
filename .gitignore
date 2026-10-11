@@ -33,3 +33,7 @@ docs/*
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md
+
+
+# 本地测试结果，不提交到 GitHub
+/results/

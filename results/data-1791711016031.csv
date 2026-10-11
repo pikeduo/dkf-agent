@@ -1,8 +1,0 @@
-"file_name","file_type","document_status","document_error","doc_id","kb_id","mineru_job_state","mineru_error_code","route_decision","block_index","page","section","block_type","parsed_text","bbox","source","block_id"
-"09_complex_xlsx.xlsx","xlsx","CHUNKING",NULL,"868349da-0503-4f93-adf4-c9026b79c48f","cb9e0c8c-ffa9-4e40-b826-44677f73b201",NULL,NULL,NULL,1,1,"经营指标","table","Marker	季度	收入	成本	毛利率
-ROUTER-COMPLEX-XLSX-MARKER-2026	Q1	1250	875	=(C2-D2)/C2
-ROW-2	Q2	1380	920	=(C3-D3)/C3
-ROW-3	Q3	1560	1015	=(C4-D4)/C4","null","native_parser","9cfc1990-bf59-516e-9074-b940196afced"
-"09_complex_xlsx.xlsx","xlsx","CHUNKING",NULL,"868349da-0503-4f93-adf4-c9026b79c48f","cb9e0c8c-ffa9-4e40-b826-44677f73b201",NULL,NULL,NULL,2,1,"公式原式","table","项目	公式
-收入合计	=SUM(经营指标!C2:C4)
-Q3增长率	=(经营指标!C4-经营指标!C3)/经营指标!C3","null","native_parser","608a1666-a4b9-541b-86bb-dda2c27b99f7"

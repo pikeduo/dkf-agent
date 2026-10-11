@@ -1,2 +1,0 @@
-"file_name","file_type","document_status","document_error","doc_id","kb_id","mineru_job_state","mineru_error_code","route_decision","block_index","page","section","block_type","parsed_text","bbox","source","block_id"
-"11B2_Selective_Hybrid_XLSX_AAE6B6A0E6AC.xlsx","xlsx","FAILED","ROUTER_REVIEW：无法确认完整覆盖，请核对路由理由并显式选择 Native / MinerU 对照","14eecbae-dd7e-4cb7-8b69-9207af737ce5","6fdb2d93-9bb6-4b7e-800a-d0c1cb96a962",NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL
