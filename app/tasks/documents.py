@@ -61,7 +61,7 @@ def save_failure(doc_id: UUID, task_id: UUID, message: str, final: bool) -> None
     reject_on_worker_lost=True,
 )
 def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
-    """保留旧 Native 默认行为；显式模式启用整份路由，云端只在检查点提交后投递。"""
+    """保留旧 Native 默认行为；可选路由及 Hybrid 先提交检查点再投递云端任务。"""
 
     try:
         identifier = UUID(doc_id)
@@ -107,6 +107,10 @@ def process_document(self, doc_id: str, parse_mode: str | None = None) -> dict:
             mineru_file_submit_count=result.get("mineru_file_submit_count"),
             duration_ms=round((perf_counter() - started) * 1000, 2),
         )
+        if result["status"] == "awaiting_chunk" and "hybrid_bundle_page_count" in result:
+            log_event("hybrid.persisted", doc_id=identifier, task_id=task_id,
+                      block_count=result.get("block_count"), status="CHUNKING",
+                      **{key: value for key, value in result.items() if key.startswith("hybrid_")})
         return result
     except (DocumentSourceError, ParserError, MinerUError) as exc:
         log_event(

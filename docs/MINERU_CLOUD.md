@@ -2,7 +2,7 @@
 
 本文件供开发与验收使用；部署说明和日常调用入口见 [README](../README.md)，开发路线见 [最新开发计划](DEVELOPMENT_PLAN_CODEX.md)，不把测试记录写入 README。
 
-当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。当前只扩展 11B.1 可选整份路由，旧显式入口不变；真实路由与 XLSX A/B 仍待人工完成，见 [Router 验收说明](PARSER_ROUTER.md)，不实现 Hybrid。
+当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 可选整份路由与默认关闭的 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
 
 ## 1. 官方契约与实现边界
 
@@ -259,4 +259,4 @@ ORDER BY d.file_name, b.block_index;
 
 阶段 10 已完成人工验收；最新开发计划记录 DOC/DOCX、PPT/PPTX 和 XLS 的真实云结果及质量边界，XLSX 云结果仍需独立对照，不能从 XLS 推断。本轮没有重新调用真实 API，11B.1 新路由仍需人工验收。Mock 不能替代真实鉴权、格式转换、页面语义和视觉质量，也不等于真实 429 或所有网络故障均已验证。
 
-已有 11B.1 可选整份路由但本轮未调用真实云 API验证新链路，复杂 XLSX auto 保守 review。未实现 11B.2 Hybrid、Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期。下一步先真实路由和 XLSX A/B，不提前开发后续阶段。
+已有 11B.1 路由和默认关闭的 11B.2 XLSX Hybrid，本次未调用真实云 API。复杂 XLSX 默认 auto 保守 review，人工开启后仅受支持候选进入单 Bundle。活动 Hybrid Job 用原 /mineru 入口恢复同一检查点，失败不自动第二次 Whole；公开参数仍 auto/native/mineru。未实现 Parse Cache、Admin 解析预览、Chunk、Embedding、RAG、公式安全计算或 Token 续期。下一步由用户验收，不提前开发后续阶段。

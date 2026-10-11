@@ -1,4 +1,4 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.8 · 完整性优先 Router + Selective Hybrid Visual + LlamaIndex + LangGraph）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.9 · 人工文档验收优先 + 完整性优先 Router + Selective Hybrid Visual + LlamaIndex + LangGraph）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
@@ -9,8 +9,76 @@
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
-> MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
+> 当前新增目标：Codex 只实现 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等格式的代码并提供测试方案；真实多格式文档测试由用户手动执行；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
+> MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
+> **最高优先级执行禁令：未经用户单独明确授权，Codex 不得自行运行文档解析测试、生成/渲染测试文档、执行完整回归/性能测试，或调用真实 MinerU / OCR / LLM API；仅编写代码与测试用例，交由用户手动测试验收。**
+
+---
+
+# 0. Codex 测试执行权限边界（最高优先级，适用于所有阶段）
+
+本节优先于全文各阶段的“自动测试”“人工测试”“测试矩阵”“回归测试”“真实验证”“完成标准”等措辞。**这些内容规定系统应该被如何验证，并不授权 Codex 自行运行测试。**
+
+## 0.1 权责分工
+
+| 工作项 | Codex | 用户 |
+|---|---|---|
+| 阅读代码、定位问题、实现本阶段功能 | 负责 | 审阅结果 |
+| 编写单元测试 / Mock 测试代码与预期断言 | 可以；只编写不执行 | 决定是否运行 |
+| 编写真实文档验收清单、命令、预期结果 | 负责；只输出说明 | 实际操作与记录 |
+| 生成或修改 PDF/DOCX/XLSX/PPTX/图片等测试文档 | **默认禁止** | 自行准备；明确委托才允许 Codex 生成 |
+| 运行 Parser / OCR / MinerU / Visual Bundle 文档测试 | **默认禁止（包含本地与 Mock 文档样本）** | **亲自运行** |
+| 发起真实 MinerU / OCR / DeepSeek / Embedding API 请求 | **禁止自动调用** | 确认额度后亲自执行 |
+| `pytest`、全量回归、长时 smoke、RAG 评测、性能测试 | **默认不运行** | 选择性运行 |
+| 静态检查（针对本轮改动的文件，有限范围） | 允许 | 可复查 |
+| 解析质量判断及阶段验收 | 提供标准，标记“待人工验收” | 提交日志/CSV 后共同分析，用户批准进入下一阶段 |
+
+**普通“实现阶段 X”或“按开发文档完成阶段 X”的指令，不构成测试授权。** 用户上传文档、样本路径、数据库连接、已有 Token，同样不等于授权 Codex 使用它们运行测试。
+
+## 0.2 Codex 默认允许的验证，仅限低成本静态检查
+
+默认可执行且最多各一次：
+
+```text
+git diff --check
+针对本轮实际修改的 Python 文件进行语法编译检查（如 py_compile；不导入业务模块）
+检查本轮改动文件的静态内容/接口契约
+```
+
+应控制在短时间内；若环境缺失、检查超时、需要安装依赖或进一步修复，应停止并报告。**不得为“确保通过”循环尝试测试或运行耗时命令。** 不得启动服务、Celery、数据库、模型或任意会触发真实文档处理的流程。
+
+Codex 可以新增 / 修改 `tests/` 下的测试用例，但**默认只交付测试代码与运行说明，不执行这些用例**。包括 Mock Provider 场景，只要涉及模拟文档处理、生成样本、DB/Broker 启动或耗时任务，均由用户启动执行。
+
+## 0.3 无单独授权时禁止的操作
+
+```text
+pytest / pytest -q / pytest tests/ 等任意测试执行
+python tests/*_smoke.py、tests/*acceptance*、批量测试脚本
+调用真实 MinerU / OCR / DeepSeek / Embedding 或外部文档转换 API
+上传/下载/解析/渲染真实 PDF、DOCX、XLSX、PPTX、图片等验收样本
+生成大型测试文件、临时视觉 Bundle、OCR 样本、测试文档集合
+启动 FastAPI/Celery/Redis/PostgreSQL 后自行发请求做端到端测试
+跑性能基准、RAG 评估、反复轮询云任务、长时后台任务
+为了通过测试自行重试、改进测试数据或连续修复-重测
+```
+
+以上限制同样适用于阶段 11A、11B.1、11B.2、12、15A、30、31、32、38，不得用“当前阶段自动测试要求”“完整回归”“API 必须验证”为理由绕过。
+
+## 0.4 如果用户专门要求 Codex 代跑某一项测试
+
+必须**另外取得明确的测试授权**，确认具体测试命令、测试文件范围、是否准许联网与调用付费服务、最大请求次数 / 额度 / 运行时间。未得到这些信息时只给测试步骤，不运行。一次授权只覆盖所指任务，不视为以后默认授权。
+
+## 0.5 每轮开发结束时的交付与停止条件
+
+Codex 每轮只需交付：
+
+1. 本轮修改文件及实现内容；
+2. 仅实际执行过的静态检查及结果；
+3. **“未运行文档解析/真实 API/自动化验收测试，等待用户手动测试”** 的明确说明；
+4. 用户可直接执行的最小测试步骤、输入文件、预期结果与失败信息收集方式（不替用户执行）；
+5. 已知限制、中文 Commit Message、下一步建议。
+
+**“代码实现完成”不等于“测试通过 / 阶段验收通过”。** 没有用户提供的人工验收结果与明确放行，Codex 不得自行进入下一阶段。若用户反馈失败，只针对反馈做一轮修复并再次交付测试方法，不得自行反复试跑。阶段进度描述仍以用户当前确认的仓库实际进度为准；本次文档版本更新不自动改变任何阶段状态。
 
 ---
 
@@ -330,7 +398,7 @@ MINERU_MODEL_VERSION=vlm
 
 真实密钥不得进入仓库。
 
-## 人工测试
+## 人工测试说明（仅用户执行，Codex 不得代跑）
 
 ```text
 conda activate dkf-agent
@@ -381,7 +449,7 @@ GET /health
 - RAG。
 - Agent。
 
-## 人工测试
+## 人工测试说明（仅用户执行，Codex 不得代跑）
 
 ```bash
 uvicorn app.main:app --reload
@@ -998,7 +1066,7 @@ doc_id
 
 Celery 重试、重复消息和 Worker 重启不得重复写入 Block。
 
-## 人工测试
+## 人工测试说明（仅用户执行，Codex 不得代跑）
 至少测试：
 
 ```text
@@ -1231,7 +1299,10 @@ pptx
 
 它们走显式 MinerU Cloud。
 
-## 自动测试
+## 自动化测试用例设计（Codex 只编写，用户负责执行）
+
+**执行约束：** Codex 只负责实现测试文件、Mock/Stub 及断言；不执行 `pytest`、任何 `smoke.py`、文档解析或云服务请求。用户测试并反馈结果后再修复。
+
 
 至少覆盖：
 
@@ -1272,9 +1343,9 @@ MinerU Provider Mock
 - Office result page / bbox semantics
 ```
 
-阶段 1～10 的现有回归测试必须全部继续通过。
+阶段 1～10 的回归覆盖必须保留；是否通过由用户执行后判定，Codex 不负责自行运行全量回归。
 
-## 人工测试
+## 人工测试说明（仅用户执行，Codex 不得代跑）
 
 至少准备并实际上传：
 
@@ -1969,7 +2040,9 @@ Merge 失败
 - Reading Order Normalizer 与 Router / Hybrid Merge 解耦。
 - Hybrid XLSX 依赖 Anchor 插入，不依赖 MinerU 对整个文档的 Reading Order。
 
-## 混合文档测试矩阵
+## 混合文档人工验收矩阵（用户准备并执行）
+
+以下仅用于编写预期结果和指导用户验收，**Codex 不得依据本矩阵生成测试文档、启动解析器或调用 MinerU。**
 
 阶段 11B 至少准备：
 
@@ -2035,7 +2108,10 @@ expected_bundle_submit_count
 expected_page / section / slide semantics
 ```
 
-## 自动测试
+## 自动化测试用例设计（Codex 只编写，用户负责执行）
+
+**执行约束：** Codex 只负责实现测试文件、Mock/Stub 及断言；不执行 `pytest`、任何 `smoke.py`、文档解析或云服务请求。用户测试并反馈结果后再修复。
+
 
 ### 11B.1
 
@@ -2057,7 +2133,7 @@ parse_mode=native / mineru 显式覆盖
 Native → MinerU 单次安全 fallback
 MinerU 失败不静默回退 Native
 Route Decision reason_codes 稳定
-阶段 1～11A 回归全部继续通过
+阶段 1～11A 回归用例保持可执行；由用户运行并判断是否通过
 ```
 
 ### 11B.2（只有启用 Hybrid 时）
@@ -2080,7 +2156,7 @@ Hybrid 失败 → 不逐元素补发 MinerU
 Chart 可结构化读取时不无条件发送 MinerU
 ```
 
-## 人工验收
+## 人工验收标准（仅用户执行，Codex 不得代跑）
 
 ### 11B.1
 
@@ -2460,7 +2536,10 @@ metadata.section
 
 如果 LlamaIndex Retriever / Query Engine 需要 Embedding 接口，则增加 Adapter 调用已有服务，不另行加载第二套 BGE-M3 模型，不重复生成文档向量。
 
-## 自动测试
+## 自动化测试用例设计（Codex 只编写，用户负责执行）
+
+**执行约束：** Codex 只负责实现测试文件、Mock/Stub 及断言；不执行 `pytest`、任何 `smoke.py`、文档解析或云服务请求。用户测试并反馈结果后再修复。
+
 
 至少覆盖：
 
@@ -3165,7 +3244,10 @@ final_status
 
 日志不得记录 API Key、MinerU Token、签名 URL 或完整敏感请求。
 
-## 自动测试
+## 自动化测试用例设计（Codex 只编写，用户负责执行）
+
+**执行约束：** Codex 只负责实现测试文件、Mock/Stub 及断言；不执行 `pytest`、任何 `smoke.py`、文档解析或云服务请求。用户测试并反馈结果后再修复。
+
 
 至少覆盖：
 
@@ -3182,7 +3264,7 @@ LangGraph State 可序列化
 LangChain Tool Adapter 不绕过业务 Service
 ```
 
-所有 Graph 测试优先使用 Stub / Mock Service，不能为了测试 Agent 重复调用真实 MinerU 或大量外部 LLM。
+Graph 测试用例应优先使用 Stub / Mock Service；仅由用户执行。Codex 不得为了测试 Agent 重复调用真实 MinerU 或大量外部 LLM。
 
 ## 完成标准
 
@@ -3194,7 +3276,7 @@ LangChain Tool Adapter 不绕过业务 Service
 
 ---
 
-# 37. 阶段 31：自动测试
+# 37. 阶段 31：自动化测试用例编写（执行由用户负责）
 
 至少建立：
 
@@ -3211,11 +3293,11 @@ LangGraph Knowledge Agent Test
 LangChain Tool / Prompt Adapter Test
 ```
 
-不追求一开始高覆盖率，优先保证关键链路。
+不追求一开始高覆盖率，优先设计关键链路用例；Codex 不自行运行这些用例，人工执行结果作为验收依据。
 
 ---
 
-# 38. 阶段 32：RAG 正式评测集
+# 38. 阶段 32：RAG 正式评测集（用户执行评测）
 
 至少：
 
@@ -3461,7 +3543,7 @@ Demo 5：
 
 ---
 
-# 44. 阶段 38：Knowledge Service 独立验收
+# 44. 阶段 38：Knowledge Service 独立验收（由用户运行）
 
 必须可以独立执行：
 
@@ -3583,8 +3665,8 @@ Codex 必须遵守：
 10. 代码有变化时给出中文 Commit Message。
 11. 每次回答最后给出“下一步建议”。
 12. 每个阶段完成后停止，等待人工测试。
-13. 当前阶段测试失败时先修复，不进入下一阶段。
-14. 外部 API 接入后必须提醒验证鉴权、最小调用、返回格式、业务结果、异常处理。
+13. 若用户手动测试反馈失败，则按反馈修复，不得自行重测，不进入下一阶段。
+14. 外部 API 接入后必须给用户人工验证鉴权、最小调用、返回格式、业务结果、异常处理的步骤；Codex 不得自行调用付费/联网服务。
 15. 未实际测试过的能力不得声称已验证成功。
 16. MinerU 实现必须以官方 API 文档 `https://mineru.net/apiManage/docs` 为准，不得猜测接口、参数、状态或错误码。
 17. 当前 MinerU 平台频控：提交任务共用 50 个文件/分钟；结果查询共用 1000 次/分钟；单用户 5000 个文件/天。代码必须配置化并使用 Redis 做多 Worker 共享保护。
@@ -3592,7 +3674,7 @@ Codex 必须遵守：
 19. 不实现 MinerU Token 到期时间跟踪、自动续期或刷新逻辑；仅保证 Token 安全读取和错误可解释。
 20. Reindex 必须优先复用 Parse Cache；重新调用 MinerU 必须使用明确的 Reparse 语义。
 21. 当前不部署 MinerU 本地模型，不新增 MinerU 本地推理依赖。
-22. 阶段 1～10 已完成并作为冻结基线。阶段 11A 及之后若因新增格式需要修改上传白名单、统一 FileType、格式校验等前置公共代码，属于兼容性扩展，不视为“重做旧阶段”；但必须先说明原因并保证阶段 1～10 回归测试继续通过。
+22. 阶段 1～10 已完成并作为冻结基线。阶段 11A 及之后若因新增格式需要修改上传白名单、统一 FileType、格式校验等前置公共代码，属于兼容性扩展，不视为“重做旧阶段”；但必须先说明原因、维护阶段 1～10 回归用例，并由用户运行确认通过。
 23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
@@ -3619,12 +3701,16 @@ Codex 必须遵守：
 46. 第一版 LangGraph 必须使用有限状态、明确条件边和最大步数保护；禁止开放式无限循环 Agent。
 47. LangGraph / LangChain / LlamaIndex 内部对象不得泄漏到对外 API；Coordinator 只依赖稳定业务协议。
 48. Agent 日志只记录 route / tool / duration / status 等可观察信息，不记录 API Key、Token、签名 URL 或敏感完整请求。
+49. 最高优先级遵循本文第 0 节：**Codex 默认不执行任何文档解析测试、样本生成/渲染、pytest、smoke、全量回归、性能评测或真实 MinerU/OCR/LLM 调用。**
+50. 阶段里的“自动测试”“Mock 覆盖”“真实样本验收”仅要求提供可执行的测试代码、人工说明和预期结果，**不授权 Codex 实际运行**。
+51. Codex 默认最多做本轮改动文件的低成本静态检查；如需运行测试、使用额外资源或产生云额度，必须经用户另行明确授权范围和预算。
+52. 每轮代码实现后立刻停止并报告“待人工验收”；不得自行生成大量测试资料、循环修复-重测或自动推进下一阶段。
 
 
 ---
 
 
-# 46.1 当前工程基线（V0.8）
+# 46.1 当前工程基线（沿用 V0.8 历史记录；V0.9 不更新阶段状态）
 
 ```text
 阶段 1～9：已完成并回归通过
@@ -3679,7 +3765,7 @@ LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：�
 
 LangGraph / LangChain 同样不改变当前阶段：只有在 Knowledge Search / Query API、Citation、Formula Service 已稳定后，阶段 30 才引入 LangGraph StateGraph 封装 Knowledge Agent；LangChain 仅在该阶段及其后按需提供 Prompt、StructuredTool、Runnable、Message、Model Adapter，不承担核心 RAG 和 Agent Runtime。
 
-已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并执行完整回归。
+已完成阶段不需要 Codex 重新实现。后续任务以**当前仓库代码 + AGENTS.md + 本开发文档**为事实来源；只有当当前阶段的新需求必须触及公共契约时，才做最小兼容修改并提供完整回归测试清单，由用户负责运行，不由 Codex 自动执行。
 
 ---
 
@@ -3690,18 +3776,18 @@ LangGraph / LangChain 同样不改变当前阶段：只有在 Knowledge Search /
 → Codex 检查当前代码
 → 给出本阶段简短实施方案
 → 修改代码
-→ 执行可执行的检查 / 测试
-→ 给出人工测试步骤
+→ 只做本轮改动文件的有限静态检查（不运行 pytest / 文档解析 / 云 API）
+→ 给出人工测试步骤、预期结果和反馈材料
 → 用户人工测试
 → 用户手动 Commit / Push
 → 进入下一阶段
 ```
 
-每个阶段以“能运行、能测试、能解释”为完成标准，不以“代码写完”为完成标准。11B.2 还必须额外证明 Hybrid 在内容完整性与 MinerU 文件 / 页面消耗之间具有真实收益，否则不保留该复杂度。
+每个阶段的技术完成标准仍是“能运行、能测试、能解释”，但**Codex 代码交付时只能标记待人工验收**；是否运行成功及阶段能否完成由用户测试确认，不以 Codex 自行试跑为依据。11B.2 还必须额外证明 Hybrid 在内容完整性与 MinerU 文件 / 页面消耗之间具有真实收益，否则不保留该复杂度。
 
 LlamaIndex 相关开发同样遵循阶段闸门：未完成阶段 15 的 pgvector 真相表前，不提前进入阶段 15A；阶段 15A 只验证 Adapter，不直接跳到完整 RAG。
 
-LangGraph / LangChain 也遵循阶段闸门：阶段 30 之前不为了“先接框架”改写现有 Service；阶段 30 只在稳定 API / Tool 之上建立有限状态 Agent 工作流，并通过自动测试验证普通问答、公式路径、证据不足、Tool 异常和最大步数保护。
+LangGraph / LangChain 也遵循阶段闸门：阶段 30 之前不为了“先接框架”改写现有 Service；阶段 30 只在稳定 API / Tool 之上建立有限状态 Agent 工作流，并编写普通问答、公式路径、证据不足、Tool 异常和最大步数保护的自动化用例，由用户手动运行验证。
 
 
 ---

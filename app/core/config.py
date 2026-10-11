@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     router_pdf_max_lines_per_page: int = Field(default=2000, ge=1, le=10000)
     router_xml_part_max_mb: int = Field(default=16, ge=1, le=64)
 
+    # 仅用户完成真实 XLSX 对照后手动启用；不改变省略模式和显式 Native 行为。
+    hybrid_xlsx_enabled: bool = False
+    hybrid_max_candidates: int = Field(default=64, ge=1, le=256)
+    hybrid_max_bundle_pages: int = Field(default=32, ge=1, le=200)
+    hybrid_min_image_side: int = Field(default=32, ge=1, le=4096)
+    hybrid_max_image_pixels: int = Field(default=16000000, ge=1, le=40000000)
+    hybrid_max_image_mb: int = Field(default=16, ge=1, le=64)
+
     # 云端精准解析单独启用；空 Token 不影响原生 Parser 和基础服务启动。
     mineru_api_base_url: str = "https://mineru.net/api/v4"
     mineru_api_token: SecretStr = SecretStr("")

@@ -29,6 +29,7 @@ docs/*
 !docs/PARSER_CONTRACT.md
 !docs/BUSINESS_LOGGING.md
 !docs/PARSER_ROUTER.md
+!docs/SELECTIVE_HYBRID.md
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

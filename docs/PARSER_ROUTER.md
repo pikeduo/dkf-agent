@@ -1,6 +1,6 @@
 # 整份文档 Parser Router v1（11B.1）
 
-本版只实现 `Preflight → Decision → Native / MinerU Whole / Review → Guard`。阶段 1～11A 不重做；没有 Visual Bundle、Hybrid Merge、Parse Cache、Chunk、Embedding 或 RAG。本轮验证使用 Mock 供应商与隔离 PostgreSQL schema，不代表新路由已通过真实 MinerU 人工验收。
+整份 v1 默认链路仍为 `Preflight → Decision → Native / MinerU Whole / Review → Guard`。11B.2 新增默认关闭的 XLSX 单 Bundle 增强，见 [Selective Hybrid](SELECTIVE_HYBRID.md)。阶段 1～11A 不重做，无 Parse Cache、Chunk、Embedding 或 RAG；本次测试只编写未执行，真实验收由用户完成。
 
 ## 1. 使用和兼容边界
 
@@ -23,7 +23,8 @@
 | DOCX 媒体、绘图、数学、文本框、图表、嵌入及未覆盖辅助/正文结构 | mineru_whole / DOCX_HAS_* |
 | PDF 扫描/图文混合/复杂绘图/批注/多栏/公式或旋转文字风险 | mineru_whole / PDF_* |
 | JPG/JPEG/PNG、DOC/XLS/PPT/PPTX | mineru_whole / VISUAL_OR_LEGACY_FORMAT |
-| XLSX 媒体、绘图、图表、嵌入、VML、外链/特殊 Sheet | review / XLSX_CLOUD_AB_REQUIRED、XLSX_* |
+| XLSX 媒体、绘图、图表 | 默认 review；人工开启 Hybrid 后受支持结构 hybrid_bundle，进一步检查失败仍 review |
+| XLSX 嵌入、VML、外链/特殊 Sheet | review / XLSX_CLOUD_AB_REQUIRED、XLSX_* |
 | MD 图片引用（本地/远程/HTML），附件未上传 | review / MD_ASSET_NOT_UPLOADED |
 | 超资源上限 | review / PREFLIGHT_LIMIT |
 
@@ -122,9 +123,9 @@ tests/test_parser_router.py、tests/parser_router_smoke.py 覆盖格式矩阵、
 
 旧 XLS 的公式退化/视觉遗漏不由路由修复。复杂 XLSX Whole-MinerU 本轮尚未真实验证，auto 保守 review。真实鉴权、上传、ZIP/Adapter/落库及混合完整性必须手动验证，Mock 通过不能替代。
 
-费用摘要：初始结果实际提交 0、云计划 1；确认 batch 后提交 1，PUT/GET/下载重试不建新源文件任务。重复日志/快照不能累加为真实配额，应按 job_id/batch_id 去重。POST 确认丢失/平台拒绝时本地无法证明实际收费/额度，以平台核对为准。没有每图/每表调用，也没有 Hybrid 实现。
+费用摘要：初始结果实际提交 0、云计划 1；确认 batch 后提交 1，PUT/GET/下载重试不建新源文件任务。重复日志/快照不能累加为真实配额，应按 job_id/batch_id 去重。POST 确认丢失/平台拒绝时本地无法证明实际收费/额度，以平台核对为准。开启 Hybrid 后同样最多一份 Bundle；零视觉页为零云文件，没有每图/每表调用。
 
-下一步只做真实路由验收及 XLSX A/B；结论明确后由用户决定是否需要 11B.2，不自动进入阶段 12。
+当前按用户授权实现默认关闭的 11B.2；用户先完成测试与 Native/Whole/Hybrid 对照，确认收益再保留启用，不自动进入阶段 12。
 
 ## 5. 本次修改文件
 

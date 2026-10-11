@@ -6,6 +6,8 @@
 
 已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式仍为旧 Native。
 
+可选 [XLSX Hybrid](SELECTIVE_HYBRID.md) 不改变 XlsxParser 或统一 Block 字段：保留完整 Sheet table，结构化 Chart 为 native_parser，云视觉增强映射回原 Sheet、逻辑 page=1、bbox=NULL。临时 Bundle 的 PDF 页码只在私有 manifest 使用，不作为原件页码。新增代码与测试待用户执行验收。
+
 ## 统一结构
 
 ```json

@@ -21,6 +21,8 @@ from app.services.document_processing import (
 from app.services.mineru.adapter import MinerUResultAdapter, page_geometry
 from app.services.mineru.errors import MinerUError, api_error
 from app.services.mineru.provider import LocalFile, validate_local_file
+from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
+from app.parsers.hybrid import BundleManifest
 
 
 def parse_options(settings: Settings) -> dict:
@@ -36,7 +38,11 @@ def parse_options(settings: Settings) -> dict:
 
 
 def local_file(document: Document, job: DocumentParseJob) -> LocalFile:
-    """把已有存储记录映射为当前代次原件，Provider 再校验实际内容 Hash。"""
+    """整份任务读取原件；Hybrid 仅映射一个受检 Bundle，Document 仍属于源 XLSX。"""
+
+    if "_hybrid" in job.parse_options:
+        path, file_hash = bundle_file(document, job.parse_options["_hybrid"])
+        return LocalFile(path, "visual_bundle.pdf", job.data_id, file_hash)
 
     return LocalFile(
         source_path(document), document.file_name, job.data_id, job.file_hash
@@ -50,8 +56,9 @@ def create_job(
     *,
     routing_task_id: UUID | None = None,
     route_decision: dict | None = None,
+    hybrid_context: dict | None = None,
 ) -> DocumentParseJob:
-    """创建有效云解析身份；只允许当前路由代次从 PARSING 交接，不提供完成结果缓存。"""
+    """创建 Whole/单 Bundle 云身份；冻结 Hybrid 检查点，活动恢复不改为新 Whole 任务。"""
 
     document = session.scalar(
         select(Document)
@@ -66,8 +73,21 @@ def create_job(
         )
     )
     options = parse_options(settings)
+    if hybrid_context is not None:
+        checked_context(document, hybrid_context)
+        if (routing_task_id is None or document.processing_task_id != routing_task_id
+            or hybrid_context["routing_task_id"] != str(routing_task_id)
+            or document.status != "PARSING"):
+            raise MinerUError("ROUTE_INVALID", "Hybrid 检查点必须属于当前路由处理代次")
+        options = options | {"_hybrid": hybrid_context}
     identity = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
     if active:
+        # 原 /mineru 恢复入口没有 Hybrid 参数；只恢复同原件、同配置和当前活动检查点。
+        if (hybrid_context is None and "_hybrid" in active.parse_options
+            and active.file_hash == document.file_hash
+            and active.task_id == document.processing_task_id
+            and {key: active.parse_options.get(key) for key in options} == options):
+            return active
         if (
             active.file_hash == document.file_hash
             and active.options_hash == identity
@@ -88,11 +108,14 @@ def create_job(
         # 决策只作内部元数据，不进入官方请求参数，也不改变供应商解析身份 Hash。
         checked = RouteDecision.model_validate(route_decision)
         if (
-            checked.route_strategy != "mineru_whole"
+            checked.route_strategy != ("hybrid_bundle" if hybrid_context is not None else "mineru_whole")
             or checked.file_type != document.file_type
+            or (hybrid_context is not None and checked.parse_mode != "auto")
         ):
             raise MinerUError("ROUTE_INVALID", "路由决策与云解析原件不一致")
         options = options | {"_route_decision": checked.model_dump(mode="json")}
+    elif hybrid_context is not None:
+        raise MinerUError("ROUTE_INVALID", "Hybrid 必须由当前路由代次交接")
     job_id = uuid4()
     job = DocumentParseJob(
         job_id=job_id,
@@ -247,7 +270,7 @@ def result_failure(payload: dict) -> MinerUError:
 def check_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """只检查一次；完成时下载并事务落库，未完成立即结束并由 Celery 延时再检查。"""
+    """只检查一次；Whole 或 Hybrid 全部校验后原子写块，未完成延时再查。"""
 
     locked = lock_job(session, job_id)
     if not locked:
@@ -298,8 +321,8 @@ def check_step(
         archive,
         doc_id=document.doc_id,
         file_name=document.file_name,
-        file_type=document.file_type,
-        geometry=page_geometry(source.path, document.file_type),
+        file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
+        geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
         identity=job.file_hash + ":" + job.options_hash,
     )
     log_event(
@@ -308,7 +331,15 @@ def check_step(
         job_id=job_id,
         block_count=len(parsed.blocks),
     )
-    if "_route_decision" in job.parse_options:
+    hybrid_metrics = {}
+    if "_hybrid" in job.parse_options:
+        parsed, completed_manifest = complete_hybrid(
+            document, job.parse_options["_hybrid"], parsed,
+            RouteDecision.model_validate(job.parse_options["_route_decision"]),
+        )
+        job.parse_options = job.parse_options | {"_hybrid_result": completed_manifest}
+        hybrid_metrics = metrics(BundleManifest.model_validate(completed_manifest))
+    elif "_route_decision" in job.parse_options:
         try:
             guard_result(
                 parsed,
@@ -343,13 +374,16 @@ def check_step(
         status="CHUNKING",
         state="done",
     )
+    if hybrid_metrics:
+        log_event("hybrid.persisted", doc_id=completed_doc_id, job_id=job_id,
+                  block_count=len(parsed.blocks), status="CHUNKING", **hybrid_metrics)
     return "done", len(parsed.blocks)
 
 
 def record_error(
     session: Session, job_id: UUID, error: MinerUError, settings: Settings
 ) -> bool:
-    """用新事务保存安全错误，返回是否继续重试；旧任务不得覆盖新代次或完成结果。"""
+    """独立事务保存安全错误及 Hybrid 失败账本；旧任务不能覆盖新代次或完成结果。"""
 
     locked = lock_job(session, job_id)
     if not locked:
@@ -370,6 +404,17 @@ def record_error(
         job.finished_at = datetime.now(UTC)
         job.upload_url = None
         transition_document(document, "FAILED", str(error))
+        if "_hybrid" in job.parse_options:
+            try:
+                manifest = BundleManifest.model_validate(job.parse_options["_hybrid"]["manifest"])
+                for entry in manifest.entries:
+                    if entry.state in {"pending", "reused"}:
+                        entry.state = "failed"
+                ledger = manifest.model_dump(mode="json")
+            except (KeyError, TypeError, ValueError):
+                # 检查点损坏也必须记录失败，不能因账本校验再次阻断安全错误持久化。
+                ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
+            job.parse_options = job.parse_options | {"_hybrid_result": ledger}
     job.error_code, job.error_message = error.code, str(error)
     if retry:
         document.error_message = str(error)

@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.core.file_formats import MINERU_TYPES
 from app.models import Document
 from app.parsers.common import OCRRequiredError, ParserError
+from app.parsers.hybrid import HybridReview, merge_hybrid
 from app.parsers.registry import get_parser
 from app.parsers.routing.contracts import ParseMode, RouteDecision
 from app.parsers.routing.guard import CompletenessError, guard_result
@@ -24,6 +25,7 @@ from app.services.document_processing import (
     transition_document,
 )
 from app.services.mineru.jobs import create_job
+from app.services.hybrid_processing import metrics, prepare_checkpoint
 
 
 def log_decision(
@@ -52,7 +54,7 @@ def log_decision(
 def run_routed_step(
     session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings
 ) -> dict:
-    """对当前代次整份路由；失败不写半份块，review 明确 FAILED 且不调用云端。"""
+    """在当前代次路由和暂存；Hybrid 只有全部合并后写块，review 不调用云端。"""
 
     if mode not in {"auto", "native", "mineru"}:
         raise ParserError("解析模式仅允许 auto、native 或 mineru")
@@ -73,7 +75,20 @@ def run_routed_step(
         if hashlib.file_digest(stream, "sha256").hexdigest() != document.file_hash:
             raise ParserError("文档原件 Hash 已变化，请核对存储内容")
     inspection = inspect_document(path, document.file_type, settings)
-    decision = decide_route(document.file_type, mode, inspection)
+    decision = decide_route(document.file_type, mode, inspection,
+                            hybrid_enabled=settings.hybrid_xlsx_enabled)
+    hybrid_context = None
+    hybrid_metrics = {}
+    plan = None
+    if decision.route_strategy == "hybrid_bundle":
+        log_event("hybrid.started", doc_id=doc_id, task_id=task_id, file_type="xlsx")
+        try:
+            plan, hybrid_context = prepare_checkpoint(document, task_id, settings, decision)
+            hybrid_metrics = metrics(plan.manifest)
+        except HybridReview as exc:
+            decision = decision.model_copy(update={
+                "route_strategy": "review", "reason_codes": decision.reason_codes + (exc.code,)
+            })
     log_decision("router.decided", decision, doc_id, task_id)
     transition_document(document, "PARSING")
     if decision.route_strategy == "review":
@@ -96,6 +111,18 @@ def run_routed_step(
             "route_decision": decision.model_dump(mode="json"),
             "mineru_file_submit_count": 0,
         }
+    if plan is not None:
+        log_event("hybrid.prepared", doc_id=doc_id, task_id=task_id, **hybrid_metrics)
+        if not plan.manifest.bundle_page_count:
+            parsed = merge_hybrid(plan, None)
+            persist_blocks(session, document, parsed)
+            transition_document(document, "CHUNKING")
+            return result | {
+                "status": "awaiting_chunk", "document_status": document.status,
+                "block_count": len(parsed.blocks), "route_decision": decision.model_dump(mode="json"),
+                "coverage": "hybrid_structural_guard_passed", "mineru_file_submit_count": 0,
+                **hybrid_metrics,
+            }
     if decision.route_strategy == "native":
         try:
             parser = get_parser(document.file_type)
@@ -147,6 +174,7 @@ def run_routed_step(
         settings,
         routing_task_id=task_id,
         route_decision=decision.model_dump(mode="json"),
+        hybrid_context=hybrid_context,
     )
     # 换成云任务代次后旧 Native 消息/失败回调全部失效；提交之后才投递短任务。
     return result | {
@@ -157,6 +185,7 @@ def run_routed_step(
         "route_decision": decision.model_dump(mode="json"),
         "mineru_file_submit_count": 0,
         "planned_mineru_file_count": 1,
+        **hybrid_metrics,
     }
 
 

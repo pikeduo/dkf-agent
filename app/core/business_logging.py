@@ -65,6 +65,11 @@ FIELDS = {
     "image_count",
     "chart_count",
     "source_document_count",
+    "hybrid_visual_candidate_count",
+    "hybrid_visual_filtered_count",
+    "hybrid_visual_dedup_count",
+    "hybrid_bundle_page_count",
+    "hybrid_chart_count",
 }
 LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
@@ -122,6 +127,9 @@ EVENT_LABELS = {
     "router.finished": "路由任务处理结束",
     "router.cloud_submitted": "路由整份云解析批次已确认",
     "router.cloud_dispatch_failed": "路由云任务投递确认失败",
+    "hybrid.prepared": "Hybrid 候选与单个 Bundle 已准备，尚未写入最终 Block",
+    "hybrid.started": "开始 XLSX 主解析与视觉候选检查",
+    "hybrid.persisted": "Hybrid 主结果与增强结果已完整落库",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
@@ -166,6 +174,11 @@ FIELD_LABELS = {
     "image_count": "图片数",
     "chart_count": "图表数",
     "source_document_count": "源文档数",
+    "hybrid_visual_candidate_count": "视觉候选数",
+    "hybrid_visual_filtered_count": "视觉过滤数",
+    "hybrid_visual_dedup_count": "视觉复用数",
+    "hybrid_bundle_page_count": "Bundle页数",
+    "hybrid_chart_count": "结构化图表数",
 }
 
 

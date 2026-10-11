@@ -16,6 +16,8 @@ from app.models import DocumentParseJob
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import check_step, record_error, submit_step
 from app.services.mineru.provider import MinerUCloudProvider
+from app.parsers.hybrid import BundleManifest
+from app.services.hybrid_processing import metrics
 from app.tasks.documents import DocumentProcessingError, processing_session
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,10 @@ def execute_step(task, job_id: str, step: str) -> dict:
                     "route_decision": job.parse_options["_route_decision"],
                     "mineru_file_submit_count": int(job.batch_id is not None),
                 }
+                if "_hybrid" in job.parse_options:
+                    route_summary.update(metrics(BundleManifest.model_validate(
+                        job.parse_options["_hybrid"]["manifest"]
+                    )))
         if action in {"submit", "check"}:
             publish_step(identifier, action, value)
         summary = {

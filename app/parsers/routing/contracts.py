@@ -19,6 +19,9 @@ REASON_CODES = frozenset(
         "NATIVE_COMPLETENESS_FALLBACK",
         "MD_ASSET_NOT_UPLOADED",
         "XLSX_CLOUD_AB_REQUIRED",
+        "XLSX_HYBRID_ENABLED",
+        "HYBRID_UNSUPPORTED_STRUCTURE",
+        "HYBRID_RESOURCE_LIMIT",
         "XLSX_HAS_EMBEDDED_IMAGE",
         "XLSX_HAS_DRAWING",
         "XLSX_HAS_CHART",
@@ -77,7 +80,7 @@ class StructuralSignals(BaseModel):
 
 
 class RouteDecision(BaseModel):
-    """可解释的代次决策；Hybrid 只预留名称，本版不会产生该策略。"""
+    """可解释的代次决策；Hybrid 仅用于人工开启的 XLSX 视觉增强。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     decision_version: Literal["router-v1"] = "router-v1"

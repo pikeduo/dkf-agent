@@ -44,6 +44,13 @@ MINERU_MODEL_VERSION=vlm
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
+# 可选 XLSX 视觉增强；只有人工对照确认需要后才开启。
+HYBRID_XLSX_ENABLED=false
+HYBRID_MAX_CANDIDATES=64
+HYBRID_MAX_BUNDLE_PAGES=32
+HYBRID_MIN_IMAGE_SIDE=32
+HYBRID_MAX_IMAGE_PIXELS=16000000
+HYBRID_MAX_IMAGE_MB=16
 ```
 
 - 替换数据库密码，URL 中特殊字符需百分号编码；真实密钥和 `.env` 不提交仓库。
@@ -149,6 +156,12 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 
 CPU Worker 应显示 default_queue、process_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
 
+启用 XLSX Hybrid 时，Windows CPU Worker 使用下列串行命令处理 PDF Bundle，替换上面的 threads Worker（不要同时保留旧 Worker 消费该队列）：
+
+```powershell
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
+```
+
 可选 GPU Worker 当前不加载模型、不处理文档，可暂不启动：
 
 ```powershell
@@ -207,7 +220,9 @@ Swagger 点击 Try it out，填写 kb_id，打开“选择文件”窗口单选�
 | auto | 简单文档 Native；复杂 DOCX/PDF、图片、DOC/XLS/PPT/PPTX 整份 MinerU |
 | mineru | 强制云解析，仅 PDF、图片及六种 Office；不接受 TXT/MD/CSV |
 
-auto 对复杂 XLSX、缺附件的 Markdown 或预检超限先要求人工复核；不抓取附件 URL，不支持 hybrid。复核对应 Document=FAILED、错误前缀 ROUTER_REVIEW，不是成功。检测只是结构保护，不能保证 OCR/公式/复杂版式完全正确。
+auto 默认对复杂 XLSX、缺附件的 Markdown 或预检超限要求人工复核。人工对照确认需要后，可设置 `HYBRID_XLSX_ENABLED=true` 并重启 API/Worker：受支持的 XLSX 图片进入单个云端 PDF Bundle，Native 单元格/公式保留；基础 Chart 优先本地结构化，零视觉页时不调用云端。不新增 hybrid 请求参数。未知绘图、外链、复杂 Chart 或超限仍 review；不抓取附件 URL。复核对应 Document=FAILED、错误前缀 ROUTER_REVIEW，不是成功。检测不能保证 OCR/复杂版式语义全部正确。
+
+Hybrid 需有效 MinerU Token、直连和可写原件目录；临时 Bundle/manifest 位于原件目录下 `.hybrid`，应随原件备份，不在运行中删除。图片只按大小/纯色及精确 Hash 过滤、复用；自定义装饰或图表视觉语义仍需人工核对。成功块的 section 为原 Sheet、page=1、bbox 为空，增强块位于对应整 Sheet table 后按 Anchor 排序，不伪造 Excel 打印页或逐单元格交错布局。详见 [Hybrid 使用限制](docs/SELECTIVE_HYBRID.md)。
 
 多份文件重复 file 字段，每份有独立 doc_id；示例替换知识库 UUID 和文件名：
 
@@ -250,4 +265,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [业务日志](docs/BUSINESS_LOGGING.md)

@@ -7,9 +7,9 @@ WHOLE_TYPES = {"jpg", "jpeg", "png", "doc", "xls", "ppt", "pptx"}
 
 
 def decide_route(
-    kind: FileType, mode: ParseMode, inspection: Inspection
+    kind: FileType, mode: ParseMode, inspection: Inspection, *, hybrid_enabled: bool = False
 ) -> RouteDecision:
-    """根据覆盖风险生成稳定理由；显式 Native 允许能力对照但不声称视觉内容完整。"""
+    """生成稳定理由；Hybrid 默认关闭，仅选择具备可进一步检查的 XLSX 视觉风险。"""
 
     reasons = list(inspection.risks)
     if inspection.uncertain:
@@ -26,6 +26,14 @@ def decide_route(
     elif kind in WHOLE_TYPES:
         strategy = "mineru_whole"
         reasons.insert(0, "VISUAL_OR_LEGACY_FORMAT")
+    elif (
+        kind == "xlsx" and reasons and hybrid_enabled
+        and set(reasons).issubset({
+            "XLSX_HAS_EMBEDDED_IMAGE", "XLSX_HAS_DRAWING", "XLSX_HAS_CHART"
+        })
+    ):
+        strategy = "hybrid_bundle"
+        reasons.insert(0, "XLSX_HYBRID_ENABLED")
     elif kind in {"md", "xlsx"} and reasons:
         strategy = "review"
         if kind == "xlsx":
