@@ -1,4 +1,4 @@
-# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.5 · 多格式文档 + LlamaIndex RAG 编排）
+# DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.6 · 完整性优先 Parser Router + LlamaIndex RAG 编排）
 
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
@@ -6,9 +6,9 @@
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
 > 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
-> 文档解析策略：**Native Parser + MinerU 云端精准解析 API + Parser Router**。  
+> 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router**。  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
-> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
+> 当前新增目标：先完成 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等常见文档格式与混合内容测试；阶段 11B 采用“能证明 Native 完整覆盖才走 Native，否则走 MinerU / 显式人工决策”的保守路由；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。
 
 ---
@@ -1308,98 +1308,518 @@ RAG
 
 ---
 
-# 17B. 阶段 11B：Parser Router 与混合文档路由
+# 17B. 阶段 11B：完整性优先 Parser Router 与混合文档路由
 
 ## 目标
 
-在阶段 11A 格式能力稳定后，实现基于“文件格式 + 内部内容”的自动路由，而不是只按后缀选择 Parser。
+阶段 11B 不再把 Router 定义为“Native 能解析就优先 Native，失败再回退 MinerU”，也不采用“所有文件全部交给 MinerU”的简单策略。
 
-## 第一版总体路由
+Router 的核心判断是：
 
 ```text
-TXT / Markdown / CSV
-→ Native
-
-DOC / XLS / PPT / PPTX
-→ MinerU Cloud
-
-图片
-→ MinerU Cloud
-
-DOCX
-→ 简单文本 / 原生表格：Native
-→ 图片、截图、公式图片等复杂视觉内容：MinerU Cloud
-
-XLSX
-→ 单元格 / 公式为主：Native
-→ 图表、图片、复杂绘图：MinerU Cloud
-
-PDF
-→ 简单文本型：Native
-→ 扫描、混合页、复杂版式 / 表格 / 公式 / 图表：MinerU Cloud
+这个文件能不能被当前 Native Parser 完整覆盖其主要信息？
 ```
 
-内部接口继续保留：
+只有在 **Preflight Inspector 能合理证明 Native 不会静默漏掉主要信息** 时，`auto` 才选择 Native；只要存在重要视觉内容、复杂版式、当前 Native 明确不覆盖的结构，或无法可靠判断完整性，就应选择 MinerU Cloud，或者明确要求管理员人工指定解析模式。
+
+核心原则：
+
+```text
+能证明完整覆盖
+→ Native
+
+不能证明完整覆盖 / 存在显著视觉内容 / 判断不确定
+→ MinerU Cloud 或明确人工决策
+```
+
+这里判断的是“完整性”，不是“能否抽出一些文字”。禁止把“Native 没报错”等同于“文档已完整解析”。
+
+## 为什么不把所有文件都交给 MinerU
+
+阶段 10 与阶段 11A 的真实样本已经说明，MinerU 很适合 OCR、复杂版式、图片、表格、公式与 Office 视觉内容，但供应商解析也可能带来模型误差和结构损失；Native 对结构明确的原生数据仍有确定性优势。
+
+当前真实测试形成以下设计依据：
+
+```text
+Native TXT / CSV
+→ 文本确定性高、无云调用、低延迟
+
+Native XLSX
+→ 能精确保留 Sheet、单元格值和公式原式
+
+MinerU DOC / DOCX / PPT / PPTX
+→ 能补充图片 OCR、复杂视觉内容
+→ 但 Reading Order、公式字符、Block 边界可能存在模型波动
+
+MinerU XLS（当前复杂样本）
+→ 云端链路成功
+→ 但出现公式原式退化为计算结果、内嵌图片 OCR 缺失
+```
+
+因此阶段 11B 的目标不是“尽可能少用 MinerU”，也不是“全部使用 MinerU”，而是：
+
+```text
+确定性结构 → Native
+复杂视觉结构 → MinerU
+两者均不能保证完整性的场景 → 明确暴露限制，再决定是否进入受控 Hybrid
+```
+
+不得为了简化实现而牺牲 RAG 的证据完整性。
+
+## 总体流程
+
+```text
+Upload / Existing Document
+        ↓
+Format Validation
+        ↓
+Preflight Inspector
+        ↓
+Route Decision
+        ├─ Native
+        ├─ MinerU Cloud
+        └─ Explicit Review / Unsupported Complete Auto Route
+        ↓
+Parser / Provider
+        ↓
+Completeness Guard
+        ↓
+DocumentBlock
+        ↓
+CHUNKING
+```
+
+第一版 Router 仍以 **整份文档选择单一主解析路径** 为主，不做逐页 / 逐元素 Native + MinerU 自动合并。
+
+## `parse_mode`
+
+继续保留：
 
 ```text
 parse_mode = auto | native | mineru
 ```
 
-默认 `auto`；管理员必须能显式覆盖，以便人工验收与问题排查。
+语义：
 
-## 混合文档测试优先于复杂路由规则
+```text
+auto
+→ 使用 Preflight Inspector 和 Router 决策
 
-在确定启发式前，至少建立以下真实测试文件：
+native
+→ 管理员显式要求 Native，用于基线对比和排障
+→ 仍必须明确暴露 Native 不支持的视觉内容，不得把部分结果声明为完整解析
+
+mineru
+→ 管理员显式要求 MinerU
+→ 仍遵守文件格式、配额、幂等、安全和真实 API 限制
+```
+
+显式覆盖主要用于人工验收、A/B 对比与故障排查，不代表可以绕过格式安全校验。
+
+## Route Decision 必须可解释
+
+Router 不能只返回一个布尔值。至少形成结构化决策信息，例如：
+
+```json
+{
+  "decision_version": "router-v1",
+  "parse_mode": "auto",
+  "file_type": "docx",
+  "selected_provider": "mineru",
+  "reason_codes": [
+    "DOCX_HAS_MEDIA",
+    "DOCX_HAS_OMATH"
+  ],
+  "signals": {
+    "has_native_text": true,
+    "media_count": 2,
+    "has_formula": true
+  }
+}
+```
+
+要求：
+
+- `reason_codes` 必须稳定、可测试，不使用自由文本替代全部逻辑。
+- `signals` 只保存结构判断需要的信息，不保存大段原文、Token、签名 URL 等敏感内容。
+- 不伪造“置信度”；第一版不需要给 Router 人为生成 0～1 confidence。
+- Route Decision 至少应进入结构化日志 / 任务结果；若实现时确认后续 Admin 与评测需要持久化，再设计最小数据库字段或独立表，不提前堆复杂 Schema。
+
+## 第一版总体路由矩阵
+
+| 格式 | `auto` 默认策略 | 说明 |
+|---|---|---|
+| TXT | Native | 确定性文本 |
+| CSV | Native | 确定性表格文本 |
+| Markdown / MD | Native；发现未提供的图片附件时不得宣称完整 | Markdown 单文件本身无法让 MinerU恢复未上传的本地图片 |
+| JPG / JPEG / PNG | MinerU | OCR / 视觉解析 |
+| DOC | MinerU | 旧版 Word，不开发 Native 二进制正文 Parser |
+| DOCX 简单正文 / 原生表格 | Native | 仅在 Preflight 未发现 Native 未覆盖结构时 |
+| DOCX 含图片 / 公式 / 文本框 / 图表 / 嵌入对象等 | 整份 MinerU | 第一版不做元素级合并 |
+| PPT / PPTX | MinerU | 视觉布局为主，Native 第一版不承担 |
+| XLS | MinerU，但保留已知质量边界 | 兼容路径不等于保证公式和图片语义完整 |
+| XLSX 简单单元格 / 公式 | Native | 优先保留 Sheet、Cell 与公式原式 |
+| XLSX 含图片 / 图表 / 绘图等 | **先以真实 XLSX MinerU 对照测试决定最终策略** | 若单一 Provider 都无法完整覆盖，进入受控 Hybrid 评估，不静默宣称完整 |
+| PDF 简单原生文本 | Native | 必须通过页面级 Preflight |
+| PDF 扫描 / 混合 / 复杂版式 / 重要视觉内容 | 整份 MinerU | 第一版不做逐页混合 |
+
+## Markdown 特殊边界
+
+Markdown 与 DOCX / PDF 不同。下面的内容：
+
+```markdown
+![销售图](images/sales.png)
+```
+
+只是图片引用，不代表图片字节包含在 `.md` 文件里。
+
+当前单文件上传模式下：
+
+- 无图片引用的 Markdown → Native。
+- Markdown 引用了本地附件，但附件没有随同上传 → 不得声称文档完整解析。
+- 不因为存在 Markdown 图片引用就直接把 `.md` 发送 MinerU；MinerU 无法凭空恢复未上传附件。
+- 第一版不自动抓取任意远程图片 URL，避免 SSRF、权限和内容漂移问题。
+- 后续如需要完整 Markdown + Assets 支持，应设计受控 Bundle（例如 ZIP + manifest）或附件关联机制，作为独立功能，不塞进 Router v1。
+
+## DOCX Preflight Inspector
+
+DOCX 是 OOXML ZIP，可以在调用 Parser 前做低成本结构检查。
+
+Native DOCX 当前擅长：
+
+```text
+Heading
+Paragraph
+Native Table
+```
+
+只要发现 Native 当前不覆盖、且可能承载主要语义的结构，就应将 `auto` 路由到 MinerU，例如：
+
+```text
+word/media/*
+w:drawing
+w:pict
+m:oMath / m:oMathPara
+w:txbxContent
+charts / diagrams / SmartArt
+embedded object / OLE object
+header / footer / footnote / endnote 等当前 Native 未覆盖的重要内容
+```
+
+要求：
+
+- 不按文件名或测试 Marker 写特例。
+- 不因为文档已有大量 Native 正文就忽略图片、公式或文本框。
+- 发现显著视觉 / 未覆盖结构时，第一版整份 DOCX 交 MinerU，不做“Native 正文 + MinerU 图片”自动合并。
+
+## PDF Preflight Inspector
+
+不能继续使用简单规则：
+
+```text
+有文本层 → Native
+无文本层 → MinerU
+```
+
+因为同一 PDF 可以同时包含：
+
+```text
+原生正文
++
+扫描页
++
+截图文字
++
+复杂表格
++
+公式
++
+图表
++
+多栏版式
+```
+
+Preflight 至少按页检查：
+
+```text
+原生文本是否存在且足够
+图片数量与面积占比
+是否存在无文本但有图片 / drawing / annotation 的页面
+是否存在明显扫描页
+是否存在复杂 drawing / table / formula / 多栏风险信号
+是否存在 Native Text + Image 的同页混合
+```
+
+路由原则：
+
+- 每页均为简单原生文本、无显著视觉语义 → Native。
+- 任一页面存在明显扫描 / 混合 / 复杂视觉内容 → 第一版整份 PDF MinerU。
+- 不能因为一个很小的 logo 就无条件 MinerU；图片面积、重复性和页面语义需要形成可测试规则。
+- 阈值必须配置化并通过测试集校准，不写只适用于某个测试文件的 magic number。
+- 第一版不做 Page 1 Native + Page 2 MinerU + Page 3 Native 的自动拼接。
+
+## XLSX Preflight Inspector
+
+XLSX Native 的确定性优势必须保留：
+
+```text
+Sheet 顺序
+Cell 值
+公式原式
+```
+
+Preflight 可以检查 OOXML 包中是否存在：
+
+```text
+xl/media/*
+xl/drawings/*
+xl/charts/*
+xl/embeddings/*
+VML / shape / picture 等视觉对象
+```
+
+路由：
+
+```text
+无显著视觉对象
+→ Native
+
+存在图片 / 图表 / 绘图等视觉对象
+→ 标记 complex_xlsx
+```
+
+`complex_xlsx` 在阶段 11B 实现前必须先完成真实 XLSX MinerU 对照验收。不能直接把 XLS 的解析结果等同于 XLSX。
+
+### XLSX 决策分支
+
+如果真实 XLSX MinerU 验证结果证明：
+
+```text
+Cell / Formula / Visual
+均能满足 RAG 完整性要求
+```
+
+则第一版可以：
+
+```text
+complex XLSX → 整份 MinerU
+```
+
+如果验证结果显示：
+
+```text
+Native 保留公式 / Cell 更可靠
+MinerU 能补图表 / 图片，但会损失公式原式或其他确定性结构
+```
+
+则不能让 `auto` 静默选择任一单一路径并宣称完整，应进入 **阶段 11B.2：受控 XLSX Hybrid Parsing** 评估。
+
+在 Hybrid 被验证前，可以要求管理员显式选择 `native` 或 `mineru`，并在结果中暴露覆盖边界；不要用一个“看起来成功”的 `CHUNKING` 掩盖已知重要信息缺失。
+
+## 阶段 11B.1：Whole-document Router v1
+
+第一版优先完成：
+
+```text
+Preflight
+→ 可解释 Route Decision
+→ 整份 Native 或整份 MinerU
+```
+
+不做：
+
+```text
+逐页 Native + MinerU 合并
+逐元素 OCR 合并
+XLSX Cell + MinerU Visual 自动去重
+跨 Provider Block 对齐
+复杂 Reading Order 重建
+```
+
+这样先保证 Router 决策本身正确、可解释、可回归。
+
+## 阶段 11B.2：受控 Hybrid（仅在真实测试证明必要时）
+
+Hybrid 不是 11B 的默认目标，只在单一 Provider 明确无法完整覆盖、且两条路径具有互补价值时才进入。
+
+优先候选是复杂 XLSX：
+
+```text
+Native
+→ Cell / Sheet / Formula
+
+MinerU
+→ Image / Chart / Visual
+```
+
+只有满足以下条件才允许实施：
+
+- 已有真实 Ground Truth 对照，证明两路确实互补。
+- 可以区分来源并避免重复正文。
+- Block ID、section、page 语义和 Citation 不被破坏。
+- 失败时不会留下半份混合结果。
+- 能明确回答“这段 Evidence 来自 Native 还是 MinerU”。
+
+在满足前，不为了“功能看起来更强”提前做双路合并。
+
+## Fallback 规则
+
+Router 必须避免“悄悄降级”：
+
+- `auto` 经过 Preflight 选择 Native 后，如果 Parser 抛出明确的 `OCRRequiredError` / 内容完整性错误，可以 **最多一次** 改走 MinerU，并记录 fallback reason。
+- Preflight 已判断复杂并选择 MinerU 后，如果 MinerU 因鉴权、配额、网络、供应商失败而不可用，不得静默回退 Native 并把部分文本当完整结果；应失败并暴露原因。
+- 禁止 Native ↔ MinerU 循环回退。
+- Provider 未成功完成前不得持久化半份新 Block。
+
+## Completeness Guard
+
+Parser 成功返回结构不等于完整性通过。
+
+至少检查：
+
+- Block 非空且存在有效正文。
+- 页面 / Sheet / Slide 逻辑范围基本合理。
+- Preflight 发现的“需要视觉解析”信号不能在 Native 成功后被悄悄忽略。
+- Office MinerU 的 `bbox` 仍按阶段 11A 约定保持 `NULL`，不伪造原始坐标。
+- 不通过具体 Marker 字符串硬编码完整性判断；Marker 只属于测试 Ground Truth。
+
+复杂文档无法自动证明完整时，应保留明确的已知限制，不将“接口成功”误写为“语义完整”。
+
+## Reading Order 原则
+
+阶段 10 / 11A 已观察到扫描 PDF、PPT/PPTX 等文件存在 Provider Reading Order 与视觉阅读顺序不完全一致的情况。
+
+因此：
+
+- 不用简单 `y` 坐标全局排序覆盖供应商顺序。
+- 不跨页面重排。
+- 表格、公式等结构块不拆散排序。
+- 单栏页面如后续增加安全归一化，必须有独立测试并证明不会破坏双栏、表格、图文混排。
+- Reading Order Normalizer 若需要实现，应与 Router 决策解耦，不把复杂重排逻辑塞进 Preflight。
+
+## 混合文档测试矩阵
+
+阶段 11B 开始前 / 实现过程中至少准备：
 
 ```text
 mixed.docx
 - Native 标题 / 正文
 - Native 表格
-- 图片中的文字
+- 图片文字
 - 图片公式
-- Native 正文继续
+- 后续 Native 正文
 
 mixed.xlsx
-- 单元格数据
-- 公式
+- 单元格
+- 公式原式
 - 图表
 - 图片 / 截图
 
 mixed_page.pdf
-- Page 1 文本型
-- Page 2 扫描型
-- Page 3 文本型
+- Page 1 原生文本
+- Page 2 扫描
+- Page 3 原生文本
 
 mixed_same_page.pdf
-- 同一页原生文本
-- 同页截图 / 图片文字
+- 同页原生文本
+- 同页截图 / OCR-only 文字
+
+two_column.pdf
+- 明确双栏阅读顺序 Ground Truth
+
+complex_layout.pdf
+- 标题 / 多栏 / 表格 / 图片 / 页脚
 
 mixed.pptx
 - 文本框
 - 表格
 - 图表
 - 图片文字
+
+markdown_with_image_ref.md
+- Markdown 正文
+- 本地图片引用但附件未上传
+- 验证系统不会把缺附件误判为完整成功
 ```
 
-先比较 Native 与 MinerU 实际结果，再确定最终 auto 路由阈值。
+每份测试必须记录：
 
-## 第一版路由原则
+```text
+expected_route
+expected_reason_codes
+expected_required_content
+expected_missing_if_native
+expected_page / section / slide semantics
+```
 
-- 不修改阶段 9 已通过的 Native Parser 内容语义。
-- 不能因为“文件有文本层”就断言没有视觉信息需要解析。
-- 不能因为 PDF 存在一张 logo 就无条件路由 MinerU；复杂度判断要可解释、可测试。
-- 无法可靠判断时，优先提供 `parse_mode=mineru` 明确覆盖；不要做高风险自动合并。
-- 第一版遇到复杂 / 混合 PDF 可整份交 MinerU，不要求逐页 Native + MinerU 合并。
-- 不简单按 bbox 的 y 坐标全局排序来修 Reading Order；多栏、表格和图文混排必须保守处理。
-- Route 决策结果应可记录 / 可观察，便于 Admin 和后续评测解释。
+先用真实结果决定阈值和策略，再固化 Router，不反过来为代码构造测试答案。
+
+## 自动测试
+
+至少覆盖：
+
+```text
+TXT / CSV → Native
+简单 DOCX → Native
+DOCX + media → MinerU
+DOCX + formula / drawing → MinerU
+PPT / PPTX → MinerU
+DOC / XLS → MinerU
+简单 XLSX → Native
+complex XLSX → 进入已验证的复杂策略 / 明确人工决策
+简单 PDF → Native
+扫描 PDF → MinerU
+混合页 PDF → MinerU
+同页 Native + Image PDF → MinerU
+Markdown 无图片引用 → Native
+Markdown 缺本地图片附件 → 不得宣称完整成功
+parse_mode=native 显式覆盖
+parse_mode=mineru 显式覆盖
+Native → MinerU 单次安全 fallback
+MinerU 失败不静默回退 Native
+Route Decision reason_codes 稳定
+阶段 1～11A 全量回归继续通过
+```
+
+## 人工验收
+
+至少验证：
+
+1. 简单 Native 文档不会产生 MinerU 调用。
+2. 含视觉内容的 DOCX / PDF 能被 Preflight 识别并整份路由 MinerU。
+3. PPT/PPTX 默认 MinerU。
+4. 简单 XLSX 保留公式原式与 Sheet 信息。
+5. complex XLSX 使用真实 MinerU 结果决定 Whole-MinerU 或 Hybrid 分支，不允许凭猜测完成 Router。
+6. Route Decision 能看出为什么选择某 Provider。
+7. MinerU 配额 / 网络失败不会导致复杂文件静默降级成部分 Native 内容。
+8. 混合文档最终 Block 可追溯，不伪造页码 / bbox。
+
+## 本阶段禁止事项
+
+不要：
+
+```text
+把所有文件无脑交 MinerU
+把 Native 成功等同于完整解析
+按单个测试 Marker 写路由规则
+全局 y-sort 修复 Reading Order
+未经验证就做 XLSX 双路自动合并
+逐页 PDF Native/MinerU 自动拼接
+为了 Router 提前进入 Parse Cache / Chunk / Embedding / RAG
+```
 
 ## 完成标准
 
-- 所有阶段 11A 新格式都能得到明确路由结果。
-- Native 简单文档不额外消耗 MinerU API。
+- `auto` 基于“完整覆盖能力”而不是“是否能抽到文字”做决策。
+- 所有支持格式都有明确、可解释的 Route Decision。
+- 简单 Native 文档不额外消耗 MinerU API。
 - 扫描 / 复杂 / 混合文档不会因 Native 文本存在而静默漏掉主要视觉内容。
-- `parse_mode` 显式覆盖有效。
-- 混合 DOCX、XLSX、PDF、PPTX 的真实测试结果有记录。
+- `parse_mode` 显式覆盖有效且不会绕过安全校验。
+- MinerU 失败时不会静默降级为已知不完整的 Native 成功。
+- complex XLSX 在真实云测试后明确选择 Whole-MinerU、Hybrid 或人工决策路径。
+- 混合 DOCX、XLSX、PDF、PPTX 与 Markdown 附件边界都有真实测试记录。
+- Router 决策与 Reading Order 问题分层处理，不用高风险排序逻辑掩盖 Provider 输出问题。
+
 
 ---
 
@@ -2385,6 +2805,11 @@ Page Preservation Accuracy
 Block Order Accuracy
 Table Recognition Accuracy
 Formula Recognition Accuracy
+Parser Route Decision Accuracy
+Native Safe Hit Rate
+MinerU Route Rate
+Critical False-Native Count（应为 0）
+Route Fallback Count
 Parse Cache Hit Rate
 MinerU API Retry Count
 MinerU Rate Limit / 429 Count
@@ -2418,6 +2843,7 @@ total_ms
 文档入库记录：
 
 ```text
+router_preflight_ms
 parse_ms
 mineru_submit_ms
 mineru_wait_ms
@@ -2605,13 +3031,18 @@ Codex 必须遵守：
 23. 当前只实施阶段 11A；未完成并人工验收前不得进入阶段 11B Router。
 24. 新增格式支持必须区分“能上传”“能解析”“能完整解析视觉内容”三个层次，不得因为提取到部分文本就宣称复杂文档完整支持。
 25. DOC/XLS/PPT 旧 Office 第一版统一交 MinerU，不为其新增自研二进制 Native Parser；CSV 不默认发送 MinerU。
-26. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
-27. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
-28. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
-29. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
-30. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
-31. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
-32. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
+26. 阶段 11B 的 Router 必须遵循“完整性优先”：只有能合理证明 Native 完整覆盖主要信息时才走 Native；复杂 / 不确定内容不得因为 Native 能抽到部分文本就判成功。
+27. 阶段 11B 第一版以整份文档单 Provider 路由为主，不提前实现逐页 / 逐元素 Native + MinerU 自动合并。
+28. MinerU 失败不得静默回退到已知不完整的 Native 结果；Native 明确触发 OCR / 完整性错误时，`auto` 最多允许一次 Native → MinerU 安全 fallback，并记录原因。
+29. XLSX 保留 Native 的 Sheet / Cell / 公式原式优势；复杂 XLSX 是否 Whole-MinerU 或 Hybrid 必须由真实 XLSX MinerU 对照测试决定，不能从 XLS 结果类推。
+30. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
+31. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
+32. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。
+33. 生产主链路不得直接使用 `SimpleDirectoryReader`、`VectorStoreIndex.from_documents()` 或 `IngestionPipeline` 对原始知识库文件再次 Parse / Chunk / Embedding。
+34. `document_chunks` 与 PostgreSQL + pgvector 保持唯一业务真相来源；LlamaIndex Node ID 使用稳定 `chunk_id`，metadata 必须保留 `kb_id / doc_id / page / section`。
+35. 第一版优先使用自定义 Retriever 包装现有 SQLAlchemy / pgvector，不为了框架便利新增第二套 PGVectorStore 表。
+36. DeepSeek、BGE-M3、bge-reranker-v2-m3 继续由项目 Service 管理；LlamaIndex 如需模型接口，只增加 Adapter，不重复加载或散落外部调用。
+37. LangGraph 与 LlamaIndex 不互相替代：LangGraph 用于 Agent / Workflow，LlamaIndex 用于 Knowledge RAG。
 
 
 ---
@@ -2643,7 +3074,20 @@ Native 新增：CSV / XLSX
 MinerU 新增显式支持：DOC / DOCX / PPT / PPTX / XLS / XLSX
 ```
 
-阶段 11A 工程实现已扩展以上能力：统一十三种 FileType，上传和 MinerU 共用 OOXML/OLE 校验；CSV/XLSX 原生表格与 Office 云转换输出统一 Block。Office 本地页数保持未知、云页为逻辑页、bbox 为空。当前等待新增 CSV/XLSX 用户原件和六种真实 Office 云 API 的人工验收；11B 尚未开始。
+阶段 11A 工程实现已扩展以上能力：统一十三种 FileType，上传和 MinerU 共用 OOXML/OLE 校验；CSV/XLSX 原生表格与 Office 云转换输出统一 Block。Office 本地页数保持未知、云页为逻辑页、bbox 为空。
+
+当前真实样本验收已形成以下基线：
+
+```text
+CSV Native：UTF-8 / UTF-8 BOM / GB18030 正向样本通过；非法编码负向 fixture 需使用真正无法被 UTF-8 / GB18030 严格解码的无 BOM 字节重新验收。
+XLSX Native：多 Sheet、空 Sheet、中文、数字、百分比、公式原式通过；视觉图片 / 图表不属于 Native 完整覆盖范围。
+DOC / DOCX MinerU：云链路成功，正文 / 表格 / 图片 OCR 基本可用；存在公式字符、Block 边界、Reading Order 等供应商质量边界。
+PPT / PPTX MinerU：云链路成功，文本 / 表格 / 图片 / 图表内容基本可用；顶部标题等 Reading Order 仍可能不稳定。
+XLS MinerU：云链路成功，但复杂样本出现公式原式退化为计算结果、内嵌图片 OCR 缺失，不能视为完整语义解析。
+XLSX MinerU：必须单独真实测试，不能用 XLS 结果推断。
+```
+
+因此阶段 11B 已明确采用“完整性优先的保守 Router”，而不是简单 Native-first 或 Everything-to-MinerU；11B 尚未开始。
 
 LlamaIndex 仅作为未来 RAG 编排层纳入路线，不改变当前阶段：完成 Parse Cache、Chunk、BGE-M3 和 pgvector 后，在阶段 15A 建立 `DocumentChunk ↔ TextNode / NodeWithScore` 适配边界，再进入 Dense / BM25 / Query Fusion / Reranker / DeepSeek RAG。
 
