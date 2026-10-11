@@ -119,14 +119,14 @@ def test_native_persistence_failure_never_logs_success(
 
 
 def cloud_upload(context):
-    """从离线 cloud fixture 的真实入口上传 PDF，生成可执行的云解析任务。"""
+    """经离线入口上传单页 PDF，与共享的单页 Mock 结果一致，不绕过完整性检查。"""
 
     from mineru_samples import pdf_bytes
 
     response = context.api(
         "POST",
         f"/api/admin/knowledge-bases/{context.kb_id}/mineru/documents",
-        files={"file": ("云日志验收.pdf", pdf_bytes())},
+        files={"file": ("云日志验收.pdf", pdf_bytes(1))},
     )
     assert response.status_code == 202
     return response.json()

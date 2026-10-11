@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 import pytest
 from celery.exceptions import Retry
 from kombu.exceptions import OperationalError as BrokerError
-from mineru_samples import pdf_bytes, png_bytes, result_zip
+from mineru_samples import content_items, pdf_bytes, png_bytes, result_zip
 from office_samples import office_bytes
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -156,12 +156,12 @@ def cloud_context(upload_context, migrated_connection, monkeypatch):
 
 
 def upload(context, name="测试.pdf", content=None):
-    """调用独立云端上传入口，成功返回 Parse Job 而不是误投原生 Parser。"""
+    """默认上传与单页 Mock 结果匹配的 PDF；多页用例显式提供原件和对应结果。"""
 
     response = context.api(
         "POST",
         f"{PREFIX}/{context.kb_id}/mineru/documents",
-        files={"file": (name, pdf_bytes() if content is None else content)},
+        files={"file": (name, pdf_bytes(1) if content is None else content)},
     )
     assert response.status_code == 202, response.text
     return response.json()
@@ -176,11 +176,37 @@ def detail(context, job):
     ).json()[0]
 
 
-def execute(job, step="submit"):
-    """在当前进程执行短任务成功路径，后续消息仍由夹具截获而不自动运行。"""
+def execute(job, step="submit", *, expected_state="SUCCESS"):
+    """执行受控短任务并检查预期状态；失败时展示安全原因，负向用例显式声明 FAILURE。"""
 
     task = tasks.submit_mineru_parse if step == "submit" else tasks.check_mineru_result
-    return task.apply(args=[job["job_id"]], throw=False)
+    result = task.apply(args=[job["job_id"]], throw=False)
+    # throw=False 将异常放在 result 中；先检查状态，避免把异常当作字典而掩盖根因。
+    assert result.state == expected_state, (
+        f"MinerU {step} 步骤预期 {expected_state}，实际 {result.state}；"
+        f"任务结果：{result.result}"
+    )
+    return result
+
+
+def test_execute_reports_task_failure_reason(monkeypatch):
+    """成功路径意外失败时提示实际安全异常；显式负向路径仍能检查异常结果。"""
+
+    failure = SimpleNamespace(
+        state="FAILURE",
+        result=tasks.DocumentProcessingError("PDF 部分非空页面缺少解析结果，需要人工核对"),
+    )
+
+    def failed_task(*args, **kwargs):
+        """仅返回受控 Celery 结果，不执行任务、解析文档或连接服务。"""
+
+        return failure
+
+    monkeypatch.setattr(tasks.check_mineru_result, "apply", failed_task)
+    job = {"job_id": str(uuid4())}
+    with pytest.raises(AssertionError, match="PDF 部分非空页面缺少解析结果"):
+        execute(job, "check")
+    assert execute(job, "check", expected_state="FAILURE") is failure
 
 
 @pytest.mark.parametrize(
@@ -241,6 +267,64 @@ def test_cloud_pipeline_persists_blocks_and_skips_duplicate(
             == identities
         )
     assert context.provider.downloads == 1
+
+
+def test_two_page_cloud_result_covers_all_pages_and_keeps_ids(cloud_context):
+    """两页非空原件必须有两页结果；成功写块后重复消息不改变页码、顺序或 ID。"""
+
+    context = cloud_context
+    items = content_items()
+    items[-1]["page_idx"] = 1
+    context.provider.archive = result_zip(items)
+    job = upload(context, content=pdf_bytes(2))
+    execute(job)
+    context.provider.state = "done"
+    assert execute(job, "check").result["block_count"] == len(items)
+    document, current = detail(context, job)
+    assert document["status"] == "CHUNKING" and current["state"] == "done"
+    with context.session() as session:
+        blocks = session.scalars(
+            select(DocumentBlock)
+            .where(DocumentBlock.doc_id == UUID(job["doc_id"]))
+            .order_by(DocumentBlock.block_index)
+        ).all()
+        identities = [block.block_id for block in blocks]
+        assert [block.page for block in blocks] == [1, 1, 1, 1, 2]
+        assert [block.block_index for block in blocks] == list(range(1, len(items) + 1))
+        assert len(set(identities)) == len(items)
+    assert execute(job, "check").result["status"] == "skipped"
+    with context.session() as session:
+        assert session.scalars(
+            select(DocumentBlock.block_id)
+            .where(DocumentBlock.doc_id == UUID(job["doc_id"]))
+            .order_by(DocumentBlock.block_index)
+        ).all() == identities
+    assert context.provider.submissions == context.provider.downloads == 1
+
+
+def test_two_page_cloud_result_missing_page_fails_without_cache(cloud_context):
+    """两页原件只返回第一页时安全失败，不提交部分块、发布成功缓存或追加收费批次。"""
+
+    context = cloud_context
+    job = upload(context, content=pdf_bytes(2))
+    execute(job)
+    context.provider.state = "done"
+    failed = execute(job, "check", expected_state="FAILURE")
+    assert "PDF 部分非空页面缺少解析结果" in str(failed.result)
+    document, current = detail(context, job)
+    assert document["status"] == "FAILED" and current["state"] == "failed"
+    assert current["error_code"] == "COMPLETENESS" and not current["is_active"]
+    assert "unit-secret" not in current["error_message"]
+    with context.session() as session:
+        assert session.scalar(
+            select(func.count()).select_from(DocumentBlock)
+            .where(DocumentBlock.doc_id == UUID(job["doc_id"]))
+        ) == 0
+    assert not list(context.settings.parsed_dir.rglob("ready.json"))
+    assert not (context.settings.parsed_dir / job["doc_id"] / "latest.json").exists()
+    assert execute(job, "check").result["status"] == "skipped"
+    assert context.provider.submissions == context.provider.uploads == 1
+    assert context.provider.queries == context.provider.downloads == 1
 
 
 @pytest.mark.parametrize("state", ["waiting-file", "pending", "running", "converting"])
@@ -313,7 +397,7 @@ def test_image_network_exhaustion_requires_confirmed_force_reparse(
     for _ in range(cloud_context.settings.mineru_max_retries):
         with pytest.raises(Retry):
             tasks.execute_step(RetryTask(), job["job_id"], "check")
-    assert execute(job, "check").state == "FAILURE"
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
     document, current = detail(cloud_context, job)
     assert document["status"] == "FAILED" and current["state"] == "failed"
     assert current["retry_count"] == 5 and current["error_code"] == "NETWORK"
@@ -347,7 +431,7 @@ def test_image_network_exhaustion_requires_confirmed_force_reparse(
 
 
 def test_active_identity_reused_and_completed_reparse_rejected(cloud_context):
-    """重复提交沿用同一活动身份；文档完成后不提供阶段 12 的缓存或 Reparse。"""
+    """原显式云入口重复提交沿用活动身份；完成后拒绝借此入口绕过维护规则。"""
 
     job = upload(cloud_context)
     url = f"{PREFIX}/{cloud_context.kb_id}/documents/{job['doc_id']}/mineru"
@@ -444,7 +528,7 @@ def test_confirmed_remote_failure_never_creates_second_batch(cloud_context):
         "模型服务暂时不可用",
     )
     batch_id = detail(cloud_context, job)[1]["batch_id"]
-    assert execute(job, "check").state == "FAILURE"
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
     document, current = detail(cloud_context, job)
     assert document["status"] == "FAILED" and current["state"] == "failed"
     assert current["batch_id"] == batch_id and not current["is_active"]
@@ -460,7 +544,7 @@ def test_permanent_error_marks_document_failed(cloud_context, code):
 
     job = upload(cloud_context)
     cloud_context.provider.error = MinerUError(code, "需要人工处理")
-    assert execute(job).state == "FAILURE"
+    assert execute(job, expected_state="FAILURE").state == "FAILURE"
     document, current = detail(cloud_context, job)
     assert document["status"] == "FAILED" and current["state"] == "failed"
     assert not current["is_active"] and current["retry_count"] == 0
@@ -481,7 +565,7 @@ def test_worker_restart_uncertain_intent_does_not_repost(cloud_context):
         row = session.get(DocumentParseJob, UUID(job["job_id"]))
         row.submission_started_at = datetime.now(UTC) - timedelta(minutes=5)
         session.commit()
-    assert execute(job).state == "FAILURE"
+    assert execute(job, expected_state="FAILURE").state == "FAILURE"
     assert cloud_context.provider.submissions == 0
     assert detail(cloud_context, job)[1]["error_code"] == "SUBMIT_UNCERTAIN"
 
@@ -504,7 +588,7 @@ def test_failed_result_preserves_old_blocks_and_safe_error(cloud_context):
         session.commit()
     execute(job)
     cloud_context.provider.state = "failed"
-    assert execute(job, "check").state == "FAILURE"
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
     document, current = detail(cloud_context, job)
     assert "unit-secret" not in str(current) and document["status"] == "FAILED"
     with cloud_context.session() as session:
@@ -550,7 +634,7 @@ def test_queue_failure_returns_recoverable_job(cloud_context, monkeypatch):
     response = cloud_context.api(
         "POST",
         f"{PREFIX}/{cloud_context.kb_id}/mineru/documents",
-        files={"file": ("队列.pdf", pdf_bytes())},
+        files={"file": ("队列.pdf", pdf_bytes(1))},
     )
     assert response.status_code == 503 and "unit-secret" not in response.text
     ids = response.json()["detail"]
@@ -617,41 +701,57 @@ def test_partial_block_write_is_rolled_back(cloud_context, monkeypatch):
         raise MinerUError("WRITE_FAILED", "模拟写块后失败")
 
     monkeypatch.setattr(jobs_module, "persist_blocks", write_then_fail)
-    assert execute(job, "check").state == "FAILURE"
-    assert detail(cloud_context, job)[0]["status"] == "FAILED"
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
+    document, current = detail(cloud_context, job)
+    assert document["status"] == "FAILED" and current["error_code"] == "WRITE_FAILED"
     with cloud_context.session() as session:
         assert session.scalars(select(DocumentBlock.text)).all() == ["事务保留证据"]
 
 
 def test_retry_exhaustion_and_total_deadline(cloud_context):
-    """持久化重试次数达到上限即终止，长期未完成也有总等待期限。"""
+    """同批次查询重试耗尽后拒绝普通新提交；显式 Force 新代次仍受总等待期限约束。"""
 
     job = upload(cloud_context)
+    execute(job)
     with cloud_context.session() as session:
         row = session.get(DocumentParseJob, UUID(job["job_id"]))
         row.retry_count = cloud_context.settings.mineru_max_retries
         session.commit()
-    cloud_context.provider.error = MinerUError(
+    # 使用幂等 GET 的暂时错误检验重试上限；POST 的 5xx 属于提交不确定，不能混为一谈。
+    cloud_context.provider.query_error = MinerUError(
         "HTTP_503", "临时服务错误", retryable=True
     )
-    assert execute(job).state == "FAILURE"
-    assert detail(cloud_context, job)[0]["status"] == "FAILED"
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
+    document, current = detail(cloud_context, job)
+    assert document["status"] == "FAILED" and current["state"] == "failed"
+    assert current["error_code"] == "HTTP_503" and not current["is_active"]
+    assert current["retry_count"] == cloud_context.settings.mineru_max_retries
     with cloud_context.session() as session:
         document = session.get(Document, UUID(job["doc_id"]))
-        next_job = create_job(session, document, cloud_context.settings)
-        next_job.created_at = datetime.now(UTC) - timedelta(hours=3)
+        with pytest.raises(MinerUError) as blocked:
+            create_job(session, document, cloud_context.settings)
+        assert blocked.value.code == "CACHE_REPARSE_REQUIRED"
+        assert session.scalar(select(func.count()).select_from(DocumentParseJob)) == 1
+        assert document.status == "FAILED" and cloud_context.provider.submissions == 1
+        # 此处只模拟管理员已确认 Force Reparse，不放宽普通重投的防重复收费保护。
+        next_job = create_job(
+            session, document, cloud_context.settings, force_reparse=True
+        )
+        next_job.created_at = datetime.now(UTC) - timedelta(
+            seconds=cloud_context.settings.mineru_job_timeout_seconds + 1
+        )
         session.commit()
         identifier = str(next_job.job_id)
-    cloud_context.provider.error = None
-    assert (
-        tasks.submit_mineru_parse.apply(args=[identifier], throw=False).state
-        == "FAILURE"
-    )
+    cloud_context.provider.query_error = None
+    assert execute({"job_id": identifier}, expected_state="FAILURE").state == "FAILURE"
     with cloud_context.session() as session:
         assert (
             session.get(DocumentParseJob, UUID(identifier)).error_code == "JOB_TIMEOUT"
         )
         assert session.get(Document, UUID(job["doc_id"])).status == "FAILED"
+        assert session.scalar(select(func.count()).select_from(DocumentParseJob)) == 2
+        assert session.scalar(select(func.count()).select_from(DocumentBlock)) == 0
+    assert cloud_context.provider.submissions == cloud_context.provider.uploads == 1
 
 
 def test_ambiguous_publish_failure_does_not_overwrite_completed_job(
@@ -672,7 +772,7 @@ def test_ambiguous_publish_failure_does_not_overwrite_completed_job(
     response = cloud_context.api(
         "POST",
         f"{PREFIX}/{cloud_context.kb_id}/mineru/documents",
-        files={"file": ("确认丢失.pdf", pdf_bytes())},
+        files={"file": ("确认丢失.pdf", pdf_bytes(1))},
     )
     assert response.status_code == 503
     ids = response.json()["detail"]
