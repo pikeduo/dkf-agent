@@ -9,7 +9,7 @@
 - 官方协议依据：[精准解析 API 文档](https://mineru.net/apiManage/docs)。采用 V4 本地批量申请上传链接、签名 PUT、批次 GET；不使用轻量 Agent API。
 - 生产 HTTP 客户端固定 `trust_env=False`，API、签名上传、结果下载共用直连策略，不发现环境 / Windows 系统代理，不自动回退代理。保持默认 HTTPS 证书校验；不读取 `SSL_CERT_FILE / SSL_CERT_DIR`，不修改系统代理或 VPN / TUN 路由。不新增环境变量。
 - 结构化结果依据：官方 [ContentListV1 序列化源码](https://github.com/opendatalab/MinerU/blob/3e60291846cb7c3bf8fe7f4f16238f4fc6cce491/mineru/backend/pipeline/pipeline_middle_json_mkcontent.py)。云端实际格式仍须以真实 ZIP 验收；不能把 API V4 与开源模型版本或 ContentListV2 混为一谈。
-- 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。单文件接口不变；显式 `/mineru/documents/batch` 接收 1～50 个 multipart `files`，逐文件建立独立 Document 和 Parse Job，HTTP 200 返回逐项报告。不是云端合批或预置知识库批量导入；Provider 的批量申请协议与按文件数计量的共享频控不变。
+- 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。原 `/mineru/documents` 接收 1～50 个 multipart `file`，OpenAPI 为文件数组以支持 Swagger 多选；只选一份保持原 202/Parse Job，多份逐文件建立独立 Document 和 Parse Job，HTTP 200 返回逐项报告。不新增 `/batch` 路径，不是云端合批或预置知识库批量导入；Provider 的批量申请协议与按文件数计量的共享频控不变。
 - 内存读取 ZIP 中唯一的 `content_list.json / *_content_list.json`，不持久化下载 ZIP、Markdown 或标准化结果文件，不实现 Parse Cache。未知 V2 / 类型安全失败，不能偷换成读取 full.md。
 - ContentListV1 的 `page_idx` 转 1 基页码、归一化 bbox 转原件尺寸，保留正文顺序和实际标题章节；只在可选 layout 证据明确时恢复页眉/页脚位置，具体保护条件见下节。表格 HTML 与公式文本原样作为证据，不执行 HTML / JavaScript / 公式。图片仅有路径而无文字时不伪造正文；无可用块时失败。
 - `full.md` 可在供应商平台下载用于人工比对；当前没有 Admin 预览接口。

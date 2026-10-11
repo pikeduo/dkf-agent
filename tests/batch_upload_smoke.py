@@ -5,7 +5,7 @@ from io import BytesIO
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException, Response, UploadFile
 from kombu.exceptions import OperationalError as BrokerError
 from mineru_samples import pdf_bytes, png_bytes
 from pydantic import SecretStr
@@ -23,14 +23,14 @@ PREFIX = "/api/admin/knowledge-bases"
 
 
 def post_batch(api, kb_id, files, cloud=False):
-    """重复 multipart files 字段模拟多选，不把多个文件打包为一个原件。"""
+    """在原上传路径重复 multipart file 字段模拟多选，不把多份原件合为文档。"""
 
-    path = "mineru/documents/batch" if cloud else "documents/batch"
+    path = "mineru/documents" if cloud else "documents"
     return api(
         "POST",
         f"{PREFIX}/{kb_id}/{path}",
         files=[
-            ("files", (name, content, "application/octet-stream"))
+            ("file", (name, content, "application/octet-stream"))
             for name, content in files
         ],
     )
@@ -135,7 +135,7 @@ def test_batch_preflight_errors_do_not_store(upload_context, cloud):
         ).status_code
         == 413
     )
-    path = "mineru/documents/batch" if cloud else "documents/batch"
+    path = "mineru/documents" if cloud else "documents"
     assert api("POST", f"{PREFIX}/{kb_id}/{path}", json={}).status_code == 422
     assert not directory.exists()
 
@@ -317,21 +317,32 @@ def test_batch_logs_are_safe_and_correlated(upload_context, event_stream):
         if event["event"] == "upload.batch_item"
     ] == [1, 2]
     assert batch_events[-1]["accepted_count"] == batch_events[-1]["failed_count"] == 1
+    request_event = next(
+        event for event in recorded if event["event"] == "http.request"
+    )
+    assert request_event["route"] == f"{PREFIX}/{{kb_id}}/documents"
+    assert request_event["status_code"] == 200
     assert "PRIVATE_BATCH_CONTENT" not in event_stream.getvalue()
 
 
 def test_batch_openapi_is_file_array_without_changing_single(upload_context):
-    """Swagger 多选 files 数组与逐项响应可见，原单文件 file 契约仍保留。"""
+    """原路径的 file 为二进制数组以支持多选，保留单份响应且不注册 batch 路径。"""
 
     api, _, _ = upload_context
     schema = api("GET", "/openapi.json").json()
-    for suffix in ("documents/batch", "mineru/documents/batch"):
+    for suffix in ("documents", "mineru/documents"):
         operation = schema["paths"][f"{PREFIX}/{{kb_id}}/{suffix}"]["post"]
         reference = operation["requestBody"]["content"]["multipart/form-data"][
             "schema"
         ]["$ref"]
         body = schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
-        assert body["properties"]["files"]["type"] == "array"
+        assert body["properties"]["file"]["type"] == "array"
+        assert body["properties"]["file"]["items"] == {
+            "type": "string",
+            "format": "binary",
+        }
+        assert "file" in body["required"]
+        assert f"{PREFIX}/{{kb_id}}/{suffix}/batch" not in schema["paths"]
         assert "200" in operation["responses"]
     assert (
         "201" in schema["paths"][f"{PREFIX}/{{kb_id}}/documents"]["post"]["responses"]
@@ -344,12 +355,12 @@ def test_batch_closes_all_files_when_preflight_fails(cloud):
 
     files = [UploadFile(filename="a.txt", file=BytesIO(b"x")) for _ in range(51)]
     function = (
-        mineru.upload_mineru_documents
+        mineru.upload_mineru_document
         if cloud
-        else admin_knowledge_bases.upload_knowledge_base_documents
+        else admin_knowledge_bases.upload_knowledge_base_document
     )
     with pytest.raises(HTTPException) as error:
-        function(UUID(int=1), None, files)
+        function(UUID(int=1), None, Response(), files)
     assert error.value.status_code == 413
     assert all(upload.file.closed for upload in files)
 
@@ -362,7 +373,7 @@ def test_maximum_batch_and_cross_kb_deduplication(upload_context):
     response = post_batch(api, kb_id, files)
     assert response.json()["accepted_count"] == 50
     other = api("POST", PREFIX, json={"name": "批量第二库"}).json()["kb_id"]
-    second = post_batch(api, other, files[:1]).json()["items"][0]
+    second = post_batch(api, other, files[:1]).json()
     assert second["doc_id"] != response.json()["items"][0]["doc_id"]
     assert len(list(directory.iterdir())) == 51
 
@@ -442,3 +453,49 @@ def test_batch_can_execute_existing_native_task_per_document(processing_context)
             ]
             == "CHUNKING"
         )
+
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_original_path_single_file_response_stays_compatible(cloud_context, cloud):
+    """同一上传入口只选一份时仍返回原单文件对象和 201/202，不包进 items。"""
+
+    name, content = ("图片.png", png_bytes()) if cloud else ("正文.txt", b"single")
+    response = post_batch(
+        cloud_context.api, cloud_context.kb_id, [(name, content)], cloud
+    )
+    assert response.status_code == (202 if cloud else 201)
+    assert response.json()["doc_id"]
+    assert "items" not in response.json()
+    if cloud:
+        assert response.json()["job_id"]
+    else:
+        assert response.json()["file_name"] == name
+
+
+def test_trailing_slash_redirect_preserves_multiple_files(upload_context):
+    """用户带末尾斜杠访问原路径时，307 重定向保持方法与全部原件。"""
+
+    api, kb_id, directory = upload_context
+    response = api(
+        "POST",
+        f"{PREFIX}/{kb_id}/documents/",
+        follow_redirects=True,
+        files=[("file", ("甲.txt", b"one")), ("file", ("乙.md", b"two"))],
+    )
+    assert response.status_code == 200
+    assert [redirect.status_code for redirect in response.history] == [307]
+    assert response.json()["accepted_count"] == 2
+    assert len(list(directory.iterdir())) == 2
+
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_removed_batch_path_cannot_upload(upload_context, cloud):
+    """旧新增 batch 路径已移除，客户端只能在原入口多选，不残留第二套上传 API。"""
+
+    api, kb_id, directory = upload_context
+    path = "mineru/documents/batch" if cloud else "documents/batch"
+    response = api(
+        "POST", f"{PREFIX}/{kb_id}/{path}", files={"files": ("甲.txt", b"one")}
+    )
+    assert response.status_code in {404, 405}
+    assert not directory.exists()

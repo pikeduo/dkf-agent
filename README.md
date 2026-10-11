@@ -267,12 +267,10 @@ Get-ChildItem .\logs\*.log* | Select-String -SimpleMatch '你的文档UUID'
 | GET | `/api/admin/knowledge-bases` | 知识库分页列表 |
 | GET | `/api/admin/knowledge-bases/{kb_id}` | 知识库详情 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档分页列表 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传单个文件，成功创建返回 201 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/documents/batch` | 批量上传并逐文件投递 Native；multipart `files`，返回 200 与逐项报告 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 上传一份或多份文件；multipart `file`，单份返回 201，多份返回 200 与逐项报告 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、失败原因及任务 ID |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递任务，无请求体，成功返回 202 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份 PDF / 图片 / Office 至 MinerU，multipart `file`，返回 202 与 Parse Job |
-| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents/batch` | 显式批量上传至 MinerU；multipart `files`，返回 200 与逐项报告 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式上传一份或多份 PDF / 图片 / Office；multipart `file`，单份返回 202，多份返回 200 与逐项报告 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 显式提交已有待处理 / 失败文档，或恢复同代次云任务；无请求体，返回 202 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 最近 20 条云端任务、安全错误及外部状态；无签名 URL 或 Token |
 | POST | `/tasks/add` | 提交加法任务；JSON 参数为整数 `x`、`y` 和可选 `queue`，返回 202 |
@@ -292,7 +290,7 @@ Get-ChildItem .\logs\*.log* | Select-String -SimpleMatch '你的文档UUID'
 
 ### 上传文件
 
-在 Swagger 中选择上传接口，填写已有 `kb_id`，选择文件并提交。请求类型为 `multipart/form-data`，文件字段名为 `file`，不使用 JSON 或 Base64。
+在 Swagger 中选择原上传接口，填写已有 `kb_id`，点击 `file` 的“选择文件”，可以一次多选后提交（Windows 文件选择窗口使用 Ctrl/Shift 多选）。请求类型为 `multipart/form-data`，文件字段名仍为 `file`；多份文件通过重复的 `file` 字段传递，不使用 JSON 或 Base64。
 
 支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、CSV、TXT、MD、JPG、JPEG、PNG；不接受空文件、含路径或控制字符的文件名，文件名最多 255 字符。OOXML 检查对应 ZIP 主部件，旧 Office 检查 OLE 容器和对应主流，不能只改后缀冒充。相同知识库中内容相同的文件返回 409，错误信息包含已有 `doc_id`，无需再次上传。
 
@@ -310,30 +308,30 @@ CSV/XLSX 的安全上限为 10 万行、1024 列、100 万单元格（XLSX 累�
 
 此上传入口仍只投递原生 Parser，图片、纯扫描及包含无文本扫描页的混合 PDF 会记录需要云端解析的失败原因并保留原件；不会自动回退 MinerU。文本与图片同页时仅提取已有文本，不识别图片内文字。需要复杂文档解析时使用下方显式 MinerU 入口；加密、损坏、空文本文件也会失败。
 
-响应包含 `doc_id`、`status`、`error_message`、`task_id` 等元信息。**201 表示原件及文档记录创建成功，不代表任务执行成功。** 队列投递失败时文件和记录可能已保留，应先查询文档详情，再决定是否重新投递。
+只选一份时保持原单文件响应，包含 `doc_id`、`status`、`error_message`、`task_id` 等元信息。**201 表示原件及文档记录创建成功，不代表任务执行成功。** 队列投递失败时文件和记录可能已保留，应先查询文档详情，再决定是否重新投递。选择多份时返回下方逐项报告。
 
 ### 批量上传
 
-在 Swagger 中选择 `/documents/batch`，填写 `kb_id`，在 `files` 中添加并选择多份文件。普通批量入口仍只使用 Native；需要云端解析时明确选择 `/mineru/documents/batch`，只接受 PDF、图片与 Office，不接受 TXT/MD/CSV。原单文件接口不变，仍使用 `file` 字段。
+批量上传直接使用原 `/documents` 接口的 `file` 多选控件，**不新增 `/batch` 接口**。普通入口仍只使用 Native；需要云端解析时明确选择原 `/mineru/documents` 接口，同样支持多选，但只接受 PDF、图片与 Office，不接受 TXT/MD/CSV。
 
 每批 1～50 个文件；每份文件独立校验、去重、保存和投递，每个新 `doc_id` 只对应一个原件及独立任务。相同文件名但不同内容允许上传；同库相同内容（包含同批重复）返回已有 `doc_id`，不再创建文件或任务。单文件大小和格式限制沿用前文，部署到内网/服务器时还应在网关限制整个 multipart 请求大小；此处的数量和单文件检查不能阻止框架事先接收较大的请求体。
 
 PowerShell 调用示例（替换知识库 UUID 和实际文件名）：
 
 ```powershell
-curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/<kb_id>/documents/batch" -F "files=@第一份.txt" -F "files=@第二份.md"
+curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/<kb_id>/documents" -F "file=@第一份.txt" -F "file=@第二份.md"
 ```
 
-批次正常处理后统一返回 **HTTP 200**，不代表全部成功。响应包含 `total / accepted_count / failed_count / items`；`items` 按上传顺序排列，从 1 开始的 `index` 可区分同名文件。每项含 `file_name / status_code / doc_id`，Native 成功附 `document`，MinerU 成功附 `parse_job`，错误附安全 `detail`。
+一次选择两份及以上文件时，正常处理后返回 **HTTP 200**，不代表全部成功。响应包含 `total / accepted_count / failed_count / items`；`items` 按上传顺序排列，从 1 开始的 `index` 可区分同名文件。每项含 `file_name / status_code / doc_id`，Native 成功附 `document`，MinerU 成功附 `parse_job`，错误附安全 `detail`。只选一份时继续返回原 201/202 和单文件对象，校验错误也沿用原 HTTP 状态；已有单文件调用无需改字段或解析方式。
 
 - 项内 `201`：Native 文件已创建并投递；项内 `202`：本地云任务已建立并投递。均不表示解析成功。
 - 项内 `409`：重复内容，使用返回的已有 `doc_id` 查询状态；其他校验和服务错误沿用单文件状态码，意外单项错误为 `500`。
 - 一个文件失败不会撤销之前成功的文件，后续文件仍继续处理；这不是整批事务。
 - 项内失败仍可能已保存文件或云任务。已知时返回 `doc_id`，云投递失败的 `detail` 还含 `job_id`；数据库提交确认丢失时可能无法返回 `doc_id`，必须先查文档列表，不能盲目重新上传。
 
-缺失 `files` 返回整批 422；数量超过 50 返回整批 413；无效知识库返回整批 404；数据库预检或 MinerU 配置不可用返回整批 503。这些预检失败不创建新文件。MinerU 每份文件独立进入已有短任务与共享频控，不将这 50 份文件合并为一个云任务；真实云调用会消耗额度。
+缺失 `file` 返回整批 422；数量超过 50 返回整批 413；无效知识库返回整批 404；数据库预检或 MinerU 配置不可用返回整批 503。这些预检失败不创建新文件。MinerU 每份文件独立进入已有短任务与共享频控，不将这 50 份文件合并为一个云任务；真实云调用会消耗额度。
 
-更新代码后重启 API 和所有相关 CPU Worker。后续按每项的 `doc_id` 查询文档详情或 `parse-jobs`，不要只看批次 HTTP 状态判断解析结果。
+更新代码后重启 API，并刷新 `/docs` 以加载新的文件数组定义，必要时 Ctrl+F5 强制刷新；所有相关 CPU Worker 也应使用最新代码。后续按每项的 `doc_id` 查询文档详情或 `parse-jobs`，不要只看批次 HTTP 状态判断解析结果。之前新增的两个 `/batch` 路径已移除。
 
 ### 查询状态与重新投递
 

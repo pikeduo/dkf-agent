@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Response, UploadFile
 from sqlalchemy import select
 
 from app.api.admin_knowledge_bases import (
@@ -92,13 +92,17 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
 
 @router.post(
     "/{kb_id}/mineru/documents",
-    response_model=ParseJobResponse,
+    response_model=ParseJobResponse | BatchUploadResponse,
     status_code=202,
-    summary="上传 PDF、图片或 Office 并显式提交 MinerU 云端解析",
+    summary="上传一份或多份 PDF、图片或 Office 并显式提交 MinerU 云端解析",
     responses={
+        200: {
+            "model": BatchUploadResponse,
+            "description": "多文件逐项报告；不代表全部成功",
+        },
         404: {"description": "知识库不存在"},
         409: {"description": "内容重复，返回已有 doc_id"},
-        413: {"description": "文件或页数超限"},
+        413: {"description": "文件、页数超限或文件数量超过 50"},
         415: {"description": "格式不支持或内容不匹配；不接受 CSV/TXT/MD"},
         422: {"description": "原件无法读取，已保存时返回 doc_id"},
     },
@@ -106,63 +110,46 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
 def upload_mineru_document(
     kb_id: UUID,
     session: AdminSession,
+    response: Response,
     file: Annotated[
-        UploadFile,
+        list[UploadFile],
         File(
-            description="单个 PDF、图片或 DOC/DOCX/PPT/PPTX/XLS/XLSX；将传至 MinerU 云端"
+            description="可多选 1～50 份 PDF、图片或 Office；每份独立 doc_id，将传至 MinerU 云端",
+            # 和原生入口共用数组形状，让 Swagger UI 生成可多选的文件控件。
+            json_schema_extra={"items": {"type": "string", "format": "binary"}},
         ),
     ],
-) -> ParseJobResponse:
-    """复用原有文件保存和去重，不投递原生任务；原件留存不表示云端处理成功。"""
+) -> ParseJobResponse | BatchUploadResponse:
+    """原显式入口支持多选；单份保留原响应，多份各建云任务，不自动选择 Parser。"""
 
     try:
+        validate_batch(file)
         require_knowledge_base(session, kb_id)
         settings = require_configuration()
-        if Path(file.filename or "").suffix.lower().lstrip(".") not in MINERU_TYPES:
-            raise HTTPException(
-                status_code=415,
-                detail="MinerU 仅接受 PDF、图片与 DOC/DOCX/PPT/PPTX/XLS/XLSX",
-            )
-        saved = store_document(session, kb_id, file, settings)
-        return start_job(session, session.get(Document, saved.doc_id), settings)
-    finally:
-        file.file.close()
-
-
-@router.post(
-    "/{kb_id}/mineru/documents/batch",
-    response_model=BatchUploadResponse,
-    summary="批量上传并逐文件显式提交 MinerU 云端解析",
-    responses={
-        404: {"description": "知识库不存在"},
-        413: {"description": "批次超过 50 个文件"},
-    },
-)
-def upload_mineru_documents(
-    kb_id: UUID,
-    session: AdminSession,
-    files: Annotated[
-        list[UploadFile],
-        File(description="1～50 份 PDF、图片或 Office；每份独立云任务"),
-    ],
-) -> BatchUploadResponse:
-    """只扩展显式上传入口，不合并云任务、不改变共享频控；单项错误不撤销已提交文件。"""
-
-    try:
-        validate_batch(files)
-        require_knowledge_base(session, kb_id)
-        settings = require_configuration()
+        if len(file) == 1:
+            upload = file[0]
+            if (
+                Path(upload.filename or "").suffix.lower().lstrip(".")
+                not in MINERU_TYPES
+            ):
+                raise HTTPException(
+                    status_code=415,
+                    detail="MinerU 仅接受 PDF、图片与 DOC/DOCX/PPT/PPTX/XLS/XLSX",
+                )
+            saved = store_document(session, kb_id, upload, settings)
+            return start_job(session, session.get(Document, saved.doc_id), settings)
 
         def dispatch(response: DocumentResponse) -> ParseJobResponse:
             """复用当前单文档云任务建立与投递，仍为每份原件保留独立任务身份。"""
 
             return start_job(session, session.get(Document, response.doc_id), settings)
 
+        response.status_code = 200
         return store_batch(
-            session, kb_id, files, settings, dispatch, allowed_types=MINERU_TYPES
+            session, kb_id, file, settings, dispatch, allowed_types=MINERU_TYPES
         )
     finally:
-        for upload in files:
+        for upload in file:
             upload.file.close()
 
 

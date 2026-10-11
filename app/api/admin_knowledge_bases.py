@@ -4,7 +4,16 @@ from collections.abc import Iterator
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -156,14 +165,18 @@ def list_knowledge_base_documents(
 
 @router.post(
     "/{kb_id}/documents",
-    response_model=DocumentResponse,
+    response_model=DocumentResponse | BatchUploadResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="上传文档并提交异步处理任务",
+    summary="上传一份或多份文档并逐文件提交异步处理任务",
     responses={
+        200: {
+            "model": BatchUploadResponse,
+            "description": "多文件逐项报告；不代表全部成功",
+        },
         400: {"description": "文件名无效或文件为空"},
         404: {"description": "知识库不存在"},
         409: {"description": "同一知识库已存在相同内容，detail 包含已有 doc_id"},
-        413: {"description": "单文件大小超限"},
+        413: {"description": "单文件大小超限或文件数量超过 50"},
         415: {"description": "格式不支持或内容标识不匹配"},
         507: {"description": "文件存储不可用"},
     },
@@ -171,21 +184,36 @@ def list_knowledge_base_documents(
 def upload_knowledge_base_document(
     kb_id: UUID,
     session: AdminSession,
+    response: Response,
     file: Annotated[
-        UploadFile,
+        list[UploadFile],
         File(
-            description="单个 PDF、DOC/DOCX、PPT/PPTX、XLS/XLSX、CSV、TXT、MD 或图片；此入口只投递 Native"
+            description="可多选 1～50 份 PDF、Office、CSV、TXT、MD 或图片；每份独立 doc_id，只投递 Native",
+            # 明确二进制数组项，兼容 Swagger UI 的文件多选控件识别。
+            json_schema_extra={"items": {"type": "string", "format": "binary"}},
         ),
     ],
-) -> DocumentResponse:
-    """文档与原件提交成功后才投递 Celery，投递失败保留原件并返回持久化失败状态。"""
+) -> DocumentResponse | BatchUploadResponse:
+    """原上传入口支持多选；单文件保留原响应，多文件返回逐项报告且各自提交投递。"""
 
     try:
+        validate_batch(file)
         require_knowledge_base(session, kb_id)
-        response = store_document(session, kb_id, file, get_settings())
-        return dispatch_uploaded_document(session, response)
+        settings = get_settings()
+        if len(file) == 1:
+            saved = store_document(session, kb_id, file[0], settings)
+            return dispatch_uploaded_document(session, saved)
+
+        def dispatch(saved: DocumentResponse) -> DocumentResponse:
+            """只投递当前单文件的 Native 任务，不自动回退云端解析。"""
+
+            return dispatch_uploaded_document(session, saved)
+
+        response.status_code = status.HTTP_200_OK
+        return store_batch(session, kb_id, file, settings, dispatch)
     finally:
-        file.file.close()
+        for upload in file:
+            upload.file.close()
 
 
 def dispatch_uploaded_document(
@@ -197,39 +225,6 @@ def dispatch_uploaded_document(
         session.expire_all()
         return DocumentResponse.model_validate(session.get(Document, response.doc_id))
     return response
-
-
-@router.post(
-    "/{kb_id}/documents/batch",
-    response_model=BatchUploadResponse,
-    summary="批量上传文档并逐文件投递 Native 任务",
-    responses={
-        404: {"description": "知识库不存在"},
-        413: {"description": "批次超过 50 个文件"},
-    },
-)
-def upload_knowledge_base_documents(
-    kb_id: UUID,
-    session: AdminSession,
-    files: Annotated[
-        list[UploadFile], File(description="1～50 个文件，每个文件独立创建 Document")
-    ],
-) -> BatchUploadResponse:
-    """批次预检后逐文件上传；HTTP 200 表示逐项报告，具体成功或失败见 items。"""
-
-    try:
-        validate_batch(files)
-        require_knowledge_base(session, kb_id)
-
-        def dispatch(response: DocumentResponse) -> DocumentResponse:
-            """只投递当前单文件的 Native 任务，不自动回退云端解析。"""
-
-            return dispatch_uploaded_document(session, response)
-
-        return store_batch(session, kb_id, files, get_settings(), dispatch)
-    finally:
-        for upload in files:
-            upload.file.close()
 
 
 def require_document(
