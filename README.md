@@ -76,6 +76,18 @@ HYBRID_MAX_IMAGE_MB=16
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
 
+### 可选 LlamaIndex Adapter 依赖
+
+仅使用运行时 Adapter 时，由用户手动补齐最小 core 依赖；现有上传/解析/切片/入库接口不导入它，不需重建整个环境：
+
+```powershell
+conda activate dkf-agent
+python -m pip install "llama-index-core>=0.14,<0.15"
+python -m pip check
+```
+
+不安装全量 llama-index 或 OpenAI/PGVectorStore/Reader 集成，不需要新 API Key、模型或迁移。安装前核对 Python 3.11 及现有 Pydantic/SQLAlchemy/tenacity 依赖；pip 可能调整传递依赖，冲突时停止并记录，不无条件升级。core 包含 NLTK/tiktoken 等依赖，首次导入可能校验/下载缺失的 NLP 资源，需由用户预先准备缓存，具体见 [Adapter 部署与使用](docs/LLAMA_INDEX_ADAPTER.md)。仅建立类型与 Embedding 边界，尚无检索或问答接口。
+
 ## 2. 手动部署基础服务
 
 已部署的服务只需检查，无需重复安装。应用不负责安装、启动系统服务或自动创建数据库。
@@ -454,4 +466,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [业务日志](docs/BUSINESS_LOGGING.md)

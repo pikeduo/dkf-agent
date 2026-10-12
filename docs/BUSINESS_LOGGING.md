@@ -58,6 +58,9 @@
 | `index.dispatched / dispatch_failed / rejected / started` | 独立 CPU 入库任务投递、确认失败、状态拒绝及开始，复用 doc_id/task_id 关联 |
 | `index.batch_written / persisted / skipped` | 批次仅执行未提交 / 所有向量与 READY 事务提交 / 旧或已完成消息跳过；不记录向量/正文/文件路径 |
 | `index.retry / failed / error_record_failed` | 数据库有限退避、安全终止和失败原因无法写库；原始 SQL/连接错误不输出 |
+| `rag.node_converted / result_converted` | 已有 Chunk/Node/内部结果互转，仅资源 UUID 和耗时；不代表检索、推理或落库 |
+| `rag.query_encoded / nodes_reused` | Query 委托既有共享服务 / 原 Node 向量复用；仅维度/数量/耗时，不输出输入或向量 |
+| `rag.adapter_failed` | 固定适配边界错误码与步骤，不透传 Pydantic 输入、路径、Node 或模型异常 |
 
 `parse.persisted / mineru.blocks_persisted` 只表示代码校验与事务成功，不保证 OCR 全量识别、公式语义或任意复杂布局顺序正确，不代表 READY。真实正文、页码与 bbox 仍需查询 `document_blocks` 并对照原件。
 
@@ -91,3 +94,5 @@ python -m pytest tests/test_embedding_service.py tests/test_embedding_artifacts.
 8. 强制刷新 Swagger，在原 `/documents` 入口点击 `Try it out`，确认 `file` 只有一个文件控件、无 `Add string item`。打开选择窗口，用 Ctrl/Shift 一次选两份新 TXT/MD，以及一份重复文件和空文件；选择后应显示数量、名称/大小初检，尚无上传或落库日志。点击 Execute 后核对逐项 201/409/400 与汇总数量，不使用 `/batch` 路径。用响应 `X-Request-ID` 关联 `upload.batch_started / batch_item / batch_finished`；每个成功项独立 doc_id/task_id，后续 Worker 各有解析日志。原显式 `/mineru/documents` 同样多选少量新图片/PDF 验证各自 parse_job 与真实落库，不能以批次 200 当作解析成功。只选一份继续走原上传事件与单文件响应。界面初检不读取或上传文件正文，最终校验与安全日志仍由现有后端负责，不把仅打开文件窗口记成上传成功。
 
 日志设施自身不发 API；缓存、切片、Embedding 与 pgvector 入库继续使用每日同一文件。任务用独立 task_id 与 doc_id 关联，业务成功事件在 SQL 提交后写入；GPU 暂存与入库批次日志不代表整文档完成，只有 index.persisted 表示向量及 READY 已提交。日志不输出 Chunk/Query 正文、向量、模型/结果路径。真实费用按 MinerU batch 与平台核对；本地模型、入库及新增测试待用户执行，不包含检索/RAG。
+
+15A Adapter 使用同一业务 Logger，增加白名单 chunk_id；转换成功不是事务落库事件。Query Adapter 不使用 BaseEmbedding 的含正文/向量回调 payload，不注册第三方 Tracing。框架/依赖自身诊断输出不在本项目日志脱敏保证内，禁止开启可能记录 Node/Query 的第三方调试、回调或全局 instrumentation 导出。

@@ -27,6 +27,7 @@ FIELDS = {
     "request_id",
     "task_id",
     "doc_id",
+    "chunk_id",
     "kb_id",
     "job_id",
     "batch_id",
@@ -87,7 +88,7 @@ FIELDS = {
     "visual_cache_hit_count",
     "operation",
 }
-LOCAL_IDS = {"request_id", "task_id", "doc_id", "kb_id", "job_id"}
+LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
 PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 FILE_PREFIX = "knowledge-service"
@@ -188,11 +189,17 @@ EVENT_LABELS = {
     "index.retry": "向量入库数据库步骤等待重试",
     "index.failed": "向量入库失败，本次写入已回滚",
     "index.error_record_failed": "向量入库失败原因未能写入数据库",
+    "rag.node_converted": "已有 Chunk 已转换为运行时 Node，未重新处理或落库",
+    "rag.result_converted": "运行时 Node 已还原项目证据结果",
+    "rag.query_encoded": "Query 已通过项目共享服务编码，未新增文档向量",
+    "rag.nodes_reused": "复用已有 Node 向量，未重新编码",
+    "rag.adapter_failed": "RAG 适配边界安全拒绝或调用失败",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
     "request_id": "request_id",
     "doc_id": "doc_id",
+    "chunk_id": "chunk_id",
     "kb_id": "kb_id",
     "task_id": "task_id",
     "job_id": "job_id",

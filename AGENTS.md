@@ -23,7 +23,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**15：pgvector 索引入库。已实现本地结果校验、独立 CPU 入库检查点、事务批量写向量与 READY、HNSW 迁移；测试仅编写，待用户手动迁移及验收。此前待验收事项继续保留。**
+当前阶段：**15A：LlamaIndex RAG Adapter。已实现 Chunk/Node/内部证据 DTO 互转、已有向量复用与共享 Query Embedding 边界；最小 core 依赖已获用户确认，安装及测试由用户执行。此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -39,11 +39,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 13 | 已实现标题/段落优先切片、结构块保留、稳定 ID/字符证据、异步检查点与查询；待用户执行测试与验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
-| 15A 及后续 | 未开展，等待用户确认 |
+| 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待用户安装 core 与验收 |
+| 16 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成，尚无检索或问答接口。
-- 当前仅实施用户授权的阶段 15；11B.2/12/13/14 待验收事项仍保留。未经用户确认，不进入 15A LlamaIndex Adapter、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前仅实施用户授权的阶段 15A；11B.2/12/13/14/15 待验收事项仍保留。未经用户确认，不进入预置批量导入、Dense/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -53,6 +54,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
 - 后续按计划使用 DeepSeek、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
 - BGE-M3 Dense 使用已声明的 sentence-transformers；只从用户部署的本地官方权重加载，CUDA/PyTorch/模型准备仍由用户执行。
+- LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，安装/首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
 - 新增技术或依赖须先说明原因和替代方案并等待确认；不得自行引入 Elasticsearch、知识图谱、本地大型视觉模型、新 Agent、Kubernetes、微调或无关大型依赖。
 
 Windows 基础服务由用户手动管理，本节优先于其他文档中的旧部署说明：
@@ -165,6 +167,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - HNSW cosine 部分索引由用户执行迁移创建，任务只校验有效索引。全量输入/文件身份、1024 维、有限单位向量通过后批量更新原 Chunk，数量/维度/范数与 READY 同事务，任一失败整体回滚；成功日志仅在提交后。
 - READY 重复 /index、/chunk、/embed 不重算；活动入库拒绝维护。显式 Reindex/Reparse 与成功 Block/Chunk 重建失效旧入库检查点，失败保留原证据；未来检索必须限定 READY 及模型/编码版本，不能用有值的旧向量冒充新代次。
 
+### LlamaIndex Adapter
+
+- 只转换调用方已加载的 DocumentChunk/Document，未加载必需字段安全失败，不隐式 SELECT/autoflush、读取原件或落库。Node ID 固定 chunk_id，SOURCE 固定 doc_id/知识库/文件身份，完整 chunk_metadata/source_spans 深复制；内部 DTO 不包含框架类型或向量。
+- 已有向量只复制，不重编码；metadata 从框架 Embedding/LLM 文本中排除。Query Adapter 仅委托既有进程共享 EmbeddingService，文档编码入口明确拒绝，Transform 只复用已有向量；不设置全局默认 LLM/Embedding/Tracing，不启用第二套框架 Cache。
+- 不通过 SimpleDirectoryReader、VectorStoreIndex.from_documents、IngestionPipeline 或 PGVectorStore 接管生产流程。Adapter 互转不证明当前数据库状态/模型相容性；未来 Retriever 必须另行限定 READY/模型版本及权限，不在 15A 提前实现。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -178,6 +186,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 切片、字符证据、检查点与人工验收 | [Chunk](docs/CHUNK.md) |
 | 本地模型、GPU 批处理、向量结果与人工验收 | [Embedding](docs/EMBEDDING.md) |
 | 向量入库、HNSW、READY 与人工验收 | [pgvector 入库](docs/PGVECTOR_INDEX.md) |
+| LlamaIndex Node/证据 DTO、Query 边界与人工验收 | [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) |
 | 部署与接口使用 | [README](README.md) |
 
 完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

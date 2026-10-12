@@ -640,3 +640,16 @@ def test_index_logs_restore_context_and_only_include_safe_summary(events):
     result = next(record for record in records(events) if record["event"] == "index.persisted")
     assert result["state"] == "READY" and result["chunk_count"] == 5 and result["dimension"] == 1024
     assert "SECRET" not in events.getvalue() and "READY 状态已事务提交" in events.getvalue()
+
+
+def test_rag_adapter_events_are_chinese_and_do_not_log_evidence_or_vectors(events):
+    """Adapter 日志只含关联 UUID/数量/耗时等摘要，不输出 Node/正文/向量或模型路径。"""
+
+    chunk_id = uuid4()
+    logs.log_event("rag.node_converted", chunk_id=chunk_id, doc_id=uuid4(), kb_id=uuid4(),
+                   node="PRIVATE_NODE", metadata={"text": "PRIVATE_BODY"}, vector=[1.0], file_path="PRIVATE_PATH")
+    logs.log_event("rag.query_encoded", dimension=1024, text="PRIVATE_QUERY", embedding=[1.0])
+    logs.log_event("rag.adapter_failed", stage="node_to_result", error_code="RAG_ADAPTER_IDENTITY")
+    result = records(events)
+    assert result[0]["chunk_id"] == str(chunk_id) and result[1]["dimension"] == 1024
+    assert "PRIVATE" not in events.getvalue() and "已有 Chunk 已转换为运行时 Node" in events.getvalue()

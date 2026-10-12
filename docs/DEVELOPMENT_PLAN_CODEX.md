@@ -2485,6 +2485,13 @@ READY 文档所有 Chunk 均具备向量。
 
 # 21A. 阶段 15A：LlamaIndex RAG Adapter
 
+## 当前实现与待验收
+
+- 已建立显式导入的 node_adapter/embedding_adapter、框架无关 RetrievalResult；ORM 字段必须已加载，互转不隐式读取/写库，id_=chunk_id、SOURCE 与文档/知识库一致，保留完整字符证据及逻辑/物理页语义。
+- Node 默认复制已有 pgvector 向量；Query 复用项目共享 BGE-M3，构造不加载模型，框架文档编码入口直接拒绝，不创建第二套模型/缓存或向量真相表。
+- 用户已明确确认新增最小 llama-index-core 0.14.x 声明；尚未安装或导入验证。无新数据库迁移、环境变量、API、Worker 或完整 Retriever；阶段 1～15 状态语义不变。
+- 自动/DB 用例只编写，均未执行。core 缺失时 Adapter 用例跳过而非破坏历史收集，跳过不算验收通过；安装、NLP 缓存准备、人工转换与回归步骤见 [Adapter](LLAMA_INDEX_ADAPTER.md)。未经确认不进入后续阶段。
+
 ## 目标
 
 在不改变 DKF-Agent 已有数据模型和索引存储的前提下，引入 LlamaIndex 作为后续 RAG 编排层的统一抽象。
