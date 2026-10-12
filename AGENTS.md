@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**15A：LlamaIndex RAG Adapter。已实现 Chunk/Node/内部证据 DTO 互转、已有向量复用与共享 Query Embedding 边界；最小 core 依赖已获用户确认，依赖安装按第 0 节执行，部署及测试由用户执行。此前待验收事项继续保留。**
+当前阶段：**16：预置知识库批量导入。已实现目录/覆盖清单预检、preset 来源存储、幂等导入与有界任务推进至 READY；真实素材准备、导入及验收由用户执行。此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -41,11 +41,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
-| 16 及后续 | 未开展，等待用户确认 |
+| 16 | 已实现默认库多格式预置导入、只读预检、覆盖清单、独立 doc_id/去重、既有异步阶段推进与日志；用例仅编写，未准备/导入真实素材，待验收 |
+| 17 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成，尚无检索或问答接口。
-- 当前仅实施用户授权的阶段 15A；11B.2/12/13/14/15 待验收事项仍保留。未经用户确认，不进入预置批量导入、Dense/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前仅实施用户授权的阶段 16；11B.2/12/13/14/15/15A 待验收事项仍保留。未经用户确认，不进入 Dense/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -174,6 +175,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 已有向量只复制，不重编码；metadata 从框架 Embedding/LLM 文本中排除。Query Adapter 仅委托既有进程共享 EmbeddingService，文档编码入口明确拒绝，Transform 只复用已有向量；不设置全局默认 LLM/Embedding/Tracing，不启用第二套框架 Cache。
 - 不通过 SimpleDirectoryReader、VectorStoreIndex.from_documents、IngestionPipeline 或 PGVectorStore 接管生产流程。Adapter 互转不证明当前数据库状态/模型相容性；未来 Retriever 必须另行限定 READY/模型版本及权限，不在 15A 提前实现。
 
+### 预置导入
+
+- 素材及 manifest 由用户准备，不自动生成/下载；预检的格式/Hash/标签覆盖不等于内容质量验收。默认 dry-run，正式执行必须显式确认云外传/费用。
+- 复用原存储、Router 与各阶段检查点，单文件单 doc_id/source_type=preset；同内容不覆盖原来源/文件名、不自动重投失败或已有检查点、不隐式 Force Reparse。CLI 有界查数据库，不直接解析/推理/轮询 MinerU，不安装或启动服务。
+- 全批 READY 须验证入库身份及全量向量；中断/超时不取消后台任务，脚本退出后无下一阶段自动补投。当前数据准备完成不代表检索/问答已实现。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -188,6 +195,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 本地模型、GPU 批处理、向量结果与人工验收 | [Embedding](docs/EMBEDDING.md) |
 | 向量入库、HNSW、READY 与人工验收 | [pgvector 入库](docs/PGVECTOR_INDEX.md) |
 | LlamaIndex Node/证据 DTO、Query 边界与人工验收 | [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) |
+| 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 
 完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

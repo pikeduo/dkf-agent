@@ -445,6 +445,24 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 入库失败整体回滚并记录安全 `INDEX_*` 错误；修复后再次 `/index` 恢复同一代次，不用 `/embed` 重算。缺失/损坏结果不自动推理或调用云端。重复完成请求不重投，READY 文档重复 `/chunk`、`/embed` 也不重建。活动入库拒绝 Reindex/Reparse，完成后才可显式维护；READY 不等于检索/RAG 已实现。完整验收和 SQL 见 [pgvector 入库](docs/PGVECTOR_INDEX.md)。
 
+### 预置知识库导入
+
+将已有且允许云外传的 10+ 多格式资料放入 `data/knowledge_base/preset/`，按 [素材清单说明](docs/PRESET_IMPORT.md#素材与人工清单) 手动准备 `manifest.json`；包括普通/扫描 PDF、混合内容、表格、公式、图表、Reading Order，以及 DOC/XLS/PPT 各一份。目录只带占位文件，不自动生成或下载素材。
+
+在项目根目录执行（默认只预检，无需启动服务）：
+
+```powershell
+python scripts/import_knowledge_base.py --dry-run
+```
+
+正式导入前由用户确认迁移、本地模型、共享存储和云预算，并启动 CPU/GPU Worker；随后手动执行：
+
+```powershell
+python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800
+```
+
+默认使用固定默认知识库，逐文件保存 `source_type=preset` 并自动提交解析→切片→向量化→入库任务；脚本需保持运行以推进下一阶段。同内容复用已有 doc_id，不自动重投 FAILED 或已有检查点；超时/中断不取消后台任务，可核对状态后重跑。全批 READY 才返回成功，READY 仍不代表已提供查询/RAG。选项、幂等限制及恢复见 [预置导入说明](docs/PRESET_IMPORT.md)。
+
 ## 5. 部署检查与排障
 
 - PostgreSQL SELECT 1 返回 1，项目库 vector 查询有结果，Windows Redis 服务 Running 且 ping=PONG。
@@ -466,4 +484,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [预置导入](docs/PRESET_IMPORT.md) · [业务日志](docs/BUSINESS_LOGGING.md)

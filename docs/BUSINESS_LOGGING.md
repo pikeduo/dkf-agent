@@ -61,6 +61,9 @@
 | `rag.node_converted / result_converted` | 已有 Chunk/Node/内部结果互转，仅资源 UUID 和耗时；不代表检索、推理或落库 |
 | `rag.query_encoded / nodes_reused` | Query 委托既有共享服务 / 原 Node 向量复用；仅维度/数量/耗时，不输出输入或向量 |
 | `rag.adapter_failed` | 固定适配边界错误码与步骤，不透传 Pydantic 输入、路径、Node 或模型异常 |
+| `preset.started / imported / reused` | 用户执行 CLI 后开始批量导入 / 原件已提交并投递 auto / 同内容沿用已有 doc_id，不代表 READY |
+| `preset.advanced / state` | 下一阶段检查点提交后投递 / 业务状态变化，复用原队列与每日日志 |
+| `preset.failed / timeout / finished` | 单项安全错误 / 有界等待超时但不取消任务 / 全批 READY 或未完成数量，不输出清单、路径或正文 |
 
 `parse.persisted / mineru.blocks_persisted` 只表示代码校验与事务成功，不保证 OCR 全量识别、公式语义或任意复杂布局顺序正确，不代表 READY。真实正文、页码与 bbox 仍需查询 `document_blocks` 并对照原件。
 

@@ -13,6 +13,9 @@ __pycache__/
 data/uploads/
 data/parsed/
 data/embeddings/
+# 真实预置素材/人工清单不入仓库，仅提交目录占位。
+/data/knowledge_base/preset/*
+!/data/knowledge_base/preset/.gitkeep
 
 # 仅忽略根目录模型权重，app/models/ 中的 ORM 源码需要提交。
 /models/
@@ -35,6 +38,7 @@ docs/*
 !docs/EMBEDDING.md
 !docs/PGVECTOR_INDEX.md
 !docs/LLAMA_INDEX_ADAPTER.md
+!docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

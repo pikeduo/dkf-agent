@@ -653,3 +653,15 @@ def test_rag_adapter_events_are_chinese_and_do_not_log_evidence_or_vectors(event
     result = records(events)
     assert result[0]["chunk_id"] == str(chunk_id) and result[1]["dimension"] == 1024
     assert "PRIVATE" not in events.getvalue() and "已有 Chunk 已转换为运行时 Node" in events.getvalue()
+
+
+def test_preset_import_logs_are_chinese_safe_summaries(events):
+    """预置 CLI/Worker 复用中文事件与关联标识，不记录清单、正文、向量或私有路径。"""
+
+    doc_id = uuid4()
+    logs.log_event("preset.imported", doc_id=doc_id, kb_id=uuid4(), status="UPLOADED",
+                   manifest="PRIVATE_MANIFEST", directory="PRIVATE_PATH", text="PRIVATE_BODY")
+    logs.log_event("preset.finished", file_count=12, accepted_count=11, failed_count=1, status="INCOMPLETE")
+    result = records(events)
+    assert result[0]["doc_id"] == str(doc_id) and result[1]["failed_count"] == 1
+    assert "PRIVATE" not in events.getvalue() and "预置原件已提交" in events.getvalue()

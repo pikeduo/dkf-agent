@@ -194,6 +194,14 @@ EVENT_LABELS = {
     "rag.query_encoded": "Query 已通过项目共享服务编码，未新增文档向量",
     "rag.nodes_reused": "复用已有 Node 向量，未重新编码",
     "rag.adapter_failed": "RAG 适配边界安全拒绝或调用失败",
+    "preset.started": "开始导入预置知识库，默认自动路由",
+    "preset.imported": "预置原件已提交并投递解析任务，尚未 READY",
+    "preset.reused": "预置内容已存在，沿用原文档且不重发解析",
+    "preset.advanced": "预置文档下一阶段检查点已提交并投递",
+    "preset.state": "预置文档业务状态已变化",
+    "preset.failed": "预置导入单项失败，未重试或覆盖原文档",
+    "preset.timeout": "预置导入等待超时，后台任务未被取消",
+    "preset.finished": "预置导入有界等待结束，需核对 READY 数量",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {

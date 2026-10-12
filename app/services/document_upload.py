@@ -3,6 +3,7 @@
 import hashlib
 import logging
 from pathlib import Path
+from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, UploadFile
@@ -126,11 +127,19 @@ def reject_duplicate(session: Session, kb_id: UUID, file_hash: str) -> None:
 
 
 def store_document(
-    session: Session, kb_id: UUID, upload: UploadFile, settings: Settings
+    session: Session, kb_id: UUID, upload: UploadFile, settings: Settings,
+    *, source_type: Literal["uploaded", "preset"] = "uploaded",
+    expected_file_hash: str | None = None,
 ) -> DocumentResponse:
-    """校验、去重、保存文件并提交 UPLOADED 记录，正常失败时补偿删除本次文件。"""
+    """校验、去重并独立提交原件；预置导入可指定来源及预检 Hash，HTTP 默认行为不变。
+
+    预检后内容变化时在任何写盘/落库前拒绝；正常失败补偿删除本次文件。
+    """
 
     log_event("upload.received", kb_id=kb_id, file_name=upload.filename)
+    if source_type not in {"uploaded", "preset"}:
+        log_event("upload.rejected", kb_id=kb_id, status_code=400)
+        raise HTTPException(status_code=400, detail="文档来源类型无效")
     try:
         filename, extension = validate_filename(upload.filename)
     except HTTPException as exc:
@@ -142,6 +151,8 @@ def store_document(
     commit_started = False
     try:
         file_hash = hash_upload(upload, settings.max_upload_size_mb * 1024 * 1024)
+        if expected_file_hash is not None and file_hash != expected_file_hash:
+            raise HTTPException(status_code=409, detail="预检后的文件内容已变化，请重新预检")
         size_bytes = upload.file.seek(0, 2)
         upload.file.seek(0)
         validate_content(upload, extension)
@@ -168,7 +179,7 @@ def store_document(
             file_type=extension[1:],
             file_hash=file_hash,
             file_path=stored_path,
-            source_type="uploaded",
+            source_type=source_type,
             status="UPLOADED",
             processing_task_id=uuid4(),
         )

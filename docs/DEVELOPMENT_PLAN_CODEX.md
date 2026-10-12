@@ -2602,6 +2602,13 @@ page / section 不丢失
 
 # 22. 阶段 16：预置知识库批量导入
 
+## 当前实现与待验收
+
+- 已实现 `scripts/import_knowledge_base.py`：默认只读预检；用户显式确认云外传/费用后，复用默认库 Seed、单文件存储、auto Router 与独立 Chunk/Embedding/Index 检查点，有界推进至 READY。
+- 素材目录仅有占位，真实十份以上多格式资料与人工覆盖清单由用户准备；不自动生成/下载/导入。标签不证明 OCR、公式、图表或 Reading Order 质量。
+- 无新增依赖、环境变量、数据库迁移或 API；普通上传保持 uploaded。重复导入复用 preset 内容，FAILED/已有检查点不自动重投，收费恢复继续遵守 Parse Cache 约束。
+- 用例仅编写，未执行预检/导入/回归或真实云/GPU 测试。部署命令见 README，完整人工验收与 SQL 见 [预置导入](PRESET_IMPORT.md)。本阶段只准备默认库 READY 数据；查询需后续阶段，不提前实现 Retrieval/RAG。
+
 ## 目标
 建立比赛演示默认知识库。
 
