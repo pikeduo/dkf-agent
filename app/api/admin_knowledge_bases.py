@@ -22,10 +22,11 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.file_formats import FILE_TYPES
 from app.db.session import get_session
-from app.models import Document, DocumentParseJob, KnowledgeBase
+from app.models import Document, DocumentChunk, DocumentParseJob, KnowledgeBase
 from app.core.business_logging import log_event
 from app.parsers.routing.contracts import ParseMode
 from app.schemas.batch_upload import BatchUploadResponse
+from app.schemas.chunk import ChunkResponse, ChunkTaskResponse
 from app.schemas.knowledge_base import (
     DocumentResponse,
     KnowledgeBaseCreate,
@@ -36,6 +37,8 @@ from app.services.batch_upload import MAX_BATCH_FILES, store_batch, validate_bat
 from app.services.document_dispatch import publish_document
 from app.services.document_processing import transition_document
 from app.services.document_upload import store_document
+from app.services.chunk.processing import prepare_chunk, publish_chunk
+from app.services.chunk.splitter import ChunkError
 
 router = APIRouter(
     prefix="/api/admin/knowledge-bases",
@@ -289,7 +292,7 @@ def resubmit_document(
         Query(description="默认 auto；native/mineru 仅供管理员显式覆盖"),
     ] = "auto",
 ) -> DocumentResponse:
-    """待处理/失败文档默认自动路由新代次；管理员可覆盖，不重解析已完成文档。"""
+    """待处理/失败文档新解析代次使旧切片任务失效；管理员可覆盖，不重解析已完成文档。"""
 
     document = require_document(session, kb_id, doc_id, lock=True)
     if document.status not in {"UPLOADED", "FAILED"}:
@@ -298,6 +301,7 @@ def resubmit_document(
         )
     transition_document(document, "UPLOADED")
     document.processing_task_id = uuid4()
+    document.chunk_task_id, document.chunk_config = None, None
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
@@ -311,15 +315,17 @@ def resubmit_document(
 
 def submit_maintenance(session: Session, document: Document, operation: str,
                        parse_mode: ParseMode) -> DocumentResponse:
-    """为显式维护建立新代次；拒绝活动任务，保留旧块，提交后才投递，不声称已索引。"""
+    """维护拒绝活动云/切片任务，允许等待向量化文档；保留旧证据到解析成功替换。"""
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
-    if active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING"}:
+    if (active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING", "EMBEDDING"}
+            or document.status == "CHUNKING" and document.chunk_task_id is not None):
         raise HTTPException(status_code=409, detail="文档正在处理或当前阶段不允许维护，请先查询状态")
-    # 只有此显式入口可以从等待切片重新建立处理代次，普通 /process 的限制不变。
+    # 显式维护才可从等待切片/向量化换代次；旧 Chunk 保留到成功解析/回放时事务失效。
     document.status, document.error_message = "UPLOADED", None
     document.processing_task_id = uuid4()
+    document.chunk_task_id, document.chunk_config = None, None
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
@@ -352,3 +358,38 @@ def reparse_document(kb_id: UUID, doc_id: UUID, session: AdminSession,
     if not force:
         raise HTTPException(status_code=400, detail="Reparse 必须明确 force=true；可能重复消耗云 API 额度")
     return submit_maintenance(session, require_document(session, kb_id, doc_id, lock=True), "reparse", parse_mode)
+
+
+@router.post("/{kb_id}/documents/{doc_id}/chunk", response_model=ChunkTaskResponse, status_code=202,
+             summary="对已解析 Block 异步切片；不重新解析、不调用云端",
+             responses={404: {"description": "文档不存在"}, 409: {"description": "解析未完成或仍有活动任务"}})
+def chunk_existing_document(kb_id: UUID, doc_id: UUID, session: AdminSession) -> ChunkTaskResponse:
+    """显式创建/恢复同一切片检查点，提交后才投递；重复请求不创建新的 Chunk 代次。"""
+
+    document = require_document(session, kb_id, doc_id, lock=True)
+    try:
+        task_id, dispatch = prepare_chunk(session, document, get_settings())
+    except ChunkError as exc:
+        log_event("chunk.rejected", doc_id=doc_id, kb_id=kb_id, error_code=str(exc).split("：", 1)[0])
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    response = ChunkTaskResponse(doc_id=doc_id, kb_id=kb_id, chunk_task_id=task_id, status=document.status)
+    session.commit()
+    if dispatch and not publish_chunk(session, doc_id, task_id):
+        raise HTTPException(status_code=503, detail="CHUNK_DISPATCH：切片任务投递确认失败，请查询状态并重试 /chunk")
+    return response
+
+
+@router.get("/{kb_id}/documents/{doc_id}/chunks", response_model=PageResponse[ChunkResponse],
+            summary="按切片序号查询正文及原 Block 字符跨度", responses={404: {"description": "文档不存在"}})
+def list_document_chunks(kb_id: UUID, doc_id: UUID, session: AdminSession,
+                         limit: PageLimit = 20, offset: PageOffset = 0) -> PageResponse[ChunkResponse]:
+    """在限定文档内按稳定序号分页；返回原文证据，不暴露向量，维护失败时可查看保留结果。"""
+
+    require_document(session, kb_id, doc_id)
+    predicate = (DocumentChunk.doc_id == doc_id, DocumentChunk.kb_id == kb_id)
+    total = session.scalar(select(func.count()).select_from(DocumentChunk).where(*predicate))
+    chunks = session.scalars(select(DocumentChunk).where(*predicate)
+        .order_by(DocumentChunk.chunk_metadata["chunk_index"].as_integer().asc().nulls_last(), DocumentChunk.chunk_id)
+        .limit(limit).offset(offset))
+    return PageResponse(items=[ChunkResponse.model_validate(chunk) for chunk in chunks],
+                        total=total, limit=limit, offset=offset)

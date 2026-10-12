@@ -583,3 +583,28 @@ def test_existing_json_history_is_preserved_in_same_daily_file(events, tmp_path)
     assert first + "\n" == history
     assert read_log_line(second)["status_code"] == 200
     assert len(list(tmp_path.glob("*.log"))) == 1
+
+
+def test_chunk_summary_is_readable_and_does_not_include_evidence_text(events):
+    """切片日志仅包含白名单计数/参数，不记录正文、字符证据或原件路径。"""
+
+    logs.log_event("chunk.persisted", doc_id=uuid4(), task_id=uuid4(), chunk_count=3,
+                   chunk_size=600, chunk_overlap=80, oversized_count=1,
+                   text="SECRET_BODY", source_spans=[{"text": "SECRET_BODY"}], file_path="SECRET_PATH")
+    [record] = records(events)
+    assert record["chunk_count"] == 3 and record["oversized_count"] == 1
+    assert "切片已事务落库" in events.getvalue()
+    assert "SECRET" not in events.getvalue()
+
+
+def test_chunk_task_context_uses_document_id_and_restores_context(events):
+    """切片用独立 task_id 关联原 doc_id，不误用云 job_id，执行完恢复上层上下文。"""
+
+    doc_id, task_id = str(uuid4()), str(uuid4())
+    task = SimpleNamespace(name="app.tasks.chunks.chunk_document", request=SimpleNamespace(headers={}))
+    task_logs.begin_task_log(task=task, task_id=task_id, args=[doc_id])
+    logs.log_event("chunk.persisted", chunk_count=1)
+    task_logs.end_task_log(task=task, state="SUCCESS", retval={"text": "SECRET"})
+    assert logs.CONTEXT.get() is None
+    assert all(record["doc_id"] == doc_id and record["task_id"] == task_id for record in records(events))
+    assert "SECRET" not in events.getvalue()

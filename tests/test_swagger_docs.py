@@ -95,6 +95,20 @@ def test_cache_maintenance_contract_explicit_force_and_no_body():
     assert docs_request("/redoc").status_code == 200
 
 
+def test_chunk_contract_is_separate_from_parse_mode_and_returns_evidence():
+    """切片入口无解析模式/正文，查询模型含必需证据字段但不公开 embedding。"""
+
+    schema = docs_request("/openapi.json").json()
+    prefix = "/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}"
+    request = schema["paths"][prefix + "/chunk"]["post"]
+    assert "requestBody" not in request
+    assert {parameter["name"] for parameter in request["parameters"]} == {"kb_id", "doc_id"}
+    assert "202" in request["responses"]
+    chunk = schema["components"]["schemas"]["ChunkResponse"]["properties"]
+    assert {"kb_id", "doc_id", "chunk_id", "text", "page_start", "page_end", "section", "metadata"} <= set(chunk)
+    assert "embedding" not in chunk and "file_path" not in chunk
+
+
 @pytest.mark.parametrize(
     "suffix, allowed", [("documents", FILE_TYPES), ("mineru/documents", MINERU_TYPES)]
 )

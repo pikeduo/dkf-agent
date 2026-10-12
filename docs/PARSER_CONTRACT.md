@@ -4,7 +4,7 @@
 
 `ParsedDocument`、`ParsedBlock` 与 `BaseParser` 使用已有 Pydantic，契约及具体 Parser 均不依赖 SQLAlchemy、Celery、Redis、Embedding 或 RAG。任务服务负责状态机和数据库持久化，Parser 只读取原件并返回统一结构。
 
-已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式默认为 auto，管理员显式 Native 可做原生范围对照。
+已实现 TXT、Markdown、CSV、DOCX、XLSX 和文本型 PDF 原生解析。Worker 保存 `document_blocks` 后停在 `CHUNKING`，返回 `awaiting_chunk` 和 `block_count`。Parser 本身不调用 OCR/外部 API、不生成 Chunk/Embedding/READY；独立 [Chunk 任务](CHUNK.md) 读取已完成的 Block，切片成功后等待向量化。独立云入口见 [MinerU Cloud 验收说明](MINERU_CLOUD.md)；可选模式的路由在 Parser 外完成，见 [Router 验收说明](PARSER_ROUTER.md)，省略模式默认为 auto，管理员显式 Native 可做原生范围对照。
 
 自动路由内部的 [XLSX Hybrid](SELECTIVE_HYBRID.md) 不改变 XlsxParser 或统一 Block 字段：保留完整 Sheet table，结构化 Chart 为 native_parser，云视觉增强映射回原 Sheet、逻辑 page=1、bbox=NULL。临时 Bundle 的 PDF 页码只在私有 manifest 使用，不作为原件页码。新增代码与测试待用户执行验收。
 
@@ -202,7 +202,7 @@ python -m pytest tests/native_parser_db_smoke.py tests/document_processing_smoke
 
 真实上传验收：
 
-1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0004_mineru_jobs`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
+1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0005_chunk_checkpoint`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
 2. 先确认 Windows Redis 服务为 `Running`，再在 Swagger 向测试知识库通过普通 `/documents` 上传 TXT、MD、DOCX、文本 PDF，以及三种编码（UTF-8/BOM/GB18030）的 CSV、多 Sheet XLSX；不同内容避免去重。CSV 包含中文、引号逗号、空字段、数字和百分比，XLSX 包含空 Sheet、中文、数字、百分比及未执行公式。
 3. 用文档详情和 `/tasks/{task_id}` 查询，预期文档为 `CHUNKING`、无失败原因，首次成功任务结果为 `awaiting_chunk` 且 `block_count > 0`。
 4. 在 pgAdmin 中用实际 `doc_id` 检查有序正文、标题章节及页码：

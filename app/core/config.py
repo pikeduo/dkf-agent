@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # 解析缓存与原件分开管理；API/Worker 必须共享该本地目录，不自动清理历史结果。
     parsed_dir: Path = Path("data/parsed")
     parse_cache_max_entry_mb: int = Field(default=768, ge=64, le=2048)
+    # 本地估算 token；表格/公式完整性优先，结构块可能超过此软目标。
+    chunk_size: int = Field(default=600, ge=400, le=700)
+    chunk_overlap: int = Field(default=80, ge=50, le=100)
 
     # 预检阈值是结构风险指标，不是解析置信度；不触发逐页/逐图云端调用。
     router_pdf_image_area_ratio: float = Field(default=0.01, gt=0, le=1)

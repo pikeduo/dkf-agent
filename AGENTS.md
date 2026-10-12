@@ -21,7 +21,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**12：Parse Cache。整份/视觉缓存、缓存回放与显式 Force Reparse 已实现，待用户验收。**
+当前阶段：**13：Chunk。已实现本地切片、来源追溯及独立异步入口，测试仅编写，待用户验收；阶段 12 待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -34,11 +34,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
-| 13 及后续 | 未开展，等待用户确认 |
+| 13 | 已实现标题/段落优先切片、结构块保留、稳定 ID/字符证据、异步检查点与查询；待用户执行测试与验收 |
+| 14 及后续 | 未开展，等待用户确认 |
 
-- 当前迁移 head 为 `0004_mineru_jobs`；“已实现”不等于已完成真实 API 人工验收。
-- 成功解析只写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`，不等于可检索或 `READY`。
-- 当前仅实施用户授权的阶段 12；11B.2 的待验收事项仍保留。未经用户确认，不进入 Chunk、Embedding、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前迁移 head 为 `0005_chunk_checkpoint`；“已实现”不等于已完成真实 API 人工验收。
+- 成功解析写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`；独立 `/chunk` 成功写 `document_chunks`，停在 `EMBEDDING / awaiting_embedding`，不等于向量化、可检索或 `READY`。
+- 当前仅实施用户授权的阶段 13；11B.2/12 待验收事项仍保留。未经用户确认，不进入 Embedding、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -100,6 +101,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - Native 临时数据库/文件错误最多重试 3 次（总共 4 次），退避 5/10/20 秒；原件缺失/空文件立即失败，记录安全原因，成功重试清旧错误。
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process` 仅重投 UPLOADED/FAILED；活动云任务通过 `/mineru` 恢复。`/reindex` 仅缓存回放到等待切片；`/reparse?force=true` 明确建立跳过缓存的新代次，活动任务不可覆盖。数据库/文件/消息/云端非原子，无 Outbox、后台补投；不盲目重传或宣称 exactly-once。
+- 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
 - Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4，GPU 单进程并发 1（当前不加载模型），在线 RAG 默认同步。
 
 ### Parser、证据与质量
@@ -156,6 +158,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 预检、决策、Guard、XLSX 对照 | [Parser Router](docs/PARSER_ROUTER.md) |
 | XLSX 候选、Bundle、检查点、合并与人工验收 | [Selective Hybrid](docs/SELECTIVE_HYBRID.md) |
 | 日志事件、脱敏、并发写入与验收 | [业务日志](docs/BUSINESS_LOGGING.md) |
+| 切片、字符证据、检查点与人工验收 | [Chunk](docs/CHUNK.md) |
 | 部署与接口使用 | [README](README.md) |
 
 完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

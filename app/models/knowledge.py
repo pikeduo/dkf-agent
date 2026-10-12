@@ -66,6 +66,11 @@ class Document(Timestamps, Base):
         CheckConstraint("file_hash ~ '^[0-9a-f]{64}$'", name="file_hash"),
         CheckConstraint("source_type IN ('preset', 'uploaded')", name="source_type"),
         CheckConstraint(
+            "(chunk_task_id IS NULL AND chunk_config IS NULL) OR "
+            "(chunk_task_id IS NOT NULL AND chunk_config IS NOT NULL AND jsonb_typeof(chunk_config) = 'object')",
+            name="chunk_checkpoint",
+        ),
+        CheckConstraint(
             "status IN ('UPLOADED', 'PARSING', 'OCR_PROCESSING', 'CHUNKING', "
             "'EMBEDDING', 'INDEXING', 'READY', 'FAILED')",
             name="status",
@@ -90,6 +95,9 @@ class Document(Timestamps, Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     # 每次重新投递分配新标识，旧消息不能覆盖新一轮处理的状态。
     processing_task_id: Mapped[UUID | None] = mapped_column(unique=True)
+    # 切片使用独立代次与冻结参数，不能改变解析缓存/云回调的 processing_task_id。
+    chunk_task_id: Mapped[UUID | None] = mapped_column(unique=True)
+    chunk_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class DocumentBlock(Base):

@@ -48,6 +48,9 @@
 | `hybrid.persisted` | 全量 Hybrid Block 已事务提交；不记录正文、Anchor/manifest、签名 URL，仍在每日同一个文件 |
 | `cache.hit / miss / stored / busy` | 缓存命中/未命中/完整结果已存盘/同内容活动任务拒绝重复；stored 不代表 SQL 已提交 |
 | `cache.persisted / maintenance_requested` | 缓存已事务回放 / 显式 Reindex或Force Reparse 请求；固定操作、缓存键、命中和数量摘要 |
+| `chunk.dispatched / dispatch_failed / rejected` | 独立切片投递、确认失败及状态/检查点拒绝，不记录正文或配置原文 |
+| `chunk.started / persisted / skipped` | 按 Block 原序开始切片、事务提交成功及旧/已完成消息跳过；数量、估算长度参数、超目标数和耗时 |
+| `chunk.retry / failed / error_record_failed` | 临时数据库有限重试、安全终止及错误未能写库，不输出异常原文 |
 
 `parse.persisted / mineru.blocks_persisted` 只表示代码校验与事务成功，不保证 OCR 全量识别、公式语义或任意复杂布局顺序正确，不代表 READY。真实正文、页码与 bbox 仍需查询 `document_blocks` 并对照原件。
 
@@ -63,6 +66,7 @@ python -m pytest tests/test_business_logging.py -q
 
 ```powershell
 python -m pytest tests/business_logging_smoke.py tests/batch_upload_smoke.py -q
+python -m pytest tests/chunk_db_smoke.py tests/test_business_logging.py -q
 ```
 
 同时执行现有 Parser、接口、任务、迁移及 MinerU 回归测试。自动测试不会证明真实 Windows Worker 重启、Linux prefork 或真实 MinerU 网络链路已验收。
@@ -78,4 +82,4 @@ python -m pytest tests/business_logging_smoke.py tests/batch_upload_smoke.py -q
 7. 检查业务文件不含 Token、密码、签名链接或完整正文。不要把真实密钥复制到搜索命令、终端输出或提交记录中。跨日分文件和多进程竞争已自动测试；真实持续运行时关注磁盘容量并安排历史日期日志归档。已有旧 PID 日志本次不会自动删除或合并；如需整理，先停止旧写入进程并另行确认范围，不删除运行中的锁文件。实际 Linux prefork 及网络文件系统未在 Windows 自动测试中真实验证。
 8. 强制刷新 Swagger，在原 `/documents` 入口点击 `Try it out`，确认 `file` 只有一个文件控件、无 `Add string item`。打开选择窗口，用 Ctrl/Shift 一次选两份新 TXT/MD，以及一份重复文件和空文件；选择后应显示数量、名称/大小初检，尚无上传或落库日志。点击 Execute 后核对逐项 201/409/400 与汇总数量，不使用 `/batch` 路径。用响应 `X-Request-ID` 关联 `upload.batch_started / batch_item / batch_finished`；每个成功项独立 doc_id/task_id，后续 Worker 各有解析日志。原显式 `/mineru/documents` 同样多选少量新图片/PDF 验证各自 parse_job 与真实落库，不能以批次 200 当作解析成功。只选一份继续走原上传事件与单文件响应。界面初检不读取或上传文件正文，最终校验与安全日志仍由现有后端负责，不把仅打开文件窗口记成上传成功。
 
-日志设施自身不发 API；阶段12复用每日同一文件，增加缓存键、命中、视觉命中数与维护操作，不输出缓存正文/路径。真实费用按 batch 与平台核对，新增缓存测试只编写未执行，无 Chunk/Embedding/RAG。
+日志设施自身不发 API；缓存和切片继续使用每日同一文件。切片任务用独立 task_id 与 doc_id 关联，成功事件在 SQL 提交后写入，EMBEDDING 仅表示等待向量化；不输出 Chunk 正文/字符跨度。真实费用按 batch 与平台核对；新增测试仅编写，等待用户执行，不包含 Embedding/RAG。
