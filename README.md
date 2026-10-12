@@ -176,29 +176,123 @@ CPU Worker 应显示 default_queue、process_document、chunk_document、submit_
 
 ### 本地 BGE-M3 与 GPU Worker
 
-仅做上传/解析时无需准备模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用同一 Service；当前不启用 Sparse/ColBERT。推理使用已声明的 sentence-transformers，固定本地文件加载并禁止远程代码；缺文件直接报错，不在 Worker 内下载模型。
+仅做上传/解析时无需模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用 `sentence_transformers.SentenceTransformer`，不是 FlagEmbedding.BGEM3FlagModel；不启用 Sparse/ColBERT。固定 `local_files_only=True`、`trust_remote_code=False`，缺文件报错，Worker 不自动下载或降级 CPU。
 
-用户手动准备 NVIDIA 驱动和匹配的 PyTorch CUDA 包：在 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/) 选择 Windows/Pip/Python 与合适 CUDA 后执行其命令，不安装 CPU-only 包替代 GPU。环境更新后再次检查 CUDA：
+以下安装、下载、模型验证、迁移和启动命令**仅由用户手动执行**，不是给 Codex 的执行授权；不需要重建整个 Conda 环境。
 
-```powershell
-python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.device_count())"
-```
+#### 1. 确认环境与 CUDA
 
-预期 CUDA 可用为 True、设备数至少 1。模型下载由用户手动联网执行，使用已有依赖中的 Hugging Face 下载工具：
+在项目根目录的 PowerShell 中执行，先确认 Python 和 pip 都属于 `dkf-agent`，而非 base 或系统 Python：
 
 ```powershell
-python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BAAI/bge-m3', local_dir='models/bge-m3', allow_patterns=['*.json','*.safetensors','*.bin','sentencepiece.bpe.model'], ignore_patterns=['onnx/*'])"
+conda activate dkf-agent
+python --version
+python -c "import sys; print(sys.executable)"
+python -m pip --version
+python -m pip show torch sentence-transformers huggingface_hub transformers sentencepiece
+nvidia-smi
+python -c "import torch; print('torch=',torch.__version__,'torch_cuda=',torch.version.cuda,'available=',torch.cuda.is_available(),'devices=',torch.cuda.device_count())"
 ```
 
-保留 config.json、modules.json、Tokenizer、权重及 1_Pooling/2_Normalize 部件；不要仅下载权重。参考 [官方文件下载说明](https://huggingface.co/docs/huggingface_hub/guides/download)。下载/加载有较大磁盘、内存及显存开销；模型更新应停 Worker、核对来源并重新向量化，不运行中替换文件。
+目标为 Python 3.11、RTX 4060 Laptop（8GB 显存）；已有驱动 596.21、nvidia-smi 显示 CUDA 13.2。曾检测到的 `2.14.1+cpu` / `False` 只反映当时环境，以本次输出为准。若 torch 未安装，先完成下一步再检查。
 
-在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
+`nvidia-smi` 的 CUDA 字段表示驱动支持的 CUDA 版本，不代表 PyTorch 使用的版本或已经安装完整 Toolkit；PyTorch 构建版本看 `torch.version.cuda`。见 [NVIDIA 字段说明](https://docs.nvidia.com/deploy/nvidia-smi/index.html#cuda-version)。
+
+#### 2. 仅在需要时替换 CUDA 版 PyTorch
+
+优先保留现有 PyTorch 主版本，能匹配时保留完整版本号，仅把 CPU Wheel 换成 CUDA Wheel，不无条件升级整个环境。对曾使用 `2.14.1+cpu` 的上述环境，候选命令为：
+
+```powershell
+# 先核对官方可用版本；此命令不安装软件。
+python -m pip index versions torch --index-url https://download.pytorch.org/whl/cu132
+# 仅确认版本、Windows x64 / Python 3.11 Wheel 和驱动兼容后执行。
+python -m pip install --upgrade "torch==2.14.1+cu132" --index-url https://download.pytorch.org/whl/cu132
+```
+
+[官方 cu132 索引](https://download.pytorch.org/whl/cu132/torch/) 列有 `torch-2.14.1+cu132-cp311-cp311-win_amd64.whl`，但文件存在不等于本机运行已验证。执行前核对当前索引、解释器及驱动；已有可用 CUDA 包就跳过替换。若无法匹配，先记录错误并参考 [官方安装选择器](https://pytorch.org/get-started/locally/)，不要盲目换版本。已有 torchvision/torchaudio 时也需核对它们与 torch 的兼容性；本阶段不要求为 Dense 推理额外安装它们。
+
+预编译 Wheel 自带所需 CUDA 运行库，通常无需另装完整 CUDA Toolkit；只有自行编译 PyTorch/自定义 CUDA 扩展等场景才另行考虑，见 [PyTorch 维护者说明](https://discuss.pytorch.org/t/should-i-install-the-extra-cudatoolkit-and-cudnn/194528/2)。由用户检查 CUDA 并做一次简单 GPU 计算：
+
+```powershell
+python -c "import torch; print('torch=',torch.__version__,'torch_cuda=',torch.version.cuda,'available=',torch.cuda.is_available(),'devices=',torch.cuda.device_count())"
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA unavailable'; x=torch.arange(4,device='cuda:0',dtype=torch.float32); print('device=',x.device,'sum_squares=',(x*x).sum().item())"
+```
+
+cu132 方案预期 CUDA 为 13.2、available=True、设备数至少 1，GPU 计算输出 device=cuda:0、sum_squares=14.0；否则停止模型部署，先查环境/驱动，不用 CPU 假装验收成功。
+
+#### 3. 只补齐缺少的推理依赖
+
+`environment.yml` 已声明 sentence-transformers、transformers；huggingface_hub 用于下载，亦为推理依赖链的一部分。**只有环境检查确认缺包时才执行对应行**，已有可用版本保留，不使用全环境升级：
+
+```powershell
+python -m pip install sentence-transformers
+python -m pip install huggingface_hub
+# 仅在上述依赖未补齐、且确认实际缺少时执行对应行。
+python -m pip install transformers
+python -m pip install sentencepiece
+python -m pip check
+```
+
+tokenizers、numpy、safetensors 等由依赖解析补齐；其他缺失/冲突按 `pip check` 与导入错误单独处理，不加训练/ONNX extras。预期 `No broken requirements found.`，冲突时先核对版本再继续。虽然环境声明含 FlagEmbedding，本阶段代码不调用它，缺少它不能作为要求安装它或更换框架的理由。
+
+#### 4. 下载完整的本地模型
+
+由用户手动联网下载，目录保持与 `EMBEDDING_MODEL_DIR=models/bge-m3` 一致：
+
+```powershell
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BAAI/bge-m3', local_dir='models/bge-m3', allow_patterns=['*.json','pytorch_model*.bin','model*.safetensors','sentencepiece.bpe.model'], ignore_patterns=['onnx/*']); print('model_download_complete')"
+```
+
+JSON 通配符也保留子目录配置：必须包含 config.json、modules.json、Tokenizer 文件、完整权重，以及 modules.json 指定的 Pooling/Normalize 部件（如 1_Pooling/config.json；Normalize 可能仅由模块声明提供，不自造配置）。不下载 ONNX 或 Sparse/ColBERT 权重，不仅下载单个权重文件。参考 [官方文件下载说明](https://huggingface.co/docs/huggingface_hub/guides/download)。
+
+模型为数 GB，首次下载、校验和加载会占用时间、磁盘、内存与显存，需预留下载缓存/临时文件空间。记录官方快照版本；更新模型先停相关进程并重新向量化，不运行中替换文件。根目录 `models/` 已由 `.gitignore` 的 `/models/` 规则保护，不提交模型到 GitHub。
+
+#### 5. 本地加载验证与 8GB 显存配置
+
+当前默认 `EMBEDDING_DEVICE=cuda:0`、`EMBEDDING_BATCH_SIZE=16`、`EMBEDDING_MAX_LENGTH=8192`、`EMBEDDING_USE_FP16=true`。RTX 4060 的 8GB 显存不保证 batch=16 与长输入可用，首次部署建议用户手动考虑将 Batch Size 设为 1～2，保持 FP16；Codex 不修改 `.env`。最大长度是上限而非保证，超长输入不会静默截断。
+
+**Embedding 检查点建立后，参数已冻结，直接改 `.env` 并重投不会改变原任务。** 需停止相关进程、按 [Embedding 恢复说明](docs/EMBEDDING.md#检查点状态与结果) 用成功 Parse Cache 经 Reindex→Chunk→Embed 建立新检查点；不为此 Force Reparse 或重新消耗 MinerU。
+
+先停止 GPU Worker，避免命令行进程与 Worker 同时加载两份 BGE-M3。下面只调用项目统一入口，验证本地部署是否成功，不访问数据库或云 API，不打印向量、正文或模型路径：
+
+```powershell
+$embeddingDeployCheck = @'
+# 仅用户手动执行：复用项目统一编码入口，不建立另一套模型推理流程。
+import math
+import torch
+from app.services.embedding import embed_documents, embed_query, get_embedding_service
+
+service = get_embedding_service()
+assert service.options.device == 'cuda:0', '需要 cuda:0 配置'
+assert torch.cuda.is_available(), 'CUDA 不可用'
+docs = embed_documents(['本地部署验证', '知识库向量服务'])
+query = embed_query('本地部署验证')
+dims = [len(vector) for vector in docs]
+norms = [math.sqrt(sum(value * value for value in vector)) for vector in docs + [query]]
+assert len(docs) == 2 and dims == [1024, 1024] and len(query) == 1024
+assert all(abs(norm - 1.0) < 1e-4 for norm in norms)
+allocated_mb = torch.cuda.memory_allocated(0) / (1024 * 1024)
+assert allocated_mb > 0, '当前进程未检测到 CUDA 显存分配'
+print('device=', service.options.device, 'gpu_allocated_mb=', round(allocated_mb, 1))
+print('docs=', len(docs), 'dims=', dims, 'query_dim=', len(query), 'norms=', norms)
+'@
+# 通过参数传入代码，避免旧版 Windows PowerShell 管道编码改变中文文本。
+python -c $embeddingDeployCheck
+```
+
+预期 device=cuda:0、当前进程显存分配大于 0、docs=2、dims=[1024,1024]、query_dim=1024、所有范数约 1。服务只从本地加载且不自动 CPU 回退，成功编码与显存分配共同确认 GPU 路径；命令退出释放模型后再启动 Worker。此验证不等于长文档、吞吐或峰值显存验收。
+
+#### 6. 数据库与 GPU Worker
+
+用户先按本章数据库初始化命令升级并确认 `0006_embedding_checkpoint`（已有该版本不重复部署），再在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
 
 ```powershell
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
 ```
 
-应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型只在首次编码时惰性加载；ready/health 不证明模型或 GPU 已验收。文档任务固定 gpu_queue，一份文档一个任务、内部批处理，不每 Chunk 投递一次；只启动 CPU Worker 不会执行向量化。默认 cuda:0、batch=16、fp16；显存不足时减少批大小后建立新的检查点，详见 [Embedding 说明](docs/EMBEDDING.md)。不自动降级 CPU。
+应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型仅首次编码时加载，ready/health 不证明 GPU 已验收；一份文档一个任务、内部批处理，不每 Chunk 投递一次，只启动 CPU Worker 不会执行向量化。
+
+对已切片、状态为 EMBEDDING 的文档调用 `POST /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed`，命令见 [已有 Chunk 向量化](#已有-chunk-向量化)。完成为 INDEXING / awaiting_index，结果仅保存在 EMBEDDINGS_DIR；不写 pgvector、不创建索引、不标记 READY。详细真实验收、SQL 与故障恢复继续参阅 [Embedding](docs/EMBEDDING.md)，不在此重复业务测试清单。
 
 ### 运行日志
 
