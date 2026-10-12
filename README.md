@@ -463,7 +463,7 @@ python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800
 
 默认使用固定默认知识库，逐文件保存 `source_type=preset` 并自动提交解析→切片→向量化→入库任务；脚本需保持运行以推进下一阶段。同内容复用已有 doc_id，不自动重投 FAILED 或已有检查点；超时/中断不取消后台任务，可核对状态后重跑。全批 READY 才返回成功，READY 仍不代表已提供查询/RAG。选项、幂等限制及恢复见 [预置导入说明](docs/PRESET_IMPORT.md)。
 
-可用 OHR-Bench 官方原始 PDF/QA 辅助准备复杂版面验收，离线抽样、手动下载/提取及版权边界见 [OHR-Bench 素材准备](docs/PRESET_IMPORT.md#ohr-bench-官方素材准备用户执行)。工具不联网、不自动导入，不能替代 Office/文本/图片等多格式素材；QA/GT/报告仅放 docs/test，不放预置业务目录。
+公开基准数据集验收仅使用 OHR-Bench、Microsoft OCB、OmniDocBench；离线准备工具、手动下载/提取、格式缺口及质量对照见 [公开基准验收说明](docs/PRESET_IMPORT.md#三个公开基准的解析质量验收用户执行)。工具不联网、不自动导入；QA/GT/报告仅放 docs/test，不作为知识库内容，READY 不代表解析或问答准确率达标。
 
 ## 5. 部署检查与排障
 
