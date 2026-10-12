@@ -23,7 +23,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**14：BGE-M3 Embedding。已实现统一 Dense Service、文档 GPU 批处理与本地结果发布，测试仅编写，待用户验收；此前待验收事项继续保留。**
+当前阶段：**15：pgvector 索引入库。已实现本地结果校验、独立 CPU 入库检查点、事务批量写向量与 READY、HNSW 迁移；测试仅编写，待用户手动迁移及验收。此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -38,11 +38,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
 | 13 | 已实现标题/段落优先切片、结构块保留、稳定 ID/字符证据、异步检查点与查询；待用户执行测试与验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
-| 15 及后续 | 未开展，等待用户确认 |
+| 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
+| 15A 及后续 | 未开展，等待用户确认 |
 
-- 当前迁移 head 为 `0006_embedding_checkpoint`；“已实现”不等于已完成真实模型/API 人工验收。
-- 解析后 `CHUNKING / awaiting_chunk`，独立切片后 `EMBEDDING / awaiting_embedding`，独立 `/embed` 本地向量完成后 `INDEXING / awaiting_index`。阶段 14 不写 Chunk.embedding、不创建索引、不标记 READY。
-- 当前仅实施用户授权的阶段 14；11B.2/12/13 待验收事项仍保留。未经用户确认，不进入 pgvector 向量入库、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
+- 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成，尚无检索或问答接口。
+- 当前仅实施用户授权的阶段 15；11B.2/12/13/14 待验收事项仍保留。未经用户确认，不进入 15A LlamaIndex Adapter、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -158,6 +159,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 每文档一个 gpu_queue 任务，内部批处理，不每 Chunk 一个 Celery Task。独立 embedding_task_id/冻结输入及配置，失败不改 Chunk；全量本地结果校验后推进 INDEXING，只有事务提交后记业务成功日志。
 - EMBEDDINGS_DIR 保存受限访问的代次向量/manifest；只发布完整结果，校验身份、顺序、维度、数值和校验和，SQL 回滚后可同代次复用。损坏不静默重算；原件/Chunk 重建失效旧检查点但不自动删除历史文件。阶段 15 才写 pgvector/建索引，后续 Query 必须核对实际模型指纹，不能仅凭维度相同混用不同模型。
 
+### pgvector 入库
+
+- /index 只消费已完成本地向量，一个文档一个 default_queue 任务；不加载模型/Parser 或调用云端。独立 index_task_id/index_config 冻结解析、切片、GPU 代次及文件/模型摘要，重试只恢复同一代次。
+- HNSW cosine 部分索引由用户执行迁移创建，任务只校验有效索引。全量输入/文件身份、1024 维、有限单位向量通过后批量更新原 Chunk，数量/维度/范数与 READY 同事务，任一失败整体回滚；成功日志仅在提交后。
+- READY 重复 /index、/chunk、/embed 不重算；活动入库拒绝维护。显式 Reindex/Reparse 与成功 Block/Chunk 重建失效旧入库检查点，失败保留原证据；未来检索必须限定 READY 及模型/编码版本，不能用有值的旧向量冒充新代次。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -170,6 +177,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 日志事件、脱敏、并发写入与验收 | [业务日志](docs/BUSINESS_LOGGING.md) |
 | 切片、字符证据、检查点与人工验收 | [Chunk](docs/CHUNK.md) |
 | 本地模型、GPU 批处理、向量结果与人工验收 | [Embedding](docs/EMBEDDING.md) |
+| 向量入库、HNSW、READY 与人工验收 | [pgvector 入库](docs/PGVECTOR_INDEX.md) |
 | 部署与接口使用 | [README](README.md) |
 
 完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

@@ -76,6 +76,11 @@ class Document(Timestamps, Base):
             name="embedding_checkpoint",
         ),
         CheckConstraint(
+            "(index_task_id IS NULL AND index_config IS NULL) OR "
+            "(index_task_id IS NOT NULL AND index_config IS NOT NULL AND jsonb_typeof(index_config) = 'object')",
+            name="index_checkpoint",
+        ),
+        CheckConstraint(
             "status IN ('UPLOADED', 'PARSING', 'OCR_PROCESSING', 'CHUNKING', "
             "'EMBEDDING', 'INDEXING', 'READY', 'FAILED')",
             name="status",
@@ -103,9 +108,11 @@ class Document(Timestamps, Base):
     # 切片使用独立代次与冻结参数，不能改变解析缓存/云回调的 processing_task_id。
     chunk_task_id: Mapped[UUID | None] = mapped_column(unique=True)
     chunk_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
-    # 本轮只冻结 GPU 批处理与本地结果，不改变解析/切片代次，也不提前写 Chunk.embedding。
+    # GPU 阶段仅冻结批处理与本地结果；CPU 入库检查点独立，不改变解析/切片/GPU 代次。
     embedding_task_id: Mapped[UUID | None] = mapped_column(unique=True)
     embedding_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    index_task_id: Mapped[UUID | None] = mapped_column(unique=True)
+    index_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class DocumentBlock(Base):
@@ -155,6 +162,9 @@ class DocumentChunk(Base):
         CheckConstraint("jsonb_typeof(metadata) = 'object'", name="metadata_object"),
         Index("ix_document_chunks_kb_id_doc_id", "kb_id", "doc_id"),
         Index("ix_document_chunks_doc_id", "doc_id"),
+        Index("ix_document_chunks_embedding_hnsw", "embedding", postgresql_using="hnsw",
+              postgresql_ops={"embedding": "vector_cosine_ops"},
+              postgresql_where=sql_text("embedding IS NOT NULL")),
     )
 
     chunk_id: Mapped[UUID] = mapped_column(
@@ -173,7 +183,7 @@ class DocumentChunk(Base):
         default=dict,
         server_default=sql_text("'{}'::jsonb"),
     )
-    # BGE-M3 的 Dense 向量为 1024 维，入库前允许为空；本阶段不建立 ANN 索引。
+    # BGE-M3 的 Dense 向量为 1024 维；等待入库时可为空，/index 全量写入后才标记 READY。
     embedding: Mapped[list[float] | None] = mapped_column(VECTOR(1024))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

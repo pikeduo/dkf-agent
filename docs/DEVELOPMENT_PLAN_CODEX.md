@@ -2447,6 +2447,14 @@ Query 与 Chunk 向量维度一致，可批量生成。
 
 # 21. 阶段 15：pgvector 索引入库
 
+## 当前实现与验收边界
+
+- 新增显式 POST `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index`，独立 index_task_id/index_config；default_queue 单文档任务只消费阶段 14 的完整本地结果，不重新推理或调用云端。
+- 校验解析/切片/GPU 输入身份、完整文件校验和、实际模型指纹/编码版本/精度、1024 维有限 L2 单位向量；固定 256 条批次更新现有 Chunk，不改正文、证据或稳定标识。
+- 所有批次与 READY 同事务，失败回滚再独立记录安全原因；临时数据库错误有限重试，重复/旧消息幂等。READY 文档每个 Chunk 都有向量，不等于 Retrieval/RAG 已实现。
+- `0007_pgvector_index` 新增私有入库检查点及 HNSW cosine 部分索引；迁移可能阻塞写入，需用户维护窗口。无新增依赖、环境变量、自动扩展升级或逐文档建索引。
+- 代码及测试用例已编写，迁移、测试、真实 pgvector/Worker 验收均未执行。具体部署见 [README](../README.md#已有向量-pgvector-入库)，用户验收及 SQL 见 [pgvector 入库](PGVECTOR_INDEX.md)。第 0 节权限禁令继续适用，不自动进入阶段 15A。
+
 ## 目标
 将向量写入 PostgreSQL。
 

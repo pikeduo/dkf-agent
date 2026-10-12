@@ -121,6 +121,17 @@ def test_embedding_contract_has_no_document_body_or_model_paths():
     assert set(response) == {"doc_id", "kb_id", "embedding_task_id", "status"}
 
 
+def test_index_contract_does_not_accept_vectors_or_expose_private_configuration():
+    """入库只接收已存在文档的路径标识，不能上传向量、模型配置或私有文件路径。"""
+
+    schema = docs_request("/openapi.json").json()
+    operation = schema["paths"]["/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index"]["post"]
+    assert "requestBody" not in operation and "202" in operation["responses"]
+    assert {parameter["name"] for parameter in operation["parameters"]} == {"kb_id", "doc_id"}
+    fields = schema["components"]["schemas"]["IndexTaskResponse"]["properties"]
+    assert set(fields) == {"doc_id", "kb_id", "index_task_id", "status"}
+
+
 @pytest.mark.parametrize(
     "suffix, allowed", [("documents", FILE_TYPES), ("mineru/documents", MINERU_TYPES)]
 )

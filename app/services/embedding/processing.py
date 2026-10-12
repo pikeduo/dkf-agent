@@ -66,15 +66,17 @@ def checked_config(document: Document) -> tuple[dict, EmbeddingOptions]:
 
 
 def prepare_embedding(session: Session, document: Document, settings: Settings) -> tuple[UUID, bool]:
-    """在文档行锁下建立单文档 GPU 任务，重复请求恢复同一冻结代次，不加载模型或检查 GPU。"""
+    """行锁下创建/恢复 GPU 代次；INDEXING/READY 不重算，入库失败应恢复 /index。"""
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise EmbeddingError("EMBEDDING_BUSY")
-    if document.status == "INDEXING" and document.embedding_task_id is not None:
+    if document.status in {"INDEXING", "READY"} and document.embedding_task_id is not None:
         checked_config(document)
         return document.embedding_task_id, False
+    if document.index_task_id is not None:
+        raise EmbeddingError("EMBEDDING_STATE")
     if (document.status not in {"EMBEDDING", "FAILED"} or document.chunk_task_id is None
             or document.status == "FAILED" and document.embedding_task_id is None):
         raise EmbeddingError("EMBEDDING_STATE")

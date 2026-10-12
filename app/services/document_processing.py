@@ -76,7 +76,7 @@ def check_source_hash(document: Document, path=None) -> None:
 def persist_blocks(
     session: Session, document: Document, parsed: ParsedDocument
 ) -> None:
-    """替换解析块并失效切片/向量检查点；失败时全部回滚，不删除本地历史向量文件。"""
+    """替换解析块并失效切片/向量/入库检查点；失败全部回滚，不删除历史向量文件。"""
 
     parsed = ParsedDocument.model_validate(parsed)
     if (parsed.doc_id, parsed.file_name, parsed.file_type) != (
@@ -91,6 +91,7 @@ def persist_blocks(
     session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document.doc_id))
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
+    document.index_task_id, document.index_config = None, None
     session.execute(
         delete(DocumentBlock).where(DocumentBlock.doc_id == document.doc_id)
     )

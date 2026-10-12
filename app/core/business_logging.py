@@ -178,6 +178,16 @@ EVENT_LABELS = {
     "embedding.retry": "向量化数据库步骤等待重试",
     "embedding.failed": "文档向量化失败，未发布半份业务结果",
     "embedding.error_record_failed": "向量化失败原因未能写入数据库",
+    "index.dispatched": "文档向量入库任务已投递",
+    "index.dispatch_failed": "向量入库投递确认失败，保留检查点",
+    "index.rejected": "向量入库状态或检查点校验未通过",
+    "index.started": "开始校验并批量写入文档向量",
+    "index.batch_written": "向量批次已执行，尚未提交事务",
+    "index.persisted": "全部 Chunk 向量与 READY 状态已事务提交",
+    "index.skipped": "跳过已完成或过期向量入库消息",
+    "index.retry": "向量入库数据库步骤等待重试",
+    "index.failed": "向量入库失败，本次写入已回滚",
+    "index.error_record_failed": "向量入库失败原因未能写入数据库",
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {

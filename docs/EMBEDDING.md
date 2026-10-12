@@ -1,6 +1,6 @@
 # BGE-M3 Embedding：范围与人工验收
 
-阶段 14 仅本地 Dense 向量化文档 Chunk 和 Query；不写 pgvector、不建索引、不实现检索/RAG。文档结果完整发布后进入 INDEXING / awaiting_index，Chunk.embedding 仍为 NULL。阶段 15 再接入数据库向量与索引。
+阶段 14 仅本地 Dense 向量化文档 Chunk 和 Query；/embed 不写 pgvector、不建索引、不实现检索/RAG。文档结果完整发布后进入 INDEXING / awaiting_index，Chunk.embedding 仍为 NULL。随后显式 [阶段 15 /index](PGVECTOR_INDEX.md) 才把完整结果事务入库并推进 READY；本文件仍保留 /embed 的独立验收。
 
 ## 统一 Service
 
@@ -29,7 +29,7 @@ Service 导入/构造与 API 投递不加载 Torch/模型；每进程缓存一�
 
 ## 检查点、状态与结果
 
-迁移 0006_embedding_checkpoint 增加 Document.embedding_task_id/embedding_config，保持原处理/切片标识。POST `/embed` 无请求体，只从 EMBEDDING 或匹配的向量化 FAILED 恢复；INDEXING 已完成请求不重投。冻结模型目录/设备/精度/批大小/长度、结果目录及 Chunk/解析代次、顺序/文本 Hash；普通重投不读取新默认值覆盖旧配置。配置信息只保存在私有数据库，不返回 HTTP/消息/日志。
+迁移 0006_embedding_checkpoint 增加 Document.embedding_task_id/embedding_config，保持原处理/切片标识。POST `/embed` 无请求体，只从 EMBEDDING 或匹配的向量化 FAILED 恢复；INDEXING/READY 已完成请求不重投，入库检查点的 FAILED 应恢复 /index。冻结模型目录/设备/精度/批大小/长度、结果目录及 Chunk/解析代次、顺序/文本 Hash；普通重投不读取新默认值覆盖旧配置。配置信息只保存在私有数据库，不返回 HTTP/消息/日志。
 
 Worker 用文档行锁核对代次/输入，旧任务不能覆盖新 Chunk。结果文件在冻结 EMBEDDINGS_DIR 中：
 
@@ -45,7 +45,7 @@ data/embeddings/<doc_id>/<embedding_task_id>/
 
 成功重解析/缓存回放/切片替换会在相应事务失效旧 Embedding 检查点，不自动删除历史文件；失败回滚保留原 Chunk。活动 GPU 检查点不允许 Reindex/Reparse 改代次，向量完成后可维护。若因显存或部署参数需改 batch/model_dir/device，停止相关进程、更新配置，再用已有成功 Parse Cache 执行 Reindex→Chunk→Embed 建立新检查点；不为此 Force Reparse、不调用 MinerU。缓存缺失仍按阶段 12 规则失败，不绕过。
 
-向量文件与模型目录都需限制访问/备份；Hash 不是签名。后续入库/检索必须检查实际 model_fingerprint、1024 维、归一化和编码版本，不能只凭维度一致混用不同权重。当前不具备已入库向量、HNSW/IVFFlat 或 READY 能力。
+向量文件与模型目录都需限制访问/备份；Hash 不是签名。入库/检索必须检查实际 model_fingerprint、1024 维、归一化和编码版本，不能只凭维度一致混用不同权重。/embed 本身不完成入库，后续 /index 已接入 HNSW/READY，尚待用户验收；没有检索/RAG。
 
 ## 用户手动自动测试
 
@@ -72,7 +72,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-预期 head=0006_embedding_checkpoint。在 GPU Worker 尚未占用显存时，由用户运行以下最小真实 Service 验证（只显示数量/维度/范数差异，不打印向量）：
+当前预期 head=0007_pgvector_index（包含阶段 14 的 0006）。在 GPU Worker 尚未占用显存时，由用户运行以下最小真实 Service 验证（只显示数量/维度/范数差异，不打印向量）：
 
 ```powershell
 python -c "from app.services.embedding import embed_documents, embed_query; import math; text='知识库文档解析'; docs=embed_documents([text,'本地向量化服务']); query=embed_query(text); print('docs=',len(docs),'dims=',[len(v) for v in docs],'query_dim=',len(query),'norm=',math.sqrt(sum(x*x for x in query)),'same_input_diff=',max(abs(a-b) for a,b in zip(docs[0],query)))"
@@ -121,4 +121,4 @@ python -c "from uuid import UUID; from sqlalchemy.orm import Session; from app.d
 
 6. 故障优先运行 Stub 用例，不破坏共用模型/服务。真实缺模型、CUDA 不可用/显存不足、长表格超过真实 token 限制应明确 FAILED，原 Chunk 保留，无半份完成标记、不假装 READY。修复同一配置可恢复 `/embed`；改变冻结参数按上述 Reindex 流程建立新代次。
 
-当前真实 CUDA/本地模型、FP16 精度、吞吐、显存和全部回归仍待用户执行确认。MinerU/Hybrid/Parse Cache 的既有真实待验收项继续保留，不能以本轮离线用例替代。未经用户确认，不进入阶段 15。
+当前真实 CUDA/本地模型、FP16 精度、吞吐、显存和全部回归仍待用户执行确认。MinerU/Hybrid/Parse Cache 的既有真实待验收项继续保留，不能以离线用例替代。用户已授权阶段 15 实现，其入库验收独立记录；未经用户确认，不进入阶段 15A。

@@ -42,7 +42,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise ChunkError("CHUNK_BUSY：文档仍有活动解析任务")
-    if document.status in {"EMBEDDING", "INDEXING"} and document.chunk_task_id is not None:
+    if document.status in {"EMBEDDING", "INDEXING", "READY"} and document.chunk_task_id is not None:
         checkpoint_options(document)
         return document.chunk_task_id, False
     if document.status not in {"CHUNKING", "FAILED"} or (
@@ -63,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """行锁保护全量替换和 GPU 检查点失效；切片/状态同事务，失败由调用方整体回滚。"""
+    """行锁保护全量替换和 GPU/入库检查点失效；切片/状态同事务，失败由调用方整体回滚。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -90,6 +90,7 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     drafts = build_chunks(doc_id, document.kb_id, document.file_type, inputs, options)
     session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == doc_id))
     document.embedding_task_id, document.embedding_config = None, None
+    document.index_task_id, document.index_config = None, None
     for draft in drafts:
         metadata = draft.metadata | {"source_parse_task_id": source_generation(document),
                                      "file_hash": document.file_hash}

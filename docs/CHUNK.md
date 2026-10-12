@@ -22,7 +22,7 @@ Chunk UUID5 由 doc_id、kb_id、输入内容/Block 身份/顺序、配置和该
 
 ## 检查点与失败原子性
 
-迁移 `0005_chunk_checkpoint` 在 Document 保存独立 chunk_task_id/chunk_config；不覆盖 processing_task_id。POST 只允许解析完成的 CHUNKING、持有匹配切片检查点的 FAILED，或已完成的 EMBEDDING；活动云任务拒绝。再次请求沿用同一检查点，可恢复投递中断；已完成不重复投递，不宣称 exactly-once。
+迁移 `0005_chunk_checkpoint` 在 Document 保存独立 chunk_task_id/chunk_config；不覆盖 processing_task_id。POST 只允许解析完成的 CHUNKING、持有匹配切片检查点的 FAILED，或已完成的 EMBEDDING/INDEXING/READY；活动云任务拒绝。再次请求沿用同一检查点，可恢复投递中断；已完成不重复投递，不宣称 exactly-once。
 
 Worker 持有文档行锁，检查切片代次和来源解析代次，全部切片生成后全量替换 Chunk 并推进 EMBEDDING，一次事务提交。失败整体回滚，独立事务记录安全原因；数据库临时错误最多 3 次重试，5/10/20 秒。旧代次、已完成状态不能被迟到失败回调覆盖。进程失联没有自动 Outbox/补投，用户查询后显式恢复。
 
@@ -37,7 +37,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-当前 head=0006_embedding_checkpoint（包含原 0005 切片迁移），Worker 注册 app.tasks.chunks.chunk_document 到 default_queue。
+当前 head=0007_pgvector_index（包含原 0005 切片与 0006 GPU 检查点迁移），Worker 注册 app.tasks.chunks.chunk_document 到 default_queue。
 
 由用户执行自动用例（隔离数据库 schema 需要项目用户 CREATE 权限和已启用 vector；不操作 public 数据）：
 
@@ -104,4 +104,4 @@ ORDER BY (c.metadata->>'chunk_index')::integer, (s->>'chunk_start_char')::intege
 
 ## 尚未验证与后续边界
 
-阶段 13/14 新增测试仅编写，未运行真实 Worker、迁移、文档处理或模型。切片质量、真实 token 数和检索效果待用户验收。[阶段 14 Embedding](EMBEDDING.md) 已接入独立 GPU 批处理，超模型真实长度明确失败，不截断本节保留的结构块；尚未实现 pgvector 向量入库、Index/RAG。
+阶段 13/14 新增测试仅编写，未运行真实 Worker、迁移、文档处理或模型。切片质量、真实 token 数和检索效果待用户验收。[阶段 14 Embedding](EMBEDDING.md) 已接入独立 GPU 批处理，超模型真实长度明确失败，不截断本节保留的结构块；[阶段 15 入库](PGVECTOR_INDEX.md) 已编写但待人工验收，尚无 Retrieval/RAG。

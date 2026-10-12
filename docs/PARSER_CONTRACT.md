@@ -202,7 +202,7 @@ python -m pytest tests/native_parser_db_smoke.py tests/document_processing_smoke
 
 真实上传验收：
 
-1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0006_embedding_checkpoint`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
+1. 按 [README](../README.md) 同步依赖，在正式业务库执行 `python -m alembic upgrade head`，当前 head 为 `0007_pgvector_index`；原生块顺序来自 `0003_block_order`。重启 API 和 CPU Worker。
 2. 先确认 Windows Redis 服务为 `Running`，再在 Swagger 向测试知识库通过普通 `/documents` 上传 TXT、MD、DOCX、文本 PDF，以及三种编码（UTF-8/BOM/GB18030）的 CSV、多 Sheet XLSX；不同内容避免去重。CSV 包含中文、引号逗号、空字段、数字和百分比，XLSX 包含空 Sheet、中文、数字、百分比及未执行公式。
 3. 用文档详情和 `/tasks/{task_id}` 查询，预期文档为 `CHUNKING`、无失败原因，首次成功任务结果为 `awaiting_chunk` 且 `block_count > 0`。
 4. 在 pgAdmin 中用实际 `doc_id` 检查有序正文、标题章节及页码：

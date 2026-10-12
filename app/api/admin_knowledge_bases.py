@@ -28,6 +28,7 @@ from app.parsers.routing.contracts import ParseMode
 from app.schemas.batch_upload import BatchUploadResponse
 from app.schemas.chunk import ChunkResponse, ChunkTaskResponse
 from app.schemas.embedding import EmbeddingTaskResponse
+from app.schemas.indexing import IndexTaskResponse
 from app.schemas.knowledge_base import (
     DocumentResponse,
     KnowledgeBaseCreate,
@@ -42,6 +43,7 @@ from app.services.chunk.processing import prepare_chunk, publish_chunk
 from app.services.chunk.splitter import ChunkError
 from app.services.embedding.processing import prepare_embedding, publish_embedding
 from app.services.embedding.service import EmbeddingError
+from app.services.indexing import IndexingError, prepare_index, publish_index
 
 router = APIRouter(
     prefix="/api/admin/knowledge-bases",
@@ -306,6 +308,7 @@ def resubmit_document(
     document.processing_task_id = uuid4()
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
+    document.index_task_id, document.index_config = None, None
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
@@ -319,19 +322,21 @@ def resubmit_document(
 
 def submit_maintenance(session: Session, document: Document, operation: str,
                        parse_mode: ParseMode) -> DocumentResponse:
-    """维护拒绝活动云/切片/GPU 任务，允许等待入库文档；保留旧证据到解析成功替换。"""
+    """维护拒绝活动云/切片/GPU/入库任务，允许等待入库或 READY；成功替换前保留旧证据。"""
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
-    if (active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING", "EMBEDDING", "INDEXING"}
+    if (active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING", "EMBEDDING", "INDEXING", "READY"}
             or document.status == "CHUNKING" and document.chunk_task_id is not None
-            or document.status == "EMBEDDING" and document.embedding_task_id is not None):
+            or document.status == "EMBEDDING" and document.embedding_task_id is not None
+            or document.status == "INDEXING" and document.index_task_id is not None):
         raise HTTPException(status_code=409, detail="文档正在处理或当前阶段不允许维护，请先查询状态")
     # 显式维护才可从等待切片/向量化换代次；旧 Chunk 保留到成功解析/回放时事务失效。
     document.status, document.error_message = "UPLOADED", None
     document.processing_task_id = uuid4()
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
+    document.index_task_id, document.index_config = None, None
     session.flush()
     response = DocumentResponse.model_validate(document)
     session.commit()
@@ -417,4 +422,24 @@ def embed_existing_document(kb_id: UUID, doc_id: UUID, session: AdminSession) ->
     session.commit()
     if dispatch and not publish_embedding(session, doc_id, task_id):
         raise HTTPException(status_code=503, detail="EMBEDDING_DISPATCH：GPU 任务投递确认失败，请查询状态并恢复 /embed")
+    return response
+
+
+@router.post("/{kb_id}/documents/{doc_id}/index", response_model=IndexTaskResponse, status_code=202,
+             summary="CPU Worker 将完整本地向量写入 pgvector，全部成功后标记 READY",
+             responses={404: {"description": "文档不存在"}, 409: {"description": "状态或检查点不允许入库"},
+                        503: {"description": "数据库/pgvector 索引不可用或入库任务投递确认失败"}})
+def index_existing_document(kb_id: UUID, doc_id: UUID, session: AdminSession) -> IndexTaskResponse:
+    """只提交文档级入库检查点，提交后投递 CPU 队列；不加载模型、不在 API 中读取向量。"""
+
+    document = require_document(session, kb_id, doc_id, lock=True)
+    try:
+        task_id, dispatch = prepare_index(session, document)
+    except IndexingError as exc:
+        log_event("index.rejected", doc_id=doc_id, kb_id=kb_id, error_code=exc.code)
+        raise HTTPException(status_code=503 if exc.code == "INDEX_SCHEMA" else 409, detail=str(exc)) from None
+    response = IndexTaskResponse(doc_id=doc_id, kb_id=kb_id, index_task_id=task_id, status=document.status)
+    session.commit()
+    if dispatch and not publish_index(session, doc_id, task_id):
+        raise HTTPException(status_code=503, detail=str(IndexingError("INDEX_DISPATCH")))
     return response

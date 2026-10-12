@@ -62,6 +62,7 @@ class DocumentResponse(BaseModel):
     ]
     error_message: str | None
     task_id: UUID | None = Field(default=None, validation_alias="processing_task_id")
+    index_task_id: UUID | None = None
     created_at: datetime
     updated_at: datetime
 

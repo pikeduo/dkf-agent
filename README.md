@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING（等待入库）。当前尚不能检索或问答，不标记 READY。** 管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库，当前尚无检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -156,7 +156,9 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期 head 为 `0006_embedding_checkpoint`，默认知识库 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed 可重复执行；应用启动不会自动迁移、启用扩展或创建默认库。升级前停止旧 Worker，迁移后重启 API/Worker；历史文档不会自动切片或向量化。
+预期 head 为 `0007_pgvector_index`，默认知识库 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed 可重复执行；应用启动不会自动迁移、启用扩展或创建默认库。升级前备份并停止 API/Worker，迁移后重启；历史文档不会自动切片、向量化或入库。
+
+该迁移新增入库检查点和 HNSW cosine 部分索引，要求 pgvector 支持 HNSW（0.5.0 起）。普通事务建索引可能阻塞写入，已有大量向量时需安排维护窗口及磁盘/内存预算；应用不自动升级扩展或改系统服务。部署核对见 [pgvector 入库说明](docs/PGVECTOR_INDEX.md)。
 
 分别打开终端启动 API 和 CPU Worker：
 
@@ -170,7 +172,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 
 默认访问 [Swagger](http://127.0.0.1:8000/docs) 和 [健康接口](http://127.0.0.1:8000/health)。监听地址/端口以 Uvicorn 参数为准；局域网访问加 `--host 0.0.0.0 --port 8000`，`--reload` 仅用于开发。
 
-CPU Worker 应显示 default_queue、process_document、chunk_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析或切片。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
+CPU Worker 应显示 default_queue、process_document、chunk_document、index_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析、切片或入库。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
 
 自动模式默认可能生成 XLSX 的 PDF Bundle，因此 Windows 使用上面的串行 Worker；不要同时保留旧 threads Worker 消费该队列。
 
@@ -284,7 +286,7 @@ python -c $embeddingDeployCheck
 
 #### 6. 数据库与 GPU Worker
 
-用户先按本章数据库初始化命令升级并确认 `0006_embedding_checkpoint`（已有该版本不重复部署），再在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
+用户先按本章数据库初始化命令确认当前 head `0007_pgvector_index`（包含 0006 的 GPU 检查点；已是 head 则跳过升级），再在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
 
 ```powershell
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
@@ -320,6 +322,7 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunk` | 已完成解析的 Block 异步切片 / 恢复切片检查点，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunks` | 分页查询 Chunk 正文、原 Block 字符跨度和页码 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed` | GPU 批量向量化已有 Chunk / 恢复同一检查点，无请求体 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index` | CPU 批量写入已有本地向量 / 恢复入库检查点，全部成功后 READY，无请求体 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递，可选 Query parse_mode，无请求体 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reindex` | 仅回放成功解析缓存，停在等待切片，不调用 MinerU |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reparse?force=true` | 管理员明确重新解析，可选 parse_mode，可能重新收费 |
@@ -378,7 +381,7 @@ MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换
 - 仅 UPLOADED/FAILED 可通过 /process 重投，默认 auto；管理员可覆盖。活动云任务用 /mineru 恢复同一任务；收费失败且无可用缓存时，普通重投不再申请批次，返回 CACHE_REPARSE_REQUIRED。相同内容已有活动云任务时为 CACHE_IN_PROGRESS，完成后再重投可复用结果。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
 - `/reindex` 将缓存恢复为 Block 并停在 CHUNKING，再调用 `/chunk`；不执行 Embedding/Index，不重新调用 MinerU。缓存缺失、损坏或参数变化明确 FAILED，旧 Block/Chunk 保留。成功替换 Block 时同事务清除旧 Chunk，避免证据悬空。升级前已完成结果不会自动回填缓存。当前无 Delete/后台自动补投。
-- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU 检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING；失败后旧 Chunk/向量文件仅供诊断，不代表新代次完成。管理接口暂无鉴权，仅限可信环境。
+- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
 
 维护已有文档（无请求体，替换 UUID）：
 
@@ -414,9 +417,21 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/embed"
 ```
 
-返回 202 及独立 embedding_task_id，用 `/tasks/{embedding_task_id}` 和文档详情查询；完成为 INDEXING / awaiting_index，结果包含数量、维度和校验和，不返回向量或私有路径。文件在 EMBEDDINGS_DIR 下按 doc_id/embedding_task_id 保存 vectors.jsonl 与 manifest.json；本阶段 Chunk.embedding 仍为 NULL，pgvector 入库/索引属下一阶段。
+返回 202 及独立 embedding_task_id，用 `/tasks/{embedding_task_id}` 和文档详情查询；完成为 INDEXING / awaiting_index，结果包含数量、维度和校验和，不返回向量或私有路径。文件在 EMBEDDINGS_DIR 下按 doc_id/embedding_task_id 保存 vectors.jsonl 与 manifest.json；此步不写 Chunk.embedding，需继续显式 `/index`。
 
 重复提交恢复同一冻结配置，完成后不重投。超过真实 token 上限、缺模型、CUDA 不可用、模型运行中变化、输出维度/数值错误均明确失败，不静默截断或伪装成功。失败后修复原配置可再次 `/embed`；改变 batch/device/模型目录等参数需要先 Reindex→缓存 Block→Chunk→Embed 创建新检查点，不需要为此 Force Reparse。独立 embed_documents()/embed_query() 调用及人工验收见 [Embedding](docs/EMBEDDING.md)，当前没有 Query Embedding HTTP 接口。
+
+### 已有向量 pgvector 入库
+
+文档为 INDEXING、已发布完整本地向量时提交一次（无请求体），不需要 GPU Worker 或重新下载/加载模型，但需要 CPU Worker 和可读的 EMBEDDINGS_DIR：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/index"
+```
+
+返回 202 及 `index_task_id`；用 `/tasks/{index_task_id}` 与文档详情查询。文件身份/校验和、模型指纹、Chunk 代次及 1024 维归一化全部通过后，按固定批次写入；全部向量与 READY 同事务提交。HNSW cosine 索引由迁移创建并随写入维护，不每个文档重建。
+
+入库失败整体回滚并记录安全 `INDEX_*` 错误；修复后再次 `/index` 恢复同一代次，不用 `/embed` 重算。缺失/损坏结果不自动推理或调用云端。重复完成请求不重投，READY 文档重复 `/chunk`、`/embed` 也不重建。活动入库拒绝 Reindex/Reparse，完成后才可显式维护；READY 不等于检索/RAG 已实现。完整验收和 SQL 见 [pgvector 入库](docs/PGVECTOR_INDEX.md)。
 
 ## 5. 部署检查与排障
 
@@ -439,4 +454,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [业务日志](docs/BUSINESS_LOGGING.md)
