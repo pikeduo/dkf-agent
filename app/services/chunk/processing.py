@@ -36,18 +36,20 @@ def checkpoint_options(document: Document) -> ChunkOptions:
 
 
 def prepare_chunk(session: Session, document: Document, settings: Settings) -> tuple[UUID, bool]:
-    """在文档行锁下创建或恢复检查点；返回任务编号及是否需要投递，不提交调用方事务。"""
+    """行锁下创建/恢复切片检查点；切片或向量已完成只返回原编号，不重建 GPU 输入。"""
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise ChunkError("CHUNK_BUSY：文档仍有活动解析任务")
-    if document.status == "EMBEDDING" and document.chunk_task_id is not None:
+    if document.status in {"EMBEDDING", "INDEXING"} and document.chunk_task_id is not None:
         checkpoint_options(document)
         return document.chunk_task_id, False
     if document.status not in {"CHUNKING", "FAILED"} or (
             document.status == "FAILED" and document.chunk_task_id is None):
         raise ChunkError("CHUNK_STATE：文档尚未完成解析或不允许切片")
+    if document.embedding_task_id is not None:
+        raise ChunkError("CHUNK_STATE：已有向量化检查点，请恢复 /embed 或显式 Reindex 后再切片")
     if document.chunk_task_id is not None:
         checkpoint_options(document)
     else:
@@ -61,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """以文档行锁保护全量替换；切片和 EMBEDDING 状态同事务，失败由调用方整体回滚。"""
+    """行锁保护全量替换和 GPU 检查点失效；切片/状态同事务，失败由调用方整体回滚。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -87,6 +89,7 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
                           block.block_type, block.text, block.source, block.bbox) for block in blocks]
     drafts = build_chunks(doc_id, document.kb_id, document.file_type, inputs, options)
     session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == doc_id))
+    document.embedding_task_id, document.embedding_config = None, None
     for draft in drafts:
         metadata = draft.metadata | {"source_parse_task_id": source_generation(document),
                                      "file_hash": document.file_hash}

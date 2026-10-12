@@ -12,6 +12,7 @@ __pycache__/
 
 data/uploads/
 data/parsed/
+data/embeddings/
 
 # 仅忽略根目录模型权重，app/models/ 中的 ORM 源码需要提交。
 /models/
@@ -31,6 +32,7 @@ docs/*
 !docs/PARSER_ROUTER.md
 !docs/SELECTIVE_HYBRID.md
 !docs/CHUNK.md
+!docs/EMBEDDING.md
 !docs/archive/
 docs/archive/*
 !docs/archive/DEVELOPMENT_PLAN_CODEX_legacy.md

@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析成功后为 CHUNKING；可显式提交本地切片，完成后为 EMBEDDING（等待向量化），尚不能检索或问答。** 管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING（等待入库）。当前尚不能检索或问答，不标记 READY。** 管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -36,6 +36,13 @@ REDIS_URL=redis://127.0.0.1:6379/0
 CELERY_BROKER_URL=redis://127.0.0.1:6379/1
 CELERY_RESULT_BACKEND=redis://127.0.0.1:6379/2
 
+# 模型与 LLM：BGE-M3 本地部署，不自动下载。
+EMBEDDING_MODEL_DIR=models/bge-m3
+EMBEDDING_DEVICE=cuda:0
+EMBEDDING_BATCH_SIZE=16
+EMBEDDING_MAX_LENGTH=8192
+EMBEDDING_USE_FP16=true
+
 # OCR / 外部服务：仅云解析需要 Token
 MINERU_API_BASE_URL=https://mineru.net/api/v4
 MINERU_API_TOKEN=
@@ -46,6 +53,7 @@ UPLOAD_DIR=data/uploads
 MAX_UPLOAD_SIZE_MB=50
 PARSED_DIR=data/parsed
 PARSE_CACHE_MAX_ENTRY_MB=768
+EMBEDDINGS_DIR=data/embeddings
 # 本地切片，估算 token，提交时冻结参数。
 CHUNK_SIZE=600
 CHUNK_OVERLAP=80
@@ -62,7 +70,8 @@ HYBRID_MAX_IMAGE_MB=16
 - Redis 逻辑库 0/1/2 分别用于应用、消息、结果；三个 URL 指向同一本地服务，未配置 Celery URL 时使用 REDIS_URL。
 - API/Worker 使用同一数据库，并能读写同一原件目录；UPLOAD_DIR 相对项目根目录，默认单文件上限 50 MiB。
 - API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
-- Native 无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token，手动维护有效性。当前不需要 DeepSeek Key 或下载 Embedding/Reranker 模型。
+- Native 解析/切片无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token。文档向量化需要本地 BGE-M3、CUDA GPU 和 GPU Worker；不需要 DeepSeek Key，不下载 Reranker。
+- API/GPU Worker 共用可读写的 EMBEDDINGS_DIR，默认 data/embeddings；向量文件含业务衍生数据，应限制访问并备份，不入仓库。每代次结果上限 512 MiB，无自动清理；模型和向量目录自定义到仓库内时需自行配置忽略规则。
 - 切片不读取原件、不调用 MinerU 或模型；CHUNK_SIZE 允许 400～700，CHUNK_OVERLAP 允许 50～100。采用本地 token 估算而非模型精确计量；长表格/公式优先整体保留，可能超目标，metadata 会标记。
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
@@ -137,7 +146,7 @@ Test-NetConnection 127.0.0.1 -Port 6379
 
 ## 3. 初始化与启动
 
-启动顺序：**PostgreSQL/Redis → 数据库初始化 → API/CPU Worker**。以下命令均在项目根目录、已激活的 dkf-agent 环境中执行。
+启动顺序：**PostgreSQL/Redis → 数据库初始化 → API/CPU Worker；向量化另准备本地模型并启动 GPU Worker**。以下命令均在项目根目录、已激活的 dkf-agent 环境中执行。
 
 初始化/升级数据库：
 
@@ -147,7 +156,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期 head 为 `0005_chunk_checkpoint`，默认知识库 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed 可重复执行；应用启动不会自动迁移、启用扩展或创建默认库。升级本版本前停止旧 Worker，迁移后重启 API/Worker；历史文档不会自动切片。
+预期 head 为 `0006_embedding_checkpoint`，默认知识库 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed 可重复执行；应用启动不会自动迁移、启用扩展或创建默认库。升级前停止旧 Worker，迁移后重启 API/Worker；历史文档不会自动切片或向量化。
 
 分别打开终端启动 API 和 CPU Worker：
 
@@ -165,11 +174,31 @@ CPU Worker 应显示 default_queue、process_document、chunk_document、submit_
 
 自动模式默认可能生成 XLSX 的 PDF Bundle，因此 Windows 使用上面的串行 Worker；不要同时保留旧 threads Worker 消费该队列。
 
-可选 GPU Worker 当前不加载模型、不处理文档，可暂不启动：
+### 本地 BGE-M3 与 GPU Worker
+
+仅做上传/解析时无需准备模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用同一 Service；当前不启用 Sparse/ColBERT。推理使用已声明的 sentence-transformers，固定本地文件加载并禁止远程代码；缺文件直接报错，不在 Worker 内下载模型。
+
+用户手动准备 NVIDIA 驱动和匹配的 PyTorch CUDA 包：在 [PyTorch 官方安装选择器](https://pytorch.org/get-started/locally/) 选择 Windows/Pip/Python 与合适 CUDA 后执行其命令，不安装 CPU-only 包替代 GPU。环境更新后再次检查 CUDA：
+
+```powershell
+python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.device_count())"
+```
+
+预期 CUDA 可用为 True、设备数至少 1。模型下载由用户手动联网执行，使用已有依赖中的 Hugging Face 下载工具：
+
+```powershell
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BAAI/bge-m3', local_dir='models/bge-m3', allow_patterns=['*.json','*.safetensors','*.bin','sentencepiece.bpe.model'], ignore_patterns=['onnx/*'])"
+```
+
+保留 config.json、modules.json、Tokenizer、权重及 1_Pooling/2_Normalize 部件；不要仅下载权重。参考 [官方文件下载说明](https://huggingface.co/docs/huggingface_hub/guides/download)。下载/加载有较大磁盘、内存及显存开销；模型更新应停 Worker、核对来源并重新向量化，不运行中替换文件。
+
+在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
 
 ```powershell
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
 ```
+
+应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型只在首次编码时惰性加载；ready/health 不证明模型或 GPU 已验收。文档任务固定 gpu_queue，一份文档一个任务、内部批处理，不每 Chunk 投递一次；只启动 CPU Worker 不会执行向量化。默认 cuda:0、batch=16、fp16；显存不足时减少批大小后建立新的检查点，详见 [Embedding 说明](docs/EMBEDDING.md)。不自动降级 CPU。
 
 ### 运行日志
 
@@ -196,6 +225,7 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、错误、任务标识 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunk` | 已完成解析的 Block 异步切片 / 恢复切片检查点，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunks` | 分页查询 Chunk 正文、原 Block 字符跨度和页码 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed` | GPU 批量向量化已有 Chunk / 恢复同一检查点，无请求体 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递，可选 Query parse_mode，无请求体 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reindex` | 仅回放成功解析缓存，停在等待切片，不调用 MinerU |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reparse?force=true` | 管理员明确重新解析，可选 parse_mode，可能重新收费 |
@@ -254,7 +284,7 @@ MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换
 - 仅 UPLOADED/FAILED 可通过 /process 重投，默认 auto；管理员可覆盖。活动云任务用 /mineru 恢复同一任务；收费失败且无可用缓存时，普通重投不再申请批次，返回 CACHE_REPARSE_REQUIRED。相同内容已有活动云任务时为 CACHE_IN_PROGRESS，完成后再重投可复用结果。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
 - `/reindex` 将缓存恢复为 Block 并停在 CHUNKING，再调用 `/chunk`；不执行 Embedding/Index，不重新调用 MinerU。缓存缺失、损坏或参数变化明确 FAILED，旧 Block/Chunk 保留。成功替换 Block 时同事务清除旧 Chunk，避免证据悬空。升级前已完成结果不会自动回填缓存。当前无 Delete/后台自动补投。
-- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云任务或已提交待执行的切片检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING；失败后旧 Chunk 仅供诊断，不代表新代次完成。管理接口暂无鉴权，仅限可信环境。
+- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU 检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING；失败后旧 Chunk/向量文件仅供诊断，不代表新代次完成。管理接口暂无鉴权，仅限可信环境。
 
 维护已有文档（无请求体，替换 UUID）：
 
@@ -282,6 +312,18 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 重复 `/chunk` 沿用同一冻结参数和任务编号，已完成时不再投递；切片失败后再次 `/chunk` 恢复该检查点，不通过 `/process` 重新解析。503 投递确认失败可能已被 Worker 消费，先查询状态。历史 Block 缺少可信 block_index 时安全失败 CHUNK_SOURCE_ORDER，不按 UUID/bbox 猜顺序。长度/完整性及人工验收详见 [Chunk](docs/CHUNK.md)。
 
+### 已有 Chunk 向量化
+
+文档为 EMBEDDING 且已完成切片时，提交一次（无请求体）：
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/embed"
+```
+
+返回 202 及独立 embedding_task_id，用 `/tasks/{embedding_task_id}` 和文档详情查询；完成为 INDEXING / awaiting_index，结果包含数量、维度和校验和，不返回向量或私有路径。文件在 EMBEDDINGS_DIR 下按 doc_id/embedding_task_id 保存 vectors.jsonl 与 manifest.json；本阶段 Chunk.embedding 仍为 NULL，pgvector 入库/索引属下一阶段。
+
+重复提交恢复同一冻结配置，完成后不重投。超过真实 token 上限、缺模型、CUDA 不可用、模型运行中变化、输出维度/数值错误均明确失败，不静默截断或伪装成功。失败后修复原配置可再次 `/embed`；改变 batch/device/模型目录等参数需要先 Reindex→缓存 Block→Chunk→Embed 创建新检查点，不需要为此 Force Reparse。独立 embed_documents()/embed_query() 调用及人工验收见 [Embedding](docs/EMBEDDING.md)，当前没有 Query Embedding HTTP 接口。
+
 ## 5. 部署检查与排障
 
 - PostgreSQL SELECT 1 返回 1，项目库 vector 查询有结果，Windows Redis 服务 Running 且 ping=PONG。
@@ -303,4 +345,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [业务日志](docs/BUSINESS_LOGGING.md)

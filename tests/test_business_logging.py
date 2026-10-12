@@ -608,3 +608,19 @@ def test_chunk_task_context_uses_document_id_and_restores_context(events):
     assert logs.CONTEXT.get() is None
     assert all(record["doc_id"] == doc_id and record["task_id"] == task_id for record in records(events))
     assert "SECRET" not in events.getvalue()
+
+
+def test_embedding_summary_and_task_context_do_not_log_vectors_or_text(events):
+    """GPU 日志复用每日中文摘要，关联 doc_id/task_id，不输出正文/向量/模型目录。"""
+
+    doc_id, task_id = str(uuid4()), str(uuid4())
+    task = SimpleNamespace(name="app.tasks.embeddings.embed_document", request=SimpleNamespace(headers={}))
+    task_logs.begin_task_log(task=task, task_id=task_id, args=[doc_id])
+    logs.log_event("embedding.persisted", chunk_count=5, dimension=1024, artifact_reused=True,
+                   text="SECRET_BODY", vector=[1.0], model_dir="SECRET_PATH")
+    task_logs.end_task_log(task=task, state="SUCCESS", retval={"vector": [1.0], "text": "SECRET"})
+    assert logs.CONTEXT.get() is None
+    assert all(record["doc_id"] == doc_id and record["task_id"] == task_id for record in records(events))
+    result = next(record for record in records(events) if record["event"] == "embedding.persisted")
+    assert result["dimension"] == 1024 and result["chunk_count"] == 5
+    assert "SECRET" not in events.getvalue() and "向量结果与文档状态已提交" in events.getvalue()

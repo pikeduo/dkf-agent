@@ -21,7 +21,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**13：Chunk。已实现本地切片、来源追溯及独立异步入口，测试仅编写，待用户验收；阶段 12 待验收事项继续保留。**
+当前阶段：**14：BGE-M3 Embedding。已实现统一 Dense Service、文档 GPU 批处理与本地结果发布，测试仅编写，待用户验收；此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -35,11 +35,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
 | 13 | 已实现标题/段落优先切片、结构块保留、稳定 ID/字符证据、异步检查点与查询；待用户执行测试与验收 |
-| 14 及后续 | 未开展，等待用户确认 |
+| 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
+| 15 及后续 | 未开展，等待用户确认 |
 
-- 当前迁移 head 为 `0005_chunk_checkpoint`；“已实现”不等于已完成真实 API 人工验收。
-- 成功解析写 `document_blocks`，停在 `CHUNKING / awaiting_chunk`；独立 `/chunk` 成功写 `document_chunks`，停在 `EMBEDDING / awaiting_embedding`，不等于向量化、可检索或 `READY`。
-- 当前仅实施用户授权的阶段 13；11B.2/12 待验收事项仍保留。未经用户确认，不进入 Embedding、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 当前迁移 head 为 `0006_embedding_checkpoint`；“已实现”不等于已完成真实模型/API 人工验收。
+- 解析后 `CHUNKING / awaiting_chunk`，独立切片后 `EMBEDDING / awaiting_embedding`，独立 `/embed` 本地向量完成后 `INDEXING / awaiting_index`。阶段 14 不写 Chunk.embedding、不创建索引、不标记 READY。
+- 当前仅实施用户授权的阶段 14；11B.2/12/13 待验收事项仍保留。未经用户确认，不进入 pgvector 向量入库、Index、Retrieval、RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -47,7 +48,8 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 ## 2. 技术与本地环境约束
 
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
-- 后续按计划使用 DeepSeek、BAAI/bge-m3、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
+- 后续按计划使用 DeepSeek、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
+- BGE-M3 Dense 使用已声明的 sentence-transformers；只从用户部署的本地官方权重加载，CUDA/PyTorch/模型准备仍由用户执行。
 - 新增技术或依赖须先说明原因和替代方案并等待确认；不得自行引入 Elasticsearch、知识图谱、本地大型视觉模型、新 Agent、Kubernetes、微调或无关大型依赖。
 
 Windows 基础服务由用户手动管理，本节优先于其他文档中的旧部署说明：
@@ -102,7 +104,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process` 仅重投 UPLOADED/FAILED；活动云任务通过 `/mineru` 恢复。`/reindex` 仅缓存回放到等待切片；`/reparse?force=true` 明确建立跳过缓存的新代次，活动任务不可覆盖。数据库/文件/消息/云端非原子，无 Outbox、后台补投；不盲目重传或宣称 exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
-- Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4，GPU 单进程并发 1（当前不加载模型），在线 RAG 默认同步。
+- Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
 ### Parser、证据与质量
 
@@ -148,6 +150,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - `PARSED_DIR` 由所有进程共享并备份整个目录（含隐藏元数据）；缓存含原文，不入仓库/日志，变更归一化或提取算法时维护版本失效。损坏/缺失不静默重新付费，旧已完成结果不自动回填。
 - 相同活动内容用数据库事务锁/Job 检查点保护；普通重试遇收费历史而无可用结果停止，只有显式 Force Reparse 允许新调用。缓存发布和数据库非同一事务；已验证结果可在 SQL 回滚后同代次恢复，落库日志只在提交后记录。
 
+### 本地 Embedding
+
+- 固定 BAAI/bge-m3 Dense 1024 维，文档/Query 同模型、真实 Tokenizer 与 L2 归一化；不加 Query 指令，不启用 Sparse/ColBERT。只读本地权重、local_files_only=True、trust_remote_code=False，不自动下载、不自动 CPU 回退；真实 token 超限明确失败，不截断结构块。
+- 每文档一个 gpu_queue 任务，内部批处理，不每 Chunk 一个 Celery Task。独立 embedding_task_id/冻结输入及配置，失败不改 Chunk；全量本地结果校验后推进 INDEXING，只有事务提交后记业务成功日志。
+- EMBEDDINGS_DIR 保存受限访问的代次向量/manifest；只发布完整结果，校验身份、顺序、维度、数值和校验和，SQL 回滚后可同代次复用。损坏不静默重算；原件/Chunk 重建失效旧检查点但不自动删除历史文件。阶段 15 才写 pgvector/建索引，后续 Query 必须核对实际模型指纹，不能仅凭维度相同混用不同模型。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -159,6 +167,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | XLSX 候选、Bundle、检查点、合并与人工验收 | [Selective Hybrid](docs/SELECTIVE_HYBRID.md) |
 | 日志事件、脱敏、并发写入与验收 | [业务日志](docs/BUSINESS_LOGGING.md) |
 | 切片、字符证据、检查点与人工验收 | [Chunk](docs/CHUNK.md) |
+| 本地模型、GPU 批处理、向量结果与人工验收 | [Embedding](docs/EMBEDDING.md) |
 | 部署与接口使用 | [README](README.md) |
 
 完成任务后说明完成内容、修改文件、自动验证结果和未验证能力；给出具体人工测试命令/步骤，不只说“请测试”。外部 API 必须提醒真实人工验证，Mock 不能替代真实结果。实际变更附一条中文 Commit Message；每次回答都给出与当前阶段相关的“下一步建议”，按用户要求停止，不擅自推进后续阶段。

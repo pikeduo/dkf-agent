@@ -71,6 +71,11 @@ class Document(Timestamps, Base):
             name="chunk_checkpoint",
         ),
         CheckConstraint(
+            "(embedding_task_id IS NULL AND embedding_config IS NULL) OR "
+            "(embedding_task_id IS NOT NULL AND embedding_config IS NOT NULL AND jsonb_typeof(embedding_config) = 'object')",
+            name="embedding_checkpoint",
+        ),
+        CheckConstraint(
             "status IN ('UPLOADED', 'PARSING', 'OCR_PROCESSING', 'CHUNKING', "
             "'EMBEDDING', 'INDEXING', 'READY', 'FAILED')",
             name="status",
@@ -98,6 +103,9 @@ class Document(Timestamps, Base):
     # 切片使用独立代次与冻结参数，不能改变解析缓存/云回调的 processing_task_id。
     chunk_task_id: Mapped[UUID | None] = mapped_column(unique=True)
     chunk_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # 本轮只冻结 GPU 批处理与本地结果，不改变解析/切片代次，也不提前写 Chunk.embedding。
+    embedding_task_id: Mapped[UUID | None] = mapped_column(unique=True)
+    embedding_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class DocumentBlock(Base):

@@ -29,7 +29,7 @@ def propagate_request_id(headers=None, **kwargs) -> None:
 def begin_task_log(
     task_id=None, task=None, args=None, kwargs=None, **signal_kwargs
 ) -> None:
-    """为解析/切片设置文档关联及云任务关联；嵌套 eager 结束后恢复上层上下文。"""
+    """为解析/切片/向量化设置文档关联及云任务关联；嵌套 eager 结束后恢复上层上下文。"""
 
     if task is None:
         return
@@ -42,7 +42,8 @@ def begin_task_log(
     }
     identity_key = (
         "doc_id"
-        if task.name in {"app.tasks.documents.process_document", "app.tasks.chunks.chunk_document"}
+        if task.name in {"app.tasks.documents.process_document", "app.tasks.chunks.chunk_document",
+                         "app.tasks.embeddings.embed_document"}
         else "job_id"
         if task.name
         in {

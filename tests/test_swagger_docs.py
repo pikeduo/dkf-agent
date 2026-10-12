@@ -109,6 +109,18 @@ def test_chunk_contract_is_separate_from_parse_mode_and_returns_evidence():
     assert "embedding" not in chunk and "file_path" not in chunk
 
 
+def test_embedding_contract_has_no_document_body_or_model_paths():
+    """向量化只接收文档路径参数，不收正文/模型设置，不返回向量或本机路径。"""
+
+    schema = docs_request("/openapi.json").json()
+    path = "/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed"
+    operation = schema["paths"][path]["post"]
+    assert "requestBody" not in operation
+    assert {parameter["name"] for parameter in operation["parameters"]} == {"kb_id", "doc_id"}
+    response = schema["components"]["schemas"]["EmbeddingTaskResponse"]["properties"]
+    assert set(response) == {"doc_id", "kb_id", "embedding_task_id", "status"}
+
+
 @pytest.mark.parametrize(
     "suffix, allowed", [("documents", FILE_TYPES), ("mineru/documents", MINERU_TYPES)]
 )

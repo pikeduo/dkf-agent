@@ -37,7 +37,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-预期 head=0005_chunk_checkpoint，Worker 注册 app.tasks.chunks.chunk_document 到 default_queue。
+当前 head=0006_embedding_checkpoint（包含原 0005 切片迁移），Worker 注册 app.tasks.chunks.chunk_document 到 default_queue。
 
 由用户执行自动用例（隔离数据库 schema 需要项目用户 CREATE 权限和已启用 vector；不操作 public 数据）：
 
@@ -104,4 +104,4 @@ ORDER BY (c.metadata->>'chunk_index')::integer, (s->>'chunk_start_char')::intege
 
 ## 尚未验证与后续边界
 
-本轮未运行静态检查以外的测试、真实 Worker、数据库迁移、文档处理或任何云 API。切片质量、超长表格/公式的模型适配、真实 token 数和检索效果仍未验收；阶段 14 Embedding/Index/RAG 未实现。只有用户验收并授权后再进入下一阶段。
+阶段 13/14 新增测试仅编写，未运行真实 Worker、迁移、文档处理或模型。切片质量、真实 token 数和检索效果待用户验收。[阶段 14 Embedding](EMBEDDING.md) 已接入独立 GPU 批处理，超模型真实长度明确失败，不截断本节保留的结构块；尚未实现 pgvector 向量入库、Index/RAG。

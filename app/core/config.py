@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     redis_url: str = "redis://127.0.0.1:6379/0"
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
+    # 模型由用户手动下载；只读本地目录，默认单张 CUDA GPU，不隐式回退 CPU。
+    embedding_model_dir: Path = Path("models/bge-m3")
+    embedding_device: str = Field(default="cuda:0", pattern=r"^(cpu|cuda:[0-9]+)$")
+    embedding_batch_size: int = Field(default=16, ge=1, le=128)
+    embedding_max_length: int = Field(default=8192, ge=8, le=8192)
+    embedding_use_fp16: bool = True
+    embeddings_dir: Path = Path("data/embeddings")
     upload_dir: Path = Path("data/uploads")
     max_upload_size_mb: int = Field(default=50, gt=0)
     # 解析缓存与原件分开管理；API/Worker 必须共享该本地目录，不自动清理历史结果。
