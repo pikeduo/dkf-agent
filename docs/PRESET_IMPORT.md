@@ -437,6 +437,21 @@ Get-Content docs/test/omnidocbench_preset/results/selection_report.json -Raw -En
 
 预览退出 0 仅表示报告已生成（可能有缺口），非零为安全错误；OCB/Omni 不沿用 OHR 的退出 2 语义。报告中的手动质量/原 PDF 缺口始终保留，**不能宣称抽样通过就是质量通过**。读完整 gaps/candidate_inventory，用户接受后才执行：
 
+准备命令不是下载命令，`--confirm-official-source` 仅确认来源，不会创建缺少的输入。若未完成上述手动下载，首先会报 `BENCH_MISSING`，并指出白名单输入项（例如 dataset_info.json）；空下载文件为 `BENCH_EMPTY`，真实大小/读取预算超限才是 `BENCH_LIMIT`，目录充当文件为 `BENCH_SOURCE`，磁盘访问故障为 `BENCH_IO`。不要为缺文件问题扩大预算。OCB 的 source_review.json 须由用户手动创建，可先填写 `[]` 预览未审核缺口，不由工具替用户确认许可。
+
+仅检查输入是否存在（不读取正文、不下载或执行抽样）：
+
+```powershell
+Test-Path -LiteralPath docs/test/ocb_preset/source/dataset_info.json -PathType Leaf
+Test-Path -LiteralPath docs/test/ocb_preset/source/hosted_files.json -PathType Leaf
+Test-Path -LiteralPath docs/test/ocb_preset/source/ocb_qna_data.parquet -PathType Leaf
+Test-Path -LiteralPath docs/test/ocb_preset/source/source_review.json -PathType Leaf
+Test-Path -LiteralPath docs/test/omnidocbench_preset/source/dataset_info.json -PathType Leaf
+Test-Path -LiteralPath docs/test/omnidocbench_preset/source/OmniDocBench.json -PathType Leaf
+```
+
+目标存在也不代表完整：按固定 revision 及元数据来源核对文件大小/下载状态，不覆盖或伪造输入。OHR 的 ZipInfo 测试替身须显式包含 header_offset（真实 ZipFile 读取中央目录时赋值），不修改生产校验来迁就不完整的 Stub。修复后由用户重跑本文单测；预期不再出现 header_offset 的 AttributeError，输入缺失/空文件/超限和脱敏断言通过。
+
 ```powershell
 python scripts/prepare_ocb_preset.py --extract --confirm-official-source --confirm-local-use --accept-gaps
 python scripts/prepare_omnidocbench_preset.py --extract --confirm-official-source --confirm-local-use --accept-gaps

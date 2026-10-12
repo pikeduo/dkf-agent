@@ -465,6 +465,8 @@ python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800
 
 公开基准数据集验收仅使用 OHR-Bench、Microsoft OCB、OmniDocBench；离线准备工具、手动下载/提取、格式缺口及质量对照见 [公开基准验收说明](docs/PRESET_IMPORT.md#三个公开基准的解析质量验收用户执行)。工具不联网、不自动导入；QA/GT/报告仅放 docs/test，不作为知识库内容，READY 不代表解析或问答准确率达标。
 
+运行准备工具前，先手动准备说明中的 source 输入。`BENCH_MISSING` 为缺输入、`BENCH_EMPTY` 为空文件，只有实际超限才返回 `BENCH_LIMIT`；不要据此直接调大预算或跳过来源校验。
+
 ## 5. 部署检查与排障
 
 - PostgreSQL SELECT 1 返回 1，项目库 vector 查询有结果，Windows Redis 服务 Running 且 ping=PONG。

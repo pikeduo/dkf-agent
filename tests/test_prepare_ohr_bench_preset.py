@@ -19,12 +19,14 @@ def schema_row(identifier="schema-id", name="finance/schema_stub", category="tab
 
 
 def zip_info(name, size=128, mode=stat.S_IFREG):
-    """只构造内存中央目录项，不创建真实 ZIP/PDF 或写样本。"""
+    """构造带 ZipFile 读取阶段字段的中央目录替身，不创建真实 ZIP/PDF 或写样本。"""
 
     info = ZipInfo(name)
     info.file_size = size
     info.compress_size = size
     info.CRC = 123
+    # ZipInfo 构造函数不会设置此字段；真实 ZipFile 从中央目录读取时才赋值。
+    info.header_offset = 0
     info.external_attr = (mode | 0o644) << 16
     return info
 
@@ -80,6 +82,16 @@ def test_zip_matching_uses_full_domain_identity_and_does_not_guess_prefix():
     assert not pool and failures[0]["reason"] == "ambiguous_pdf_path"
     pool, failures = tool.candidates(groups, {"manual/schema_stub.pdf": zip_info("manual/schema_stub.pdf")}, limits, tool.DOMAINS)
     assert not pool and failures[0]["reason"] == "missing_pdf"
+
+
+def test_archive_stub_preserves_explicit_header_offset():
+    """中央目录替身显式提供非零偏移，生产摘要应保留该值而不是为了测试填默认值。"""
+    info = zip_info("root/finance/schema_stub.pdf")
+    info.header_offset = 8192
+    pdfs, fingerprint = tool.archive_index(ArchiveStub([info]))
+    assert pdfs[info.filename] is info
+    assert fingerprint == tool.digest([{"name": info.filename, "size": info.file_size,
+        "compressed": info.compress_size, "crc": info.CRC, "offset": 8192, "attr": info.external_attr}])
 
 
 def test_qa_preserves_zero_based_pages_answers_and_rejects_duplicate_ids():

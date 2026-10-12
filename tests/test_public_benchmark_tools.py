@@ -334,3 +334,52 @@ def test_extract_changed_asset_rejected_before_any_publish(tmp_path, monkeypatch
     monkeypatch.setattr(common.ohr, "publish_exclusive", forbidden_publish)
     with pytest.raises(common.BenchmarkError, match="BENCH_PLAN"):
         common.extract("ocb", tmp_path / "docs/test/ocb_preset/results/selection_plan.json")
+
+
+def test_input_read_distinguishes_missing_empty_directory_and_limit(tmp_path):
+    """只用临时 JSON 元数据验证错误分类；缺失/空输入不能误报预算超限，也不泄露路径。"""
+    missing = tmp_path / "metadata.json"
+    with pytest.raises(common.BenchmarkError, match="BENCH_MISSING") as failure:
+        common.read_bytes(missing)
+    assert str(tmp_path) not in str(failure.value)
+    assert missing.name not in str(failure.value)
+    with pytest.raises(common.BenchmarkError, match="BENCH_SOURCE"):
+        common.read_bytes(tmp_path)
+    missing.write_bytes(b"")
+    with pytest.raises(common.BenchmarkError, match="BENCH_EMPTY"):
+        common.read_bytes(missing)
+    missing.write_bytes(b"{}")
+    with pytest.raises(common.BenchmarkError, match="BENCH_LIMIT"):
+        common.read_bytes(missing, limit=1)
+    assert common.read_bytes(missing, limit=2) == b"{}"
+
+
+@pytest.mark.parametrize("code", ["MISSING", "EMPTY", "LIMIT"])
+def test_json_input_preserves_read_error_classification(code, monkeypatch):
+    """JSON 适配层保留读取错误码，不误改为格式错误，不触发真实资料读取。"""
+    def failed_read(path, limit=96 * common.MIB, beneath=None):
+        """只抛固定读取错误 Stub，不产生文件或原始异常详情。"""
+        raise common.BenchmarkError(code)
+    monkeypatch.setattr(common, "read_bytes", failed_read)
+    with pytest.raises(common.BenchmarkError) as failure:
+        common.json_file("__metadata_stub__")
+    assert failure.value.code == code
+
+
+@pytest.mark.parametrize("dataset", ["ocb", "omnidocbench"])
+def test_cli_missing_official_inputs_explains_preparation_without_outputs(dataset, tmp_path, monkeypatch, capsys):
+    """两个 CLI 遇缺元数据都安全退出并给白名单输入提示，不写报告或下载/解析素材。"""
+    monkeypatch.setattr(common, "ROOT", tmp_path)
+    prepare = ocb.prepare if dataset == "ocb" else omni.prepare
+    assert common.run(dataset, prepare, ["--confirm-official-source"]) == 1
+    output = capsys.readouterr().out
+    assert "BENCH_MISSING" in output and "dataset_info.json" in output
+    assert dataset in output and str(tmp_path) not in output
+    assert "BENCH_LIMIT" not in output
+    assert not (tmp_path / "docs/test" / (dataset + "_preset") / "results").exists()
+
+
+def test_input_error_labels_never_echo_untrusted_paths():
+    """任意未知输入标识不会进入异常，只有预定义技术文件名可用于人工排查。"""
+    error = common.BenchmarkError("MISSING", input_id="__private_path_or_content__")
+    assert error.input_id is None and "__private_path_or_content__" not in str(error)

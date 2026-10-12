@@ -17,6 +17,8 @@ MIB = 1024**2
 FORMATS = ("pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "csv", "txt", "md", "jpg", "jpeg", "png")
 REPOS = {"ocb": "microsoft/OfficeComprehensionBenchmark", "omnidocbench": "opendatalab/OmniDocBench"}
 ERRORS = {
+    "MISSING": "必需本地输入不存在；请先按 PRESET_IMPORT 的手动下载步骤准备，不自动下载",
+    "EMPTY": "本地输入为空；请人工检查下载是否完整，不覆盖原文件或跳过校验",
     "SOURCE": "官方元数据、版本、身份或关联不可用，请人工核对来源",
     "SCHEMA": "输入字段或映射不符合已声明契约，不猜测缺失数据",
     "PATH": "路径越界、链接、压缩成员或身份歧义，已安全拒绝",
@@ -28,24 +30,51 @@ ERRORS = {
     "PERMISSION": "需要明确确认来源、本地使用及真实缺口；不包含云外传授权",
     "IO": "离线操作未完成，请人工核对已发布文件；不输出底层异常",
 }
+INPUT_NAMES = {
+    "dataset_info.json": "官方 HF 元数据（dataset_info.json）",
+    "hosted_files.json": "官方托管文件目录（hosted_files.json）",
+    "source_review.json": "用户来源/许可审核（source_review.json，可先手动填写空数组 []）",
+    "ocb_qna_data.parquet": "官方问答数据（ocb_qna_data.parquet）",
+    "ocb_file_sources.parquet": "官方外部来源目录（ocb_file_sources.parquet）",
+    "OmniDocBench.json": "官方区域标注（OmniDocBench.json）",
+    "page_sources.json": "用户核对的原 PDF 映射（page_sources.json）",
+}
+INPUT_LABELS = {dataset + ":" + name: dataset + " / " + label
+                for dataset in REPOS for name, label in INPUT_NAMES.items()}
 
 
 class BenchmarkError(ValueError):
     """终端只展示固定错误，不泄露正文、答案、本机路径或底层异常。"""
 
-    def __init__(self, code):
-        """保存有限错误类别，未知异常归为安全 IO 错误。"""
+    def __init__(self, code, *, input_id=None):
+        """保存有限错误类别；输入提示只使用白名单技术名称，不泄露任意文件名或绝对路径。"""
         self.code = code if code in ERRORS else "IO"
-        super().__init__(f"BENCH_{self.code}：{ERRORS[self.code]}")
+        self.input_id = input_id if input_id in INPUT_LABELS else None
+        label = f"；输入项：{INPUT_LABELS[self.input_id]}" if self.input_id is not None else ""
+        super().__init__(f"BENCH_{self.code}：{ERRORS[self.code]}{label}")
 
 
 def read_bytes(path, limit=96 * MIB, beneath=None):
-    """拒绝链接并有界读取本地普通文件，读取后再检查实际长度。"""
-    path = ohr.plain_path(path, beneath=beneath)
-    if not path.is_file() or not 0 < path.stat().st_size <= limit:
+    """有界读取本地普通文件，明确区分缺失/空文件/超限/IO，不扩大预算或输出底层异常。"""
+    if type(limit) is not int or limit <= 0:
         raise BenchmarkError("LIMIT")
-    with path.open("rb") as stream:
-        data = stream.read(limit + 1)
+    path = ohr.plain_path(path, beneath=beneath)
+    try:
+        size = path.stat().st_size
+        if not path.is_file():
+            raise BenchmarkError("SOURCE")
+        if size == 0:
+            raise BenchmarkError("EMPTY")
+        if size > limit:
+            raise BenchmarkError("LIMIT")
+        with path.open("rb") as stream:
+            data = stream.read(limit + 1)
+    except FileNotFoundError:
+        raise BenchmarkError("MISSING") from None
+    except OSError:
+        raise BenchmarkError("IO") from None
+    if not data:
+        raise BenchmarkError("EMPTY")
     if len(data) > limit:
         raise BenchmarkError("LIMIT")
     return data
@@ -93,14 +122,20 @@ def rows_file(path):
 
 def source_record(root, dataset, metadata_names):
     """冻结 HF 仓库 revision 与全部输入摘要；本地摘要不等于官方签名或授权。"""
-    info = json_file(root / "dataset_info.json", beneath=root)
+    try:
+        info = json_file(root / "dataset_info.json", beneath=root)
+    except BenchmarkError as exc:
+        raise BenchmarkError(exc.code, input_id=dataset + ":dataset_info.json") from None
     if (info.get("id") != REPOS[dataset] or not isinstance(info.get("sha"), str)
             or re.fullmatch(r"[0-9a-f]{40}", info["sha"]) is None):
         raise BenchmarkError("SOURCE")
     fingerprints = {}
     for name in ["dataset_info.json", *metadata_names]:
         ohr.safe_name(name)
-        fingerprints[name] = hashlib.sha256(read_bytes(root / name, beneath=root)).hexdigest()
+        try:
+            fingerprints[name] = hashlib.sha256(read_bytes(root / name, beneath=root)).hexdigest()
+        except BenchmarkError as exc:
+            raise BenchmarkError(exc.code, input_id=dataset + ":" + name) from None
     card = info.get("cardData") or {}
     if not isinstance(card, dict):
         raise BenchmarkError("SCHEMA")
