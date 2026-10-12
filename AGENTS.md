@@ -1,17 +1,18 @@
 # AGENTS.md
 
-## 0. 禁止 Codex 自行安装、部署与测试（最高优先级）
+## 0. 依赖可自动安装，部署与测试由用户执行（最高优先级）
 
-**依赖/环境变更、模型/GPU 部署及测试的执行权属于用户；Codex 只负责获授权的代码实现、测试用例编写与手动操作说明。**
+**Codex 可以自动安装当前开发任务所需、已声明或已获用户确认的项目依赖；部署及测试仍由用户手动执行。此规则优先于其他项目文档中的旧依赖安装禁令。**
 
-- 用户说“实现阶段 X / 完成任务 / 按开发文档继续 / 解决依赖 / 完成部署说明”，**不构成安装、部署或测试授权**。
-- 任何依赖安装、PyTorch CUDA 版本替换、Conda 环境变更、模型下载、GPU 部署和模型运行验证，默认只能由用户手动执行。Codex 不得自行运行 pip、conda、hf download、模型推理、数据库迁移、API/Worker 启动或测试，也不得通过其他脚本间接执行。
-- 对安装/模型部署任务，Codex 仅可检查已有代码与依赖声明、判断所需依赖、提供可复制的 PowerShell 安装/手动验证命令与预期结果、说明兼容性及时间/磁盘/显存风险，随后停止等待用户执行反馈；不因旧版本可用而强制升级，不以其他框架的缺包为理由安装无关依赖。
+- 用户说“实现阶段 X / 完成任务 / 按开发文档继续 / 解决依赖”，可在任务范围内自动安装必要项目依赖，**不构成部署或测试授权**；仅修改文档或提供部署说明时，不顺带执行安装。
+- 安装前确认 Python 与 pip 指向项目 Conda 环境 `dkf-agent`，可使用 `python -m pip install` 或针对该环境的 `conda install`；不得安装到 base/系统环境，不无条件升级整个环境、不安装无关依赖。新增技术或未确认的依赖仍须按第 2 节先说明并等待确认；依赖声明与必要安装说明同步维护。
+- **部署操作必须由用户手动执行**：包括创建/重建 Conda 环境、更换 Python、PyTorch CPU/CUDA 版本替换、CUDA/驱动与 GPU 部署、模型或推理资源下载、基础服务安装/编译/配置、系统服务变更、数据库迁移，以及 API/Worker 启动。依赖安装许可不包含上述操作，禁止通过安装脚本间接执行部署。
+- 对部署任务，Codex 仅检查现有实现与依赖、提供可复制的 PowerShell 命令和手动验证预期结果、说明兼容性及时间/磁盘/显存风险，随后停止等待用户反馈；模型加载/推理验证仍由用户执行。
 - Codex **不得自行**运行 PDF/DOCX/XLSX/PPTX/图片的解析/OCR/转换/渲染测试；不得生成/运行真实或 Mock 的文档验收样本；不得运行 `pytest`、`smoke`、完整回归、性能评测或端到端测试。
 - Codex **不得自行**调用 MinerU/OCR/DeepSeek/Embedding 云 API，不得为了测试启动数据库、Redis、Celery、模型或反复轮询/重试任务。
-- Codex 可以编写测试代码和断言，但**不执行**；允许对本轮改动文件进行至多一次快速 `git diff --check` / Python 语法检查，不安装依赖、不做耗时重试。
+- Codex 可以编写测试代码和断言，但**不执行**；允许对本轮改动文件进行至多一次快速 `git diff --check` / Python 语法检查，不借检查启动服务、加载模型或做耗时重试。
 - 真实解析、样本上传、云配额消耗、日志导出、结果判断和阶段是否通过，由**用户手动执行并确认**。
-- 只有用户**另行明确指定**安装/部署/测试命令、环境与样本范围、联网权限、时间/费用及资源预算时，Codex 才能代执行所指一项；授权仅限一次，不转化为默认权限。
+- 只有用户**另行明确指定**测试命令、环境与样本范围、联网权限、时间/费用及资源预算时，Codex 才能代跑所指测试；授权仅限一次，不转化为默认权限。自动安装依赖本身不授予测试权限。
 - 每轮功能完成后，Codex 应输出：修改文件、静态检查结果、用户手工测试步骤及预期结果、尚未验收事项、中文 Commit Message、下一步建议，并**立即停止**。
 - 其他章节提到“自动测试”“至少验证”“完整回归”“API 接入后验证”，只表示需要提供用例/步骤，**不授权 Codex 执行**。
 
@@ -23,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**15A：LlamaIndex RAG Adapter。已实现 Chunk/Node/内部证据 DTO 互转、已有向量复用与共享 Query Embedding 边界；最小 core 依赖已获用户确认，安装及测试由用户执行。此前待验收事项继续保留。**
+当前阶段：**15A：LlamaIndex RAG Adapter。已实现 Chunk/Node/内部证据 DTO 互转、已有向量复用与共享 Query Embedding 边界；最小 core 依赖已获用户确认，依赖安装按第 0 节执行，部署及测试由用户执行。此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -39,7 +40,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 13 | 已实现标题/段落优先切片、结构块保留、稳定 ID/字符证据、异步检查点与查询；待用户执行测试与验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
-| 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待用户安装 core 与验收 |
+| 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
 | 16 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
@@ -53,8 +54,8 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
 - 后续按计划使用 DeepSeek、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
-- BGE-M3 Dense 使用已声明的 sentence-transformers；只从用户部署的本地官方权重加载，CUDA/PyTorch/模型准备仍由用户执行。
-- LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，安装/首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
+- BGE-M3 Dense 使用已声明的 sentence-transformers；项目依赖可按第 0 节安装，只从用户部署的本地官方权重加载，CUDA/PyTorch CPU-CUDA 版本替换及模型准备仍由用户执行。
+- LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，core 依赖可按第 0 节安装，首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
 - 新增技术或依赖须先说明原因和替代方案并等待确认；不得自行引入 Elasticsearch、知识图谱、本地大型视觉模型、新 Agent、Kubernetes、微调或无关大型依赖。
 
 Windows 基础服务由用户手动管理，本节优先于其他文档中的旧部署说明：
