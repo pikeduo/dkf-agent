@@ -125,7 +125,7 @@ def pick_questions(selected, count, seed):
 
 
 def prepare_samples(args, run):
-    """用户显式离线准备：只验证容器/页数/图像完整性，不提取正文、不运行 Parser。"""
+    """离线准备 OHR/Omni/OCB；只验证本地容器及官方关联，不运行 Parser 或授权云外传。"""
     if not args.confirm_local_use:
         raise SmokeError("PERMISSION")
     if any(path.name != "run.lock" for path in run.iterdir()):
@@ -208,6 +208,23 @@ def prepare_samples(args, run):
             omni_refs.append({"reference_id": item["identity"], "original": item["original"], "document": asset,
                 "source": gt_source, "labels": item["labels"], "coordinate_space": "image_pixels",
                 "source_gt_page_no": asset["gt_page_no"], "project_document_page": 1})
+    from scripts import stage16_ocb
+    ocb_root, ocb_assets, ocb_refs, ocb_source, ocb_gaps, ocb_available = stage16_ocb.prepare(ROOT,
+        per_format=args.ocb_per_format, qa_per_file=args.ocb_qa_per_file, seed=args.seed,
+        existing_hashes={item["sha256"] for item in documents})
+    print(f"OCB 离线关联：本地可用QA={ocb_source['locally_available_qa_count']}；"
+          f"入选原件={len(ocb_assets)}；入选QA={len(ocb_refs)}；未授予云外传。")
+    for name, asset in sorted(ocb_assets.items()):
+        relative = "samples/ocb/" + asset["source_file"]
+        data = common.read_bytes(ocb_root / asset["source_file"], 20 * common.MIB, ocb_root)
+        if hashlib.sha256(data).hexdigest() != asset["sha256"]:
+            raise SmokeError("PLAN")
+        buffers.append((relative, data))
+        documents.append({"file": relative, "file_type": asset["file_type"], "source": "ocb",
+            "identity": name, "sha256": asset["sha256"], "size_bytes": len(data),
+            "dataset_revision": ocb_source["revision"], "source_file": asset["source_file"],
+            "source_kind": asset["source_kind"], "checksum_method": asset["checksum_method"],
+            "cloud_permission": "not_granted_by_download"})
     for index, path in enumerate(args.extra):
         path = ohr.plain_path(path)
         if path.suffix.lower() not in {".docx", ".xlsx", ".pptx"}:
@@ -224,16 +241,23 @@ def prepare_samples(args, run):
             "identity": path.name, "sha256": asset["sha256"], "size_bytes": len(data), "content_tags": "manual_pending"})
     qa_bytes = b"".join(ohr.encoded(row) + b"\n" for row in references)
     gt_bytes = b"".join(ohr.encoded(row) + b"\n" for row in omni_refs)
+    ocb_bytes = b"".join(ohr.encoded(row) + b"\n" for row in ocb_refs)
     plan = {"version": VERSION, "parameters": {"seed": args.seed, "pdf_count": args.pdf_count,
         "image_count": args.image_count, "qa_count": args.qa_count, "max_pages": args.max_pages,
-        "max_total_pages": args.max_total_pages}, "documents": documents,
+        "max_total_pages": args.max_total_pages, "ocb_per_format": args.ocb_per_format,
+        "ocb_qa_per_file": args.ocb_qa_per_file}, "documents": documents,
         "official_qa_count": len(references), "omni_gt_count": len(omni_refs),
+        "ocb_qa_count": len(ocb_refs), "total_official_qa_count": len(references) + len(ocb_refs),
+        "ocb_qa_sha256": hashlib.sha256(ocb_bytes).hexdigest(), "ocb_source": ocb_source,
+        "ocb_selection": ocb_gaps, "datasets_requested": ["ohr", "omni", "ocb"],
         "qa_sha256": hashlib.sha256(qa_bytes).hexdigest(), "gt_sha256": hashlib.sha256(gt_bytes).hexdigest(),
         "ohr_source": provenance | {"zip_central_directory_sha256": directory_sha},
         "source_qa_inventory": inventory, "excluded_qa": rejected_qa,
         "preparation_gaps": {"pdf_shortfall": max(0, args.pdf_count - len(selected)),
             "qa_shortfall": max(0, args.qa_count - len(references)),
             "image_shortfall": max(0, args.image_count - len(omni_refs)),
+            "ocb_format_shortfall": sum(ocb_gaps["format_shortfall"].values()),
+            "ocb_files_without_qa": sum(not any(name in r["reference_files"] for r in ocb_refs) for name in ocb_assets),
             "missing_evidence_categories": sorted(ohr.EVIDENCE - {row["_ohr_reference"]["category"] for row in references})},
         "rejected_pdfs": missing + failures, "inspection": inspection,
         "omni_exclusions": dict(omni_rejected), "local_use_confirmed_by_user": True,
@@ -246,18 +270,27 @@ def prepare_samples(args, run):
         publish(run / relative, data)
     publish(run / "official_qa.jsonl", qa_bytes)
     publish(run / "omni_gt.jsonl", gt_bytes)
+    publish(run / "ocb_qa.jsonl", ocb_bytes)
+    # 缺 bulk QA 导出时，新 run 已生成官方关联副本；不覆盖下载报告或原有 QA 文件。
+    for name, rows in (("qa_full.json", ocb_available), ("qa_smoke.json", ocb_refs)):
+        if ocb_source["qa_exports"][name].startswith("missing_"):
+            publish(run / "ocb" / name, [{"qa_id": row["qa_id"],
+                "source_row_index": row["source_row_index"], "original_qa": row["original"],
+                **{key: row[key] for key in ("question", "expected_assertions", "reference_files", "track")}}
+                for row in rows])
+    publish(run / "ocb_source_summary.json", ocb_source)
     publish(run / "plan.json", plan)
     return plan
 
 
 def load_plan(run):
-    """在任何运行步骤前复核冻结计划、原始 QA/GT 和每份普通文件，不解析正文。"""
+    """核对三数据集及冻结 QA/GT；旧双数据集计划保持只读兼容，不回填或改写。"""
     plan = common.json_file(ohr.plain_path(run / "plan.json", beneath=TEST_ROOT))
     payload = {key: value for key, value in plan.items() if key != "plan_sha256"}
     if plan.get("version") != VERSION or ohr.digest(payload) != plan.get("plan_sha256"):
         raise SmokeError("PLAN")
     documents = plan.get("documents")
-    if not isinstance(documents, list) or not 0 < len(documents) <= 14:
+    if not isinstance(documents, list) or not 0 < len(documents) <= 20:
         raise SmokeError("PLAN")
     seen, hashes = set(), set()
     for item in documents:
@@ -267,7 +300,10 @@ def load_plan(run):
         sample_bytes(run, item)
         seen.add(name.casefold())
         hashes.add(item["sha256"])
-    for name, key in (("official_qa.jsonl", "qa_sha256"), ("omni_gt.jsonl", "gt_sha256")):
+    reference_files = [("official_qa.jsonl", "qa_sha256"), ("omni_gt.jsonl", "gt_sha256")]
+    if "ocb_qa_sha256" in plan:
+        reference_files.append(("ocb_qa.jsonl", "ocb_qa_sha256"))
+    for name, key in reference_files:
         path = ohr.plain_path(run / name, beneath=run)
         data = common.read_bytes(path, 96 * common.MIB, run) if path.stat().st_size else b""
         if hashlib.sha256(data).hexdigest() != plan[key]:
@@ -736,12 +772,24 @@ def export_snapshot(plan, kb_id):
 
 
 def verify_run(run, plan, kb_id):
-    """只读验证并复用已有质量诊断；无人工区域映射时 Omni 不伪算 OCR 或阅读顺序分数。"""
+    """复用三数据集质量诊断；OCB 原始断言及 Office 结构人工核对，不做字符串正确性判定。"""
     export, checks = export_snapshot(plan, kb_id)
     documents = quality.documents_index(export)
     qa = references_file(run / "official_qa.jsonl")
     gt = references_file(run / "omni_gt.jsonl")
     diagnostics = quality.ohr_checks(qa, documents) + quality.omni_checks(gt, documents, {})
+    if plan.get("ocb_qa_count", 0):
+        ocb_refs = references_file(run / "ocb_qa.jsonl")
+        diagnostics += quality.ocb_checks(ocb_refs, documents)
+        criteria = {"docx": "paragraph_heading_table", "xlsx": "sheet_cells_native_formula",
+                    "pptx": "text_visual_relationship_logical_page_order"}
+        for item in plan["documents"]:
+            if item["source"] == "ocb":
+                document = quality.document_by_hash(documents, item["sha256"])
+                diagnostics.append(quality.conclusion("ocb", item["identity"], "office_structure",
+                    criteria[item["file_type"]], "manual_pending" if document else "not_applicable",
+                    doc_id=document["doc_id"] if document else None,
+                    method="manual_original_office_no_print_page_fabrication"))
     path = save_artifact(run, "export", export)
     result = checks | {"kb_id": str(kb_id), "export_file": path.relative_to(run).as_posix(),
         "export_sha256": ohr.digest(export), "parsing_diagnostics": diagnostics,
@@ -768,21 +816,67 @@ def score_retrieval(qa, expected_doc, hits):
     return result
 
 
+def score_ocb_retrieval(qa, documents, hits):
+    """仅按官方完整文件依赖计算召回；断言/答案证据人工核对，不做字符串答案裁判。"""
+    expected = [quality.document_by_hash(documents, item["sha256"]) for item in qa["dependencies"]]
+    if not expected or any(doc is None for doc in expected):
+        raise SmokeError("PLAN")
+    expected_ids = {doc["doc_id"] for doc in expected}
+    if len(expected_ids) != len(qa["reference_files"]):
+        raise SmokeError("PLAN")
+    ranks = [i + 1 for i, hit in enumerate(hits) if hit["doc_id"] in expected_ids]
+    rank = ranks[0] if ranks else None
+    result = {"qa_id": qa.get("qa_id", qa["reference_id"]), "reference_id": qa["reference_id"],
+        "source_row_index": qa.get("source_row_index"), "reference_files": qa["reference_files"],
+        "track": qa["track"], "question": qa["question"], "expected_assertions": qa["expected_assertions"],
+        "expected_doc_ids": sorted(expected_ids), "first_document_rank": rank,
+        "reciprocal_rank_at20": 1 / rank if rank else 0.0, "page_status": "not_applicable",
+        "page_reason": "office_logical_page_has_no_official_physical_page_truth",
+        "answer_evidence_status": "manual_pending", "assertion_validation": "manual_pending_no_string_answer_judge"}
+    for k in (1, 5, 10):
+        retrieved = {hit["doc_id"] for hit in hits[:k]}
+        result[f"hit_at{k}"] = bool(retrieved.intersection(expected_ids))
+        result[f"all_dependencies_hit_at{k}"] = expected_ids.issubset(retrieved)
+        result[f"page_hit_at{k}"] = None
+    return result
+
+
+def retrieval_metrics(rows):
+    """只统计已完成且有文档真值的查询；未运行/异常不填零，明确显示统计分母。"""
+    measured = [row for row in rows if row["status"] in {"PASS", "FAIL"}]
+    pages = [row for row in measured if row.get("page_status") == "evaluable"]
+    return {"qa_count": len(rows), "measured_qa_count": len(measured),
+        "blocked_qa_count": len(rows) - len(measured), "page_evaluable_count": len(pages),
+        "mrr_at20": sum(row["reciprocal_rank_at20"] for row in measured) / len(measured) if measured else None,
+        **{f"hit_at{k}": sum(row[f"hit_at{k}"] for row in measured) / len(measured) if measured else None for k in (1, 5, 10)},
+        **{f"page_hit_at{k}": sum(row[f"page_hit_at{k}"] for row in pages) / len(pages) if pages else None for k in (1, 5, 10)}}
+
+
+def retrieval_tasks(run, plan):
+    """保留两套官方 QA 原字段，以各自原问题查询；Omni GT 永不进入 QA 或指标分母。"""
+    tasks = [{"dataset": "ohr", "original": row, "query": row["questions"], "qa_id": row["ID"]}
+             for row in references_file(run / "official_qa.jsonl")]
+    if plan.get("ocb_qa_count", 0):
+        tasks += [{"dataset": "ocb", "original": row, "query": row["question"], "qa_id": row.get("qa_id", row["reference_id"])}
+                  for row in references_file(run / "ocb_qa.jsonl")]
+    return tasks
+
+
 def dense_run(run, plan, kb_id):
-    """前置失败仅保存未执行报告；通过后调用既有 Dense，只有 Query 编码，无文档重算。"""
+    """共同 READY 前置通过后复用 Dense 分别测 OHR/OCB；不重编码文档、不混算 QA/GT。"""
     before, verification = verify_run(run, plan, kb_id)
     if verification["status"] != "PASS":
         # 必须在导入框架/配置日志/加载 BGE-M3 之前停止；未执行不能填零分冒充检索结果。
         save_artifact(run, "dense", {"status": "BLOCKED", "executed": False,
-            "kb_id": str(kb_id), "qa_count": plan["official_qa_count"], "executed_qa_count": 0,
+            "kb_id": str(kb_id), "qa_count": plan["official_qa_count"] + plan.get("ocb_qa_count", 0), "executed_qa_count": 0,
             "error_code": "SMOKE_RETRIEVAL_PREREQUISITE", "verification_status": verification["status"],
             "export_sha256": ohr.digest(before), "items": [],
             "hit_at1": None, "hit_at5": None, "hit_at10": None, "mrr_at20": None,
             "page_hit_at1": None, "page_hit_at5": None, "page_hit_at10": None,
             "page_evaluable_count": 0, "same_query_ids_stable": None, "no_data_or_task_change": None})
         raise SmokeError("RETRIEVAL_PREREQUISITE")
-    qa_rows = references_file(run / "official_qa.jsonl")
-    if not qa_rows:
+    queries = retrieval_tasks(run, plan)
+    if not queries:
         raise SmokeError("INPUT")
     from app.core.business_logging import configure_logging
     from app.core.config import get_settings
@@ -792,12 +886,14 @@ def dense_run(run, plan, kb_id):
     retriever = DenseRetriever(kb_id, top_k=20)
     docs = quality.documents_index(before)
     chunks = {chunk["chunk_id"]: chunk for document in docs.values() for chunk in document["chunks"]}
-    results, stability, first_ids = [], True, None
-    for index, qa in enumerate(qa_rows):
-        document = quality.document_by_hash(docs, qa["_ohr_reference"]["document_sha256"])
+    results, stability, repeated_datasets = [], True, set()
+    for index, entry in enumerate(queries):
+        qa, dataset = entry["original"], entry["dataset"]
         started = monotonic()
         try:
-            hits = retriever.retrieve_results(qa["questions"])
+            hits = retriever.retrieve_results(entry["query"])
+            if len(hits) > 20:
+                raise SmokeError("RETRIEVAL")
             summaries = []
             for hit in hits:
                 original = chunks.get(str(hit.chunk_id))
@@ -812,49 +908,67 @@ def dense_run(run, plan, kb_id):
                     raise SmokeError("RETRIEVAL")
                 summaries.append({"chunk_id": str(hit.chunk_id), "doc_id": str(hit.doc_id),
                     "score": hit.retrieval_score, "page_start": hit.page_start, "page_end": hit.page_end,
+                    "file_name": hit.file_name, "section": hit.section, "source_spans": hit.metadata["source_spans"],
                     "span_pages": sorted({span["page"] for span in hit.metadata["source_spans"]})})
             if len({hit["chunk_id"] for hit in summaries}) != len(summaries) or any(
-                    summaries[i]["score"] < summaries[i + 1]["score"] for i in range(len(summaries) - 1)):
+                    summaries[i]["score"] < summaries[i + 1]["score"] or
+                    (summaries[i]["score"] == summaries[i + 1]["score"] and
+                     summaries[i]["chunk_id"] > summaries[i + 1]["chunk_id"])
+                    for i in range(len(summaries) - 1)):
                 raise SmokeError("RETRIEVAL")
-            if index == 0:
-                first_ids = [hit["chunk_id"] for hit in summaries]
-                repeated = retriever.retrieve_results(qa["questions"])
-                stability = [str(hit.chunk_id) for hit in repeated] == first_ids
-            result = score_retrieval(qa, document, summaries)
+            if dataset not in repeated_datasets:
+                repeated = retriever.retrieve_results(entry["query"])
+                stability = stability and [str(hit.chunk_id) for hit in repeated] == [hit["chunk_id"] for hit in summaries]
+                repeated_datasets.add(dataset)
+            if dataset == "ohr":
+                document = quality.document_by_hash(docs, qa["_ohr_reference"]["document_sha256"])
+                if document is None:
+                    raise SmokeError("PLAN")
+                result = score_retrieval(qa, document, summaries)
+            else:
+                result = score_ocb_retrieval(qa, docs, summaries)
             # 冒烟的严格通过条件：命中文档，且可判定的物理证据页也须在前十项命中。
-            result.update(status="PASS" if result["hit_at10"] and result["page_hit_at10"] is not False else "FAIL", hits=summaries)
+            result.update(status="PASS" if result["hit_at10"] and result["page_hit_at10"] is not False
+                          and result.get("all_dependencies_hit_at10", True) else "FAIL", hits=summaries)
         except Exception as exc:
             # 只保留已有 Dense 白名单代码，不输出异常原文/查询。
             from app.services.rag.dense import ERRORS as dense_errors
             code = getattr(exc, "code", "")
-            result = {"qa_id": qa["ID"], "doc_name": qa["doc_name"], "status": "BLOCKED",
+            result = {"qa_id": entry["qa_id"], "status": "BLOCKED",
                 "error_code": code if code in dense_errors else "SMOKE_RETRIEVAL",
-                "hit_at1": False, "hit_at5": False, "hit_at10": False, "reciprocal_rank_at20": 0.0,
+                "hit_at1": None, "hit_at5": None, "hit_at10": None, "reciprocal_rank_at20": None,
                 "page_status": "not_applicable"}
+        result["dataset"] = dataset
         result["duration_ms"] = round((monotonic() - started) * 1000, 2)
         results.append(result)
-        print(f"Dense：{index + 1}/{len(qa_rows)}；{result['status']}")
+        print(f"Dense：dataset={dataset}；{index + 1}/{len(queries)}；{result['status']}")
         if result["status"] == "BLOCKED":
-            # 模型/SQL 失败不循环加载和重试；未执行的题仍保留在分母和报告中。
-            results.extend({"qa_id": row["ID"], "doc_name": row["doc_name"], "status": "BLOCKED",
-                "error_code": "NOT_RUN_AFTER_FAILURE", "hit_at1": False, "hit_at5": False, "hit_at10": False,
-                "reciprocal_rank_at20": 0.0, "page_status": "not_applicable"} for row in qa_rows[index + 1:])
+            # 模型/SQL 失败不重试；未运行题保留数量与状态，但不伪造命中率的零分。
+            results.extend({"qa_id": row["qa_id"], "dataset": row["dataset"], "status": "BLOCKED",
+                "error_code": "NOT_RUN_AFTER_FAILURE", "hit_at1": None, "hit_at5": None, "hit_at10": None,
+                "reciprocal_rank_at20": None, "page_status": "not_applicable"} for row in queries[index + 1:])
             break
     after, _ = export_snapshot(plan, kb_id)
     unchanged = ohr.digest(before) == ohr.digest(after)
     status = "BLOCKED" if any(row["status"] == "BLOCKED" for row in results) else "PASS"
     if not unchanged or not stability or any(row["status"] == "FAIL" for row in results):
         status = "FAIL"
-    measured_pages = [row for row in results if row["page_status"] == "evaluable"]
+    datasets = {}
+    for name in ("ohr", "ocb"):
+        rows = [row for row in results if row["dataset"] == name]
+        datasets[name] = retrieval_metrics(rows) | {"status": "NOT_APPLICABLE" if not rows else
+            "FAIL" if not unchanged or not stability or any(r["status"] == "FAIL" for r in rows) else
+            "BLOCKED" if any(r["status"] == "BLOCKED" for r in rows) else "PASS"}
+    datasets["omni"] = {"status": "NOT_APPLICABLE", "reason": "parsing_gt_not_question_answer_truth"}
     result = {"status": status, "executed": True, "kb_id": str(kb_id), "qa_count": len(results), "top_k": 20,
         "executed_qa_count": sum(row.get("error_code") != "NOT_RUN_AFTER_FAILURE" for row in results),
         "items": results, "same_query_ids_stable": stability, "no_data_or_task_change": unchanged,
-        "export_sha256": ohr.digest(before), "mrr_at20": sum(row["reciprocal_rank_at20"] for row in results) / len(results),
-        "page_evaluable_count": len(measured_pages),
-        **{f"hit_at{k}": sum(row[f"hit_at{k}"] for row in results) / len(results) for k in (1, 5, 10)},
-        **{f"page_hit_at{k}": sum(row[f"page_hit_at{k}"] for row in measured_pages) / len(measured_pages)
-           if measured_pages else None for k in (1, 5, 10)},
-        "criterion": "all_official_questions_document_hit_at10_and_evaluable_page_hit_at10; not_answer_accuracy"}
+        "export_sha256": ohr.digest(before), "datasets": datasets,
+        # 保留旧 OHR 指标字段供旧报告读取，绝不把 OCB 断言或 Omni GT 混入该分母。
+        **{key: datasets["ohr"][key] for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20",
+             "page_evaluable_count", "page_hit_at1", "page_hit_at5", "page_hit_at10")},
+        "legacy_metric_scope": "ohr_only",
+        "criterion": "OHR document+physical_page_hit10; OCB all_dependencies_hit10; assertions_manual; not_answer_accuracy"}
     save_artifact(run, "dense", result)
     return result
 
@@ -874,8 +988,50 @@ def formal_gaps(plan):
             "正式清单覆盖预检", "全批内容质量人工对照", "阶段16正式重复导入幂等性", "平台实际费用及外传授权"]}
 
 
+def dataset_reports(plan, verification, dense, export):
+    """按数据集拆分文件链路、检索分母和人工质量边界；旧双数据集运行不回填 OCB。"""
+    reports = {}
+    current_dense = bool(dense and verification and verification.get("status") == "PASS" and dense.get("executed", True)
+                         and dense.get("export_sha256") == verification["export_sha256"])
+    gaps = plan["preparation_gaps"]
+    for name in ("ohr", "omni", "ocb"):
+        files = [item for item in plan["documents"] if item["source"] == name]
+        names, hashes = {item["file"] for item in files}, {item["sha256"] for item in files}
+        requested = name in plan.get("datasets_requested", []) or bool(files)
+        if not requested:
+            reports[name] = {"status": "NOT_APPLICABLE", "file_count": 0,
+                             "reason": "not_in_frozen_legacy_plan"}
+            continue
+        rows = [r for r in (verification or {}).get("validations", []) if r["file"] in names]
+        documents = [d for d in export["documents"] if d["file_hash"] in hashes]
+        pipeline = ("FAIL" if any(row["status"] == "FAIL" for row in rows) else
+                    "BLOCKED" if not verification or not files or len(rows) != len(files)
+                    or any(row["status"] != "PASS" for row in rows) else "PASS")
+        metrics = (dense.get("datasets", {}).get(name) if current_dense else None)
+        if name == "ohr" and current_dense and metrics is None:
+            # 旧报告中的指标只属于 OHR，不用于伪造新增 OCB 的检索结论。
+            metrics = {key: dense.get(key) for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20")}
+            metrics["status"] = dense["status"]
+        retrieval = "NOT_APPLICABLE" if name == "omni" else (metrics or {}).get("status", "BLOCKED")
+        missing = (gaps.get("pdf_shortfall") or gaps.get("qa_shortfall") or gaps.get("missing_evidence_categories")
+                   if name == "ohr" else gaps.get("image_shortfall") if name == "omni" else
+                   gaps.get("ocb_format_shortfall") or gaps.get("ocb_files_without_qa"))
+        statuses = [pipeline, retrieval]
+        if missing:
+            statuses.append("BLOCKED")
+        reports[name] = {"status": "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS",
+            "file_count": len(files), "ready_count": sum(d["status"] == "READY" for d in documents),
+            "formats": dict(Counter(item["file_type"] for item in files)),
+            "pipeline_status": pipeline, "retrieval_status": retrieval, "retrieval_metrics": metrics,
+            "qa_count": plan["official_qa_count"] if name == "ohr" else plan.get("ocb_qa_count", 0) if name == "ocb" else 0,
+            "gt_count_not_qa": plan["omni_gt_count"] if name == "omni" else 0,
+            "quality_status": "manual_pending" if verification else "BLOCKED",
+            "automatic_pass_is_not_quality_or_answer_accuracy": True}
+    return reports
+
+
 def generate_report(run, plan, *, error=None, error_step=None):
-    """区分小样本、正式验收、官方总评测；不覆盖旧 JSON/Markdown，不输出原始正文。"""
+    """三数据集分别报告链路/检索/人工质量；旧报告保留，不将断言或 GT 当问答准确率。"""
     verification = latest_artifact(run, "verify")
     dense = latest_artifact(run, "dense")
     process = latest_artifact(run, "process")
@@ -884,8 +1040,12 @@ def generate_report(run, plan, *, error=None, error_step=None):
     dense_status = dense["status"] if dense else "BLOCKED"
     if dense and verification and dense["export_sha256"] != verification["export_sha256"]:
         dense_status = "BLOCKED"
+    datasets = dataset_reports(plan, verification, dense, export)
+    if plan.get("ocb_qa_count", 0) and datasets["ocb"]["retrieval_status"] == "BLOCKED":
+        dense_status = "BLOCKED"
     gaps = plan["preparation_gaps"]
     statuses = [pipeline, dense_status]
+    statuses += [row["status"] for row in datasets.values() if row["status"] != "NOT_APPLICABLE"]
     failures = sorted((run / "reports").glob("*-failure.json"))
     if error:
         # 失败单独冻结，后续纯 report 不能以旧的成功快照掩盖刚发生的故障。
@@ -916,7 +1076,9 @@ def generate_report(run, plan, *, error=None, error_step=None):
         "formats": dict(Counter(item["file_type"] for item in plan["documents"])),
         "upload_confirmed_count": len(upload_confirmed), "existing_document_count": len(export["documents"]),
         "ready_count": sum(d["status"] == "READY" for d in export["documents"]),
-        "official_qa_count": plan["official_qa_count"], "omni_gt_count_not_qa": plan["omni_gt_count"],
+        "official_qa_count": plan["official_qa_count"], "ocb_qa_count": plan.get("ocb_qa_count", 0),
+        "total_official_qa_count": plan["official_qa_count"] + plan.get("ocb_qa_count", 0),
+        "datasets": datasets, "omni_gt_count_not_qa": plan["omni_gt_count"],
         "pipeline_status": pipeline, "verification": verification, "dense_status": dense_status, "dense": dense,
         "dense_block_reason": "VERIFICATION_NOT_PASS" if pipeline != "PASS" else None,
         "preparation_gaps": gaps, "process": process, "error_code": unresolved,
@@ -941,8 +1103,8 @@ def generate_report(run, plan, *, error=None, error_step=None):
         and all(type(dense.get(key)) in {int, float} for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20")))
     markdown = (f"# 阶段16/17 小样本验收\n\n小样本真实冒烟：**{status}**\n\n"
         f"文件 {report['file_count']}；本次 API 确认上传 {len(upload_confirmed)}；已有文档 {len(export['documents'])}；READY {report['ready_count']}。\n\n"
-        f"链路：{pipeline}；Dense：{dense_status}；官方 QA {plan['official_qa_count']}；Omni GT 图像 {plan['omni_gt_count']}（不是 QA）。\n\n"
-        + (f"Hit@1={dense['hit_at1']:.3f}，Hit@5={dense['hit_at5']:.3f}，Hit@10={dense['hit_at10']:.3f}，MRR@20={dense['mrr_at20']:.3f}。\n\n" if show_dense_metrics
+        f"链路：{pipeline}；Dense：{dense_status}；OHR QA {plan['official_qa_count']}；OCB QA {plan.get('ocb_qa_count', 0)}；Omni GT 图像 {plan['omni_gt_count']}（不是 QA）。\n\n"
+        + (f"OHR Hit@1={dense['hit_at1']:.3f}，Hit@5={dense['hit_at5']:.3f}，Hit@10={dense['hit_at10']:.3f}，MRR@20={dense['mrr_at20']:.3f}。\n\n" if show_dense_metrics
            else "当前无可报告的 Dense 检索指标。\n\n")
         + ("READY/证据/向量前置校验未通过，当前阻塞来自文档链路，不能据此判断 GPU 或 Query 模型失败。\n\n" if pipeline != "PASS" else "")
         + ("本次 Dense 未执行，未加载 Query 模型；统计项为 null，不是零命中率。\n\n" if dense and dense.get("executed") is False else "")
@@ -953,6 +1115,21 @@ def generate_report(run, plan, *, error=None, error_step=None):
         + "官方完整基准质量评测：**NOT_APPLICABLE**。READY、文档命中、GT 标签都不等于回答准确；无人工区域映射的 Omni 指标为 not_applicable/manual_pending。\n\n"
         + "Block 序号通过不代表视觉阅读顺序正确。OHR 字面证据未保留为 review_required，需对照原 PDF；表格/公式语义不自动裁判。\n\n"
         + "详见同名 JSON 的 verification.validations、parsing_diagnostics、Dense 逐题结果、任务与批次。报告/导出含原文，勿提交 Git 或公开分享。\n")
+    markdown += "\n| 数据集 | 小样本状态 | 文件 / READY | 链路 | 检索 | QA / GT | 解析质量 |\n|---|---|---|---|---|---|---|\n"
+    metric_lines = []
+    for name, row in datasets.items():
+        if row["status"] == "NOT_APPLICABLE":
+            markdown += f"| {name} | NOT_APPLICABLE | 0 / 0 | - | - | - | 旧计划未纳入 |\n"
+            continue
+        markdown += (f"| {name} | {row['status']} | {row['file_count']} / {row['ready_count']} | {row['pipeline_status']} | "
+                     f"{row['retrieval_status']} | {row['qa_count']} / {row['gt_count_not_qa']} | {row['quality_status']} |\n")
+        metrics = row["retrieval_metrics"]
+        if metrics and all(type(metrics.get(key)) in {int, float} for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20")):
+            metric_lines.append(f"\n{name}：Hit@1={metrics['hit_at1']:.3f}，Hit@5={metrics['hit_at5']:.3f}，"
+                         f"Hit@10={metrics['hit_at10']:.3f}，MRR@20={metrics['mrr_at20']:.3f}；"
+                         f"有效查询分母={metrics.get('measured_qa_count', '旧快照未记录')}。\n\n")
+    markdown += "".join(metric_lines)
+    markdown += "\nOCB 文件命中不证明答案证据正确；原始 expected_assertions 保留并为 manual_pending。Office 逻辑页不参与物理页命中率。\n"
     if verification:
         markdown += "\n| 文件 | 状态 | 失败阶段 / 错误码 | Block | Chunk | 向量 | 问题 |\n|---|---|---|---:|---:|---:|---|\n"
         for row in verification["validations"]:
@@ -967,7 +1144,7 @@ def generate_report(run, plan, *, error=None, error_step=None):
 
 
 def build_parser():
-    """提供独立步骤和显式授权；所有步骤省略 --execute 都只打印计划，不创建数据目录。"""
+    """默认三数据集抽样与独立显式步骤；云授权覆盖所选全部文件，不由下载状态推断。"""
     parser = argparse.ArgumentParser(description="阶段16/17 小样本真实冒烟；默认 dry-run，无自动部署/下载")
     parser.add_argument("--step", choices=("prepare", "process", "verify", "retrieve", "report"), default="prepare")
     parser.add_argument("--run", default="run-01", help="独立运行目录名；准备不覆盖旧目录")
@@ -982,6 +1159,8 @@ def build_parser():
     parser.add_argument("--pdf-count", type=int, default=5)
     parser.add_argument("--image-count", type=int, default=3)
     parser.add_argument("--qa-count", type=int, default=20)
+    parser.add_argument("--ocb-per-format", type=int, default=2, help="OCB 每种 DOCX/XLSX/PPTX 选1～2份，默认2")
+    parser.add_argument("--ocb-qa-per-file", type=int, default=4, help="每份 OCB 文件保留1～4条完整官方QA，默认4")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-pages", type=int, default=50)
     parser.add_argument("--max-total-pages", type=int, default=150)
@@ -992,13 +1171,14 @@ def build_parser():
 
 
 def main(argv=None):
-    """延迟导入真实依赖；仅用户显式步骤会访问 API/数据库/GPU，错误非零退出并保留材料。"""
+    """用户显式运行三数据集；旧计划只读兼容，默认不创建样本、连接服务或授予外传。"""
     args = build_parser().parse_args(argv)
     plan, run = None, None
     try:
         if (re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", args.run) is None
                 or not 1 <= args.pdf_count <= 8 or not 0 <= args.image_count <= 3
                 or not args.pdf_count <= args.qa_count <= 50 or len(args.extra) > 3
+                or not 1 <= args.ocb_per_format <= 2 or not 1 <= args.ocb_qa_per_file <= 4
                 or not 1 <= args.max_pages <= 50 or not 1 <= args.max_total_pages <= 200
                 or not 1 <= args.timeout <= 86400 or not 1 <= args.poll_interval <= 60):
             raise SmokeError("INPUT")
@@ -1022,7 +1202,8 @@ def main(argv=None):
             with run_lock(run):
                 plan = prepare_samples(args, run)
                 generate_report(run, plan)
-            print(f"离线准备结束：真实文件={len(plan['documents'])}；官方QA={plan['official_qa_count']}；未上传。")
+            print(f"离线准备结束：真实文件={len(plan['documents'])}；OHR QA={plan['official_qa_count']}；"
+                  f"OCB QA={plan.get('ocb_qa_count', 0)}；Omni GT={plan['omni_gt_count']}；未上传。")
             return 0 if not any(plan["preparation_gaps"].values()) else 2
         with run_lock(run):
             plan = load_plan(run)

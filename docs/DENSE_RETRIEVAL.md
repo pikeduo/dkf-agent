@@ -58,7 +58,7 @@ core 缺失会跳过框架测试，跳过不是通过。预期覆盖过滤先于
 
 ## PostgreSQL + BGE-M3 真实验收：阶段 16 READY 数据具备后由用户执行
 
-可以先按 [阶段16/17 小样本联合冒烟](PRESET_IMPORT.md#优先使用阶段-1617-小样本联合冒烟)，在独立 ACTIVE 测试库用本地已有 OHR PDF/官方 QA 与 Omni GT 图像走真实上传→READY，再执行 `smoke_stage16_17.py --step retrieve`。工具只调用这里的 Dense 入口，不新增 API/Query Engine，自动只读导出证据及统计文档/物理页 Hit@1/5/10、MRR@20；无 LLM，Omni GT 不参与 QA 分母。全部自动检查通过也不宣告阶段16正式验收或官方完整质量评测通过。命令、授权、PASS 边界和报告见上述操作说明，无需手工 pgAdmin 复制 JSON。
+可以先按 [阶段16/17 三数据集联合冒烟](PRESET_IMPORT.md#三数据集最短操作新运行)，在独立 ACTIVE 测试库用已有 OHR PDF/官方QA、Omni GT图像及 OCB DOCX/XLSX/PPTX各2份走真实上传→READY，再执行 `smoke_stage16_17.py --step retrieve`。只调用这里的 Dense，不新增 API/Query Engine；OHR/OCB分别统计文档 Hit@1/5/10、MRR@20，OHR另查可靠物理页。OCB保留完整 reference_files/expected_assertions，多文件要求依赖齐全；断言与答案证据为manual_pending，不以字符串包含判断正确。Omni GT不参与QA分母，异常/未执行不伪填零分。无需手工SQL导出，不宣告阶段16正式或官方完整质量评测通过。
 
 以下保留独立检查方式：先按 [阶段 16](PRESET_IMPORT.md) 完成合法素材、许可/外传/云预算确认及对应 READY 全量向量验收。无需为了阶段 17 再解析/Embedding/迁移，旧模型身份不匹配不能为了测试改元数据冒充一致。
 

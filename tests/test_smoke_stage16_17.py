@@ -537,14 +537,97 @@ def test_merge_and_normalizer_codes_remain_traceable_without_error_body():
     assert tool.safe_job_code("MERGE_EVIDENCE\nprivate-error-body") == "UNKNOWN_ERROR_CODE"
 
 
-def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch):
-    """Retriever Stub 只接收原始 question，不用答案，不触发 Parse/文档 Embedding/索引。"""
+def test_ocb_metrics_use_document_truth_and_keep_assertions_manual():
+    """OCB 多文件 Top-K 和 MRR 仅依据官方依赖；不把断言字符串包含当答案正确。"""
+    first = exported_document()
+    second = copy.deepcopy(first)
+    second.update(doc_id="second-document", file_hash="b" * 64)
+    qa = {"reference_id": "unit-ocb", "qa_id": "archive-qa-unit", "source_row_index": 9,
+          "reference_files": ["unit.docx", "unit.xlsx"],
+          "dependencies": [{"sha256": "a" * 64}, {"sha256": "b" * 64}],
+          "question": " 原样问题 ", "track": "Domain", "expected_assertions": ["断言甲", "断言乙"]}
+    hits = [{"doc_id": DOC, "span_pages": [1]}] + [{"doc_id": "other"}] * 9 + [{"doc_id": "second-document"}]
+    result = tool.score_ocb_retrieval(qa, {DOC: first, "second-document": second}, hits)
+    assert result["hit_at1"] is True and result["reciprocal_rank_at20"] == 1
+    assert result["all_dependencies_hit_at10"] is False
+    assert result["page_status"] == "not_applicable" and result["page_hit_at10"] is None
+    assert result["answer_evidence_status"] == "manual_pending"
+    assert result["qa_id"] == "archive-qa-unit" and result["source_row_index"] == 9
+    assert result["reference_id"] == qa["reference_id"]
+    assert result["expected_assertions"] == qa["expected_assertions"] and result["question"] == qa["question"]
+
+
+def test_unexecuted_queries_are_not_zero_score_metrics():
+    """异常/未执行不进入命中分母，空结果的真实已执行查询仍计零分。"""
+    failed = {"status": "FAIL", "hit_at1": False, "hit_at5": False, "hit_at10": False,
+              "reciprocal_rank_at20": 0.0, "page_status": "not_applicable"}
+    blocked = {"status": "BLOCKED", "error_code": "NOT_RUN_AFTER_FAILURE", "page_status": "not_applicable"}
+    result = tool.retrieval_metrics([failed, blocked])
+    assert result["qa_count"] == 2 and result["measured_qa_count"] == 1
+    assert result["hit_at10"] == 0 and result["blocked_qa_count"] == 1
+    assert tool.retrieval_metrics([blocked])["hit_at10"] is None
+
+
+def test_default_now_requests_three_datasets_without_changing_old_plan():
+    """新准备默认各二份 Office；旧计划不被增添 QA 或修改冻结摘要。"""
+    args = tool.build_parser().parse_args([])
+    assert args.pdf_count == 5 and args.image_count == 3 and args.ocb_per_format == 2
+    plan = {"documents": [sample()], "official_qa_count": 20, "omni_gt_count": 3, "preparation_gaps": {}}
+    before = copy.deepcopy(plan)
+    reports = tool.dataset_reports(plan, None, None, {"documents": []})
+    assert reports["ocb"]["status"] == "NOT_APPLICABLE" and plan == before
+
+
+def test_ocb_download_does_not_grant_upload_permission(monkeypatch):
+    """仅有真实下载/本地许可不能启动 auto 上传；必须明确全批云外传确认。"""
+    def forbidden(*args, **kwargs):
+        """权限检查之前不读运行计划、不连业务服务。"""
+        pytest.fail("未确认外传不能上传")
+    monkeypatch.setattr(tool, "run_lock", forbidden)
+    assert tool.main(["--step", "process", "--execute", "--kb-id", str(KB), "--confirm-test-kb"]) == 2
+
+
+def test_dataset_results_are_separate_and_omni_never_has_qa_metrics():
+    """OHR/OCB 指标分别显示，Omni 只报告 GT 链路；断言质量保持 manual_pending。"""
+    office = sample() | {"file": "samples/ocb/unit.xlsx", "source": "ocb", "file_type": "xlsx", "sha256": "b" * 64}
+    image = sample() | {"file": "samples/omni/unit.png", "source": "omni", "file_type": "png", "sha256": "c" * 64}
+    plan = {"documents": [sample(), office, image], "official_qa_count": 20, "ocb_qa_count": 12,
+            "omni_gt_count": 3, "preparation_gaps": {}, "datasets_requested": ["ohr", "ocb", "omni"]}
+    verification = {"status": "PASS", "export_sha256": "unit-hash",
+                    "validations": [{"file": x["file"], "status": "PASS"} for x in plan["documents"]]}
+    dense = {"status": "PASS", "export_sha256": "unit-hash", "executed": True,
+             "datasets": {"ohr": {"status": "PASS", "hit_at10": 1}, "ocb": {"status": "PASS", "hit_at10": 0.8}}}
+    export = {"documents": [{"file_hash": x["sha256"], "status": "READY"} for x in plan["documents"]]}
+    reports = tool.dataset_reports(plan, verification, dense, export)
+    assert reports["ohr"]["retrieval_metrics"]["hit_at10"] == 1
+    assert reports["ocb"]["retrieval_metrics"]["hit_at10"] == 0.8
+    assert reports["omni"]["retrieval_status"] == "NOT_APPLICABLE" and reports["omni"]["qa_count"] == 0
+    assert reports["ocb"]["quality_status"] == "manual_pending"
+    # 新快照或前置失败时不借用旧成功查询报告，避免将旧 OHR 成绩当作 OCB 验收。
+    for changed in (verification | {"export_sha256": "new-snapshot"}, verification | {"status": "FAIL"}):
+        pending = tool.dataset_reports(plan, changed, dense, export)
+        assert pending["ocb"]["retrieval_status"] == "BLOCKED"
+        assert pending["ocb"]["retrieval_metrics"] is None
+
+
+@pytest.mark.parametrize("with_ocb", [False, True])
+def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch, with_ocb):
+    """旧 OHR/新双 QA 均复用唯一 Retriever；原问题及分组指标保留，不触发文档重编码。"""
     from app.core import business_logging, config
-    queries, artifacts = [], []
+    queries, artifacts, instances = [], [], []
     d = exported_document() | {"file_name": "metadata.pdf", "model_identity": {"stub": "identity"}, "parse_jobs": []}
     export = {"documents": [d]}
     qa = {"ID": "unit-only", "doc_name": "metadata_stub", "questions": " 原始Query\n不修剪 ",
           "answers": "不作为查询输入", "_ohr_reference": {"document_sha256": "a" * 64, "evidence_pages_1based": [1]}}
+    office = copy.deepcopy(d)
+    office.update(doc_id="f36f44a4-26b8-4daf-9c91-394508f62dcc", file_hash="b" * 64,
+                  file_type="docx", file_name="unit.docx")
+    office["chunks"][0].update(doc_id=office["doc_id"], chunk_id="fccce4e1-14f4-4051-b9a3-6f688cd7da1b")
+    ocb_qa = {"reference_id": "unit-ocb", "reference_files": ["unit.docx"], "track": "File Fidelity Word",
+              "dependencies": [{"sha256": "b" * 64}], "question": " 原始OCB问题\n保留 ",
+              "expected_assertions": ["不能作为 Query 的断言甲", "不能合并的断言乙"]}
+    if with_ocb:
+        export["documents"].append(office)
 
     class Retriever:
         """替换唯一 Dense 边界，不加载 BGE-M3 或访问真实 SQL。"""
@@ -552,14 +635,17 @@ def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch):
         def __init__(self, kb_id, top_k):
             """固定同 KB 与 Top-K，不创建另一模型。"""
             assert kb_id == KB and top_k == 20
+            instances.append(self)
 
         def retrieve_results(self, query):
             """返回元数据 DTO Stub，保留已有 Chunk 来源字段。"""
             queries.append(query)
-            c = d["chunks"][0]
-            return [SimpleNamespace(chunk_id=c["chunk_id"], doc_id=DOC, kb_id=KB, text=c["text"],
+            expected = office if with_ocb and query == ocb_qa["question"] else d
+            c = expected["chunks"][0]
+            return [SimpleNamespace(chunk_id=c["chunk_id"], doc_id=expected["doc_id"], kb_id=KB, text=c["text"],
                 page_start=1, page_end=1, section=None, metadata=c["metadata"],
-                file_name=d["file_name"], file_type="pdf", embedding_identity=d["model_identity"], retrieval_score=0.7)]
+                file_name=expected["file_name"], file_type=expected["file_type"],
+                embedding_identity=expected["model_identity"], retrieval_score=0.7)]
 
     def verify(run, plan, kb_id):
         """返回内存结构已通过，不创建导出文件。"""
@@ -570,8 +656,9 @@ def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch):
         return copy.deepcopy(export), {"status": "PASS"}
 
     def references(path):
-        """只提供一个明确标注为单元用例的 QA。"""
-        return [copy.deepcopy(qa)]
+        """按 QA 文件返回两个明确标注为单元用例的原问题，不读取 Omni GT 作为问答。"""
+        assert path.name in {"official_qa.jsonl", "ocb_qa.jsonl"}
+        return [copy.deepcopy(qa if path.name == "official_qa.jsonl" else ocb_qa)]
 
     def save(run, kind, payload):
         """捕获报告，不写素材/报告文件。"""
@@ -588,8 +675,16 @@ def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch):
     monkeypatch.setattr(tool, "save_artifact", save)
     monkeypatch.setattr(business_logging, "configure_logging", logging)
     monkeypatch.setattr(config, "get_settings", logging)
-    result = tool.dense_run(Path("virtual"), {"documents": [sample()]}, KB)
-    assert queries == [qa["questions"], qa["questions"]]
+    result = tool.dense_run(Path("virtual"), {"documents": [sample()], "ocb_qa_count": int(with_ocb)}, KB)
+    assert queries == [qa["questions"], qa["questions"]] + ([ocb_qa["question"], ocb_qa["question"]] if with_ocb else [])
+    assert len(instances) == 1
     assert result["status"] == "PASS" and result["no_data_or_task_change"] is True
     assert result["hit_at1"] == result["page_hit_at10"] == result["mrr_at20"] == 1
+    assert result["datasets"]["ohr"]["measured_qa_count"] == 1
+    assert result["datasets"]["omni"]["status"] == "NOT_APPLICABLE"
+    if with_ocb:
+        assert result["datasets"]["ocb"]["measured_qa_count"] == 1
+        assert result["datasets"]["ocb"]["hit_at10"] == 1
+        assert result["items"][1]["expected_assertions"] == ocb_qa["expected_assertions"]
+        assert result["items"][1]["answer_evidence_status"] == "manual_pending"
     assert artifacts[0][0] == "dense"

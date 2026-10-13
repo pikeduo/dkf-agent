@@ -2612,6 +2612,18 @@ page / section 不丢失
 ## 目标
 建立比赛演示默认知识库。
 
+## 阶段16/17三数据集联合冒烟（增量恢复OCB）
+
+现有 smoke_stage16_17 已有 OHR+Omni 链路，增量纳入已下载 OCB；不重新开发业务处理或扩展下载器。默认约14份：OHR 5 PDF/约20条官方QA，Omni 3张 GT图像，OCB DOCX/XLSX/PPTX各2份及每文件最多4条完整官方QA。用户当前归档127份/547条依赖完整QA可以启动抽样，不要求补齐剩余43份；真实统计和容器/Hash重检仍以运行报告为准。
+
+- 从本地固定版本元数据、归档回执、QA JSON及官方Parquet核对身份；缺QA导出就在新run形成副本，不下载、不覆盖旧报告或原件。优先单文件；多文件QA全依赖必须存在且全部入选，不拆题、不改原始断言。
+- 同一原上传API的 auto Router→Block→Chunk→Embedding→Index→READY；无第二套模型/索引/业务表。下载完成不是版权/云权限，真实process前由用户确认所选全部文件外传及额度，不要求许可Excel/JSON合并。
+- OHR与OCB分别报告 Hit@1/5/10、MRR@20及有效分母，异常/未执行不伪填零；OHR使用可靠0-based→1-based物理证据页，Office逻辑页不冒充物理页。Omni GT不是QA。
+- OCB expected_assertions及答案证据为manual_pending，DOCX段落/标题/表格、XLSX Sheet/单元格/原式、PPTX图文/页面顺序需人工对照。不做字符串包含答案裁判、LLM或官方总分。
+- 三数据集分别显示PASS/FAIL/BLOCKED/NOT_APPLICABLE及人工质量状态；不降低正式10份/旧Office/三现代格式/七标签/READY/幂等标准。旧run、QA/GT、preset/manifest和现有报告不改写；阶段16/17仍待人工验收，不进入18。
+
+本轮只交付代码、Mock用例及说明，Codex不执行抽样/上传/数据库/云调用/pytest；最短用户命令见 [三数据集操作](PRESET_IMPORT.md#三数据集最短操作新运行)。
+
 准备：
 
 ```text

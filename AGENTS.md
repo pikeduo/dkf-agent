@@ -41,7 +41,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
-| 16 | 已实现预置导入、公开基准工具及独立16/17小样本冒烟（原API推进、只读导出/质量诊断、官方QA Dense报告）；用例仅编写，真实导入与正式质量验收仍待用户完成 |
+| 16 | 已实现预置导入与 OHR/Omni/OCB 三数据集联合冒烟（约14份、原API链路、完整QA/GT、分数据集Dense报告）；新增用例仅编写，真实导入与正式质量验收待用户完成 |
 | 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
 | 18 及后续 | 未开展，等待用户确认 |
 
@@ -50,6 +50,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 - 本轮仅实施阶段 16/17 联合冒烟辅助工具、Mock 用例和操作说明，不改变业务语义或阶段 17 待验收状态；阶段 16 正式数据验收及此前待验收事项仍保留。不安装/下载/执行验收、不碰已有素材；未经用户确认，不进入单文档 Retrieval/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid，不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
+- 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
 

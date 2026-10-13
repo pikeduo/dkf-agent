@@ -4,25 +4,31 @@
 
 ## 优先使用：阶段 16/17 小样本联合冒烟
 
-已经下载 OHR-Bench 和 OmniDocBench 时，先用 `scripts/smoke_stage16_17.py` 跑少量真实样本，**无需 OCB、许可 Excel、正式 manifest 或 pgAdmin 手动导出**。这是独立测试库的上传/处理与 Dense 验收，不替代下文的正式预置导入标准；不进入阶段 18、LLM 或 RAG。
+使用已下载的 **OHR-Bench + OmniDocBench + Microsoft OCB**，由 `scripts/smoke_stage16_17.py` 在独立测试库完成上传/处理与 Dense 验收。默认约 **5 PDF + 3 GT 图像 + DOCX/XLSX/PPTX 各2份，共14份**；不要求补齐 OCB 尚缺原件，不使用许可 Excel、不手动合并 JSON、不写正式 manifest，不需要 pgAdmin 手工导出。此流程不替代正式预置导入标准，不进入阶段18、LLM或RAG；旧双数据集 run 只读兼容，不擅自增加 OCB 或修改旧计划。
 
 以下命令全部由用户手动执行。所有步骤省略 `--execute` 都是 dry-run：只说明操作，不写文件、不连接 API/数据库/模型。路径固定相对脚本所在项目根目录；测试文件、原始 QA/GT、快照和报告只写到 `docs/test/stage16_smoke/<run>/`，已被现有 `.gitignore` 保护，不进入正式 preset。
 
 ### 1. 离线准备真实样本
 
-先确认本地已有 `ohr_bench_preset/source/pdfs.zip`、`qas_v2.json` 和 `omnidocbench_preset/source/OmniDocBench.json`、`dataset_info.json`、`images/`（均在 `docs/test/` 下）。复用既有 PyMuPDF/Pillow 容器检查，不安装依赖、不下载新数据，不读取正文或运行 Parser/OCR。
+先确认本地已有 `ohr_bench_preset/source/pdfs.zip`、`qas_v2.json` 和 `omnidocbench_preset/source/OmniDocBench.json`、`dataset_info.json`、`images/`（均在 `docs/test/` 下）。OCB 使用 `ocb_preset/source/` 的官方 Parquet、固定版本元数据、reference_files/external_files，以及 results/native_download_plan.json 和 results/bulk_archive/archive_report.json。准备只使用既有 PyMuPDF/Pillow/PyArrow 和容器检查，不下载新数据、不安装依赖、不运行 Parser/OCR。
 
 ```powershell
 conda activate dkf-agent
 python scripts/smoke_stage16_17.py --dry-run
 # 确认原件官方来源及本地研究使用权限后：
-python scripts/smoke_stage16_17.py --step prepare --run run-01 --execute --confirm-local-use
-notepad docs/test/stage16_smoke/run-01/plan.json
+python scripts/smoke_stage16_17.py --step prepare --run ocb-01 --execute --confirm-local-use
+notepad docs/test/stage16_smoke/ocb-01/plan.json
 ```
 
-默认固定种子 42，约 **5 PDF + 3 GT 图像 + 20 官方 QA**。PDF 只读 ZIP 必要成员，检查 CRC、SHA256、真实页数、重复内容；优先五类证据和不同领域，每文件上限 20 MiB、50 页，整批 PDF 页预算 150，最多检查 64 个候选。Omni 只选已存在且完整、尺寸与 GT 相符的图像；不生成图片或把 GT 当 QA。只做真实来源候选分类，不据此填写七类正式内容标签。
+默认固定种子42，OHR 约20题；OCB 每文件最多4题（六份最多24题，实际不足如实记录）。PDF 只读 ZIP 必要成员，检查 CRC、SHA256、真实页数、重复内容；优先五类证据和不同领域，每文件上限20 MiB、50页，整批 PDF 页预算150，最多检查64个候选。Omni 只选已存在且完整、尺寸与 GT 相符的图像；不生成图片或把 GT 当 QA。只做真实来源候选分类，不据此填写七类正式内容标签。
 
-OHR 原始字段完整保留在 `official_qa.jsonl`；`text` 映射 `plain_text`，`multi` 单独排除，证据页 **0-based → 1-based** 存双份对照，排除缺失/歧义 PDF 和超出真实页数的 QA。Omni 完整 GT 保存在 `omni_gt.jsonl`；项目图片页=1，不猜原 PDF 物理页。约 20 题不足、证据类别缺失或图像不足会如实报告，准备返回 2、处理拒绝继续，不补造数据。可在**新的** `--run run-02` 中显式调整 `--qa-count`、`--pdf-count`、`--image-count`、`--max-total-pages`（≤200）；QA 至少每 PDF 一题。`--image-count 0` 是用户显式不测图像，不证明图片链路通过。
+OCB 复用批量归档的真实文件身份和下载回执，优先 HF 固定 revision 的托管原件；选中后重检 CRC、实际 Office 容器、官方 OID/LFS（如有）及本地 SHA。外部原件必须有匹配的原下载回执，其本地 SHA 不冒充官方摘要。读取全量 QA，保留 File Fidelity Word/Excel/PowerPoint 及依赖完整的 Domain 原 track，优先单文件/代表性 feature；多文件 QA 不拆题，全部依赖必须已取得且落在入选六份中，否则跳过。
+
+已有 qa_full.json、qa_smoke.json 逐行对照官方 Parquet 的原始字段和 source_row_index；不修改源数据。缺 QA JSON 时直接使用已有 Parquet，在**新 run/ocb/** 生成缺失导出的独立副本，不运行下载器、不覆盖 bulk_archive。原件或某格式不足只报告准备缺口，不能改后缀凑数。当前用户归档统计127份/547题是来源现状，不代表本轮解析质量或 READY 通过；实际选样受本地存在性、20 MiB 上限和完整性重检约束。
+
+OHR 原始字段完整保留在 `official_qa.jsonl`；`text` 映射 plain_text，multi 单独排除，证据页 **0-based → 1-based** 存双份对照。Omni 完整 GT 保存在 `omni_gt.jsonl`；项目图片页=1，不猜原 PDF 物理页。OCB 原始 question/expected_assertions/reference_files/track 等留在 `ocb_qa.jsonl` 的 original 与适配字段，完整依赖包含 SHA 与源文件身份；`ocb_source_summary.json` 记录版本、QA导出状态及缺口。使用记事本即可检查这三个参考文件，不需手动合并。
+
+OHR 题数/证据类别、图像或三类 Office 配额不足会如实报告，准备返回2、process拒绝继续，不补造数据。可在**新的** run 中显式调整 `--qa-count`、`--pdf-count`、`--image-count`、`--max-total-pages`（≤200），以及 `--ocb-per-format`（1～2，默认2）和 `--ocb-qa-per-file`（1～4，默认4）；全批最多20份/256 MiB。QA 至少每 PDF/Office 一题。已有 run 禁止重新 prepare；旧运行和报告不改写。`--image-count 0` 不证明图片链路通过。
 
 可选自有现代 Office：在准备命令上追加 `--extra "D:/自己的真实资料/文件.xlsx"`，可重复至多三份，仅 DOCX/XLSX/PPTX，检查真实容器与 SHA，不生成自定义问答、不改后缀；来源单列 user，内容质量待人工核对。旧准备计划、正式 manifest、已有素材/报告均不改变。已有 run 不能重新 prepare；部分磁盘故障保留已发布文件，换新 run，不自动清理。
 
@@ -50,7 +56,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 在验收终端用**已有创建接口**新建空的独立库（名称须唯一）；已有独立 ACTIVE 库则直接填写 UUID，不重复创建。不要使用默认正式库或包含其他文件的业务库：
 
 ```powershell
-$smokeKb = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/knowledge-bases" -ContentType "application/json; charset=utf-8" -Body '{"name":"stage16-smoke-run-01","description":"隔离的小样本真实验收"}'
+$smokeKb = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/knowledge-bases" -ContentType "application/json; charset=utf-8" -Body '{"name":"stage16-smoke-ocb-01","description":"隔离的三数据集真实验收"}'
 $smokeKbId = $smokeKb.kb_id
 ```
 
@@ -58,10 +64,10 @@ $smokeKbId = $smokeKb.kb_id
 
 ### 3. 显式执行上传 → READY
 
-**公开下载不等于取得第三方云外传权。** 人工确认全部样本（含额外 Office）允许上传 MinerU，核对账户剩余额度/费用；默认最多 8 份、PDF 页预算 150 加图片，实际路由/收费以平台为准。没有外传许可就停在离线准备，不执行本节。
+**公开下载不等于取得第三方云外传权。** 人工确认全部样本（含 OCB 和额外 Office）允许上传 MinerU，核对账户剩余额度/费用；默认14份原件，PDF 页预算150，Office 转换页数不提前猜测；实际路由/收费以平台为准。没有外传许可就停在离线准备，不执行本节。
 
 ```powershell
-python scripts/smoke_stage16_17.py --step process --run run-01 --execute --kb-id $smokeKbId --confirm-test-kb --allow-cloud --timeout 1800 --poll-interval 5
+python scripts/smoke_stage16_17.py --step process --run ocb-01 --execute --kb-id $smokeKbId --confirm-test-kb --allow-cloud --timeout 1800 --poll-interval 5
 ```
 
 提交前检查 SELECT 1、vector 扩展/HNSW/head、API、同 UUID ACTIVE 库、应用/Broker/Backend Redis PING、CPU/GPU 队列响应（GPU 并发1）、本地模型配置/Tokenizer/权重目录、CUDA 和 Token 是否配置。**不加载模型、不验证云 Token、不替用户确认版权/额度**；GPU/鉴权的实际可用性仍由真实任务证明。API/Worker 必须使用与脚本相同的 `.env`、数据库和存储，预检不能证明远端进程的所有配置一致。
@@ -73,7 +79,7 @@ python scripts/smoke_stage16_17.py --step process --run run-01 --execute --kb-id
 首次 process 返回 0 只表示自动链路校验通过，报告仍 **BLOCKED：Dense 未执行**。只需验证已有 READY 或观察超时后状态，不必重新上传：
 
 ```powershell
-python scripts/smoke_stage16_17.py --step verify --run run-01 --execute --kb-id $smokeKbId
+python scripts/smoke_stage16_17.py --step verify --run ocb-01 --execute --kb-id $smokeKbId
 ```
 
 中断后重复同一 process 命令：按同库 SHA 复用已有文档；有意图却没有持久化记录/任务标识时 `SMOKE_UNCERTAIN` 停止，先按 doc_id、events、当天业务日志核对，不能删除意图或改 run 来强行重复收费。硬中断可能留下 `run.lock`，确认该运行的旧 CLI 进程已退出后，用户才可删除这**一个**锁；不删业务日志锁或整个数据目录。FAILED 先人工修复原因，工具不自动恢复失败代次。
@@ -83,14 +89,18 @@ python scripts/smoke_stage16_17.py --step verify --run run-01 --execute --kb-id 
 全部 READY 后，先在 GPU Worker 窗口 **Ctrl+C 停止空闲 Worker**，避免 RTX 4060 8GB 同时加载两份模型；保留 PostgreSQL，检索本身不依赖 API/Redis/Worker。不停止还在处理中的 GPU 任务，不由工具关闭服务。
 
 ```powershell
-python scripts/smoke_stage16_17.py --step retrieve --run run-01 --execute --kb-id $smokeKbId
+python scripts/smoke_stage16_17.py --step retrieve --run ocb-01 --execute --kb-id $smokeKbId
 # 报告已自动生成；可独立重新生成，不连接服务/模型：
-python scripts/smoke_stage16_17.py --step report --run run-01 --execute
-$smokeReport = Get-ChildItem docs/test/stage16_smoke/run-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
+python scripts/smoke_stage16_17.py --step report --run ocb-01 --execute
+$smokeReport = Get-ChildItem docs/test/stage16_smoke/ocb-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
 notepad $smokeReport.FullName
 ```
 
 原样 `questions` 调用既有 `DenseRetriever(top_k=20)`，共享既有 BGE-M3 Query Adapter，无 LLM/答案生成/文档重新向量化。逐项核对原 chunk_id、同 KB、文件身份、正文/页码/section/source_spans 和模型身份；同一题重查一次看 ID 稳定，检索前后只读快照必须不变。模型/数据库异常停止后续题，其余标记 BLOCKED，不反复重载模型；空结果、未命中不能算通过。
+
+OCB 原样使用 `question`，不把 expected_assertions 当作 Query/单条答案。每数据集首题重查 ID 稳定性；Top-K 上限、同分稳定顺序、知识库隔离及返回证据身份仍须通过。报告中 OHR 与 OCB 的 Hit@1/5/10、MRR@20 **分别统计**；旧顶层 Dense 指标仅保留 OHR 兼容含义。只有实际完成且有可靠文档真值的查询进入指标分母，异常/未执行为 null 并单列数量，不能伪算零命中。OCB 文档真值来自官方 reference_files，多文件另检全部依赖 Top10 是否齐全；Office 逻辑页无官方物理页真值，不进入页命中率。
+
+OCB 原始断言及答案证据标记 manual_pending，复用 evaluate_benchmark_parsing.ocb_checks，不做字符串包含答案裁判。用户对照原 DOCX 的标题/段落/表格、XLSX 的 Sheet/单元格/原生公式、PPTX 的文本/图文关系/逻辑页面顺序，结合返回 chunk_id/source_spans 与只读导出核验。READY、文档命中不能证明这些质量项正确。
 
 报告统计 **文档 Hit@1/5/10、MRR@20**（截断排名，不是全库 MRR），以及可判定物理证据页的 Hit@1/5/10；页命中使用实际 source_spans，不能仅靠跨多页范围。无法判定为 not_applicable，列单独分母。严格小样本 PASS 要求链路全通过、全部选中官方题文档 Hit@10、可判定题证据页 Hit@10、同题稳定和查询无写入变化；这不是官方推荐准确率阈值。
 
@@ -127,8 +137,29 @@ notepad $smokeReport.FullName
 Mock 用例仅用户手动执行，不运行 Parser/真实数据库/模型或云端，不生成真实 PDF/Office/图片：
 
 ```powershell
-python -m pytest tests/test_smoke_stage16_17.py -q
+python -m pytest tests/test_smoke_stage16_17.py tests/test_stage16_ocb.py -q
 ```
+
+### 三数据集最短操作（新运行）
+
+以下默认14份；ocb-01 必须未使用，若已存在手动换一个新编号，后续命令沿用同一编号。先按上面的现有启动命令准备 API/CPU/GPU Worker，通过 Swagger 创建独立 ACTIVE 测试库。**--allow-cloud 是用户对本轮全部所选文件的研究使用/外传及费用确认，不由 downloaded、READY 或空许可表代替**；未能确认其中任一文件外传就不要执行 process，仍可离线准备/查看参考。工具不填写 source_review 或许可 Excel。
+
+```powershell
+conda activate dkf-agent
+python scripts/smoke_stage16_17.py --step prepare --run ocb-01 --execute --confirm-local-use
+# 检查计划和官方参考；也可在编辑器中一次打开整个运行目录。
+notepad docs/test/stage16_smoke/ocb-01/plan.json
+notepad docs/test/stage16_smoke/ocb-01/ocb_qa.jsonl
+# 仅确认本轮全部14份样本云外传权限和预算后执行；换成真实测试库 UUID。
+$smokeKbId = "你的独立ACTIVE测试库UUID"
+python scripts/smoke_stage16_17.py --step process --run ocb-01 --execute --kb-id $smokeKbId --confirm-test-kb --allow-cloud --timeout 1800
+# 全部 READY 后手动停止空闲 GPU Worker，避免8GB显存加载两份模型，再执行 Query。
+python scripts/smoke_stage16_17.py --step retrieve --run ocb-01 --execute --kb-id $smokeKbId
+$smokeReport = Get-ChildItem docs/test/stage16_smoke/ocb-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
+notepad $smokeReport.FullName
+```
+
+process/retrieve 每次自动生成新 JSON/Markdown，分别显示 OHR/Omni/OCB 的文件数、READY、链路、检索、有效查询分母和人工质量状态。没有 Query 的 Omni 检索为 NOT_APPLICABLE，结构链路可 PASS、完整解析质量仍 manual_pending。旧 FAILED 不自动复活、重传或 Force Reparse；准备新 run 也不授权绕过 Parse Cache 收费保护。阶段16正式验收及官方完整质量评测仍独立待完成。
 
 ## 素材与人工清单
 
