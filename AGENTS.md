@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**19：BM25 Retriever。已实现本地READY派生索引与统一Node返回，待用户验收；阶段18已确认通过。阶段16/17及此前其他验收事项保留，不自动进入20。**
+当前阶段：**20：Hybrid Retrieval。已实现同范围Dense + BM25稳定RRF、去重及来源解释，待人工验收；阶段19仍有关键词真实验收待确认，阶段18已确认通过。阶段16/17及此前待验收事项保留，不自动进入21。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -45,11 +45,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
 | 18 | 固定单/多文档范围、参数校验、SQL Top-K前过滤与原始证据保留；用户已确认测试通过 |
 | 19 | 已实现本地BM25、kb/doc范围、当前READY快照、派生缓存重建和原始证据保留；用例未运行，待验收 |
-| 20 及后续 | 未开展，等待用户确认 |
+| 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
+| 21 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮只增量实现阶段19及必要用例/说明，不改解析/切片/向量化/索引、素材或已有验收结论；不执行检索/测试/部署，不进入Fusion/Rerank/RAG或扩展Hybrid。
+- 本轮只增量实现阶段20及必要用例/说明，不改解析/切片/向量化/索引、素材或已有验收结论；不执行检索/测试/部署，不进入Rerank/RAG或扩展文档Hybrid。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -202,6 +203,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 使用已声明rank-bm25的BM25Plus与版本化词项规则，稳定同分UUID；只返回真实词项重叠，分数不是概率，不与Dense直接相加。中文字符/二元片段存在部分匹配边界，不宣称专业分词或语义准确率。
 - 实例内词频索引可重建，每次先查当前READY快照；内容/集合/版本变化重建，返回Node只用当前证据。失败不返回旧缓存，不写磁盘/pickle；超限报错，不静默截断全库语料。批量转换可省略逐项成功日志，但保留汇总及错误，默认Adapter行为不变。
 
+### Hybrid Retrieval / RRF
+
+- LlamaIndex BaseRetriever组合已有Dense/BM25，同kb_id/doc_ids、每支默认20项；原Query各调用一次，只Dense调用既有Query编码。无默认LLM、Query Rewrite、多查询扩展、框架索引或新真相表。
+- 等权RRF按1-based排名计算，默认k=60；以稳定chunk_id去重，同分按UUID排序，不按正文hash合并或混加原分数。Node原正文/证据不变，仅增加类型化fusion来源及原排名/分数，DTO互转保留，不混入Embedding/LLM文本。
+- 两路各自继承READY/当前代次/范围约束，Dense仍核对模型身份；BM25-only证据不冒充同模型向量命中。独立短快照不保证跨支同一事务；重复Chunk证据冲突、越界/坏行或分支异常全批失败，正常空支可融合另一支，不自动扩大范围/降级/重试。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -218,6 +225,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | LlamaIndex Node/证据 DTO、Query 边界与人工验收 | [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) |
 | Dense SQL/模型隔离、Top-K、日志与人工验收 | [Dense Retrieval](docs/DENSE_RETRIEVAL.md) |
 | BM25词项、READY快照、派生缓存及人工验收 | [BM25 Retriever](docs/BM25_RETRIEVAL.md) |
+| 两路组合、RRF来源、冲突边界及人工验收 | [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

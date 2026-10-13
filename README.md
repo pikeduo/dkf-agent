@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25 Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -456,6 +456,12 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key，尚无HTTP检索/问答接口。
 
 使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次读取当前READY语料，不产生第二套业务表或磁盘索引。首次构建有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
+
+### Hybrid Python Retriever
+
+使用 `app.services.rag.llama_index.hybrid_retriever.HybridRetriever(kb_id, doc_ids=None, top_k=20, branch_top_k=20, rrf_k=60)` 组合已有Dense与BM25；`retrieve(query)`返回按原chunk_id去重的NodeWithScore，`retrieve_results(query)`返回原证据DTO及fusion来源。每路默认20项，最终默认20项（可设30），同分按UUID稳定排序；`node.metadata['fusion']`保留dense/bm25原分数、排名及融合分，不代表概率或问答准确率。
+
+沿用已有core、rank-bm25、PostgreSQL及同模型本地BGE-M3，不需升级为全量llama-index、新密钥、迁移或Worker；Query只编码一次，不重编码文档。无Query Rewrite/LLM/多查询扩展；正常空分支可由另一支返回结果，异常不静默单路降级。两路为独立只读快照，同Chunk证据冲突明确失败，不自动重试。部署条件、错误边界和人工验收见 [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md)。
 
 ### 预置知识库导入
 

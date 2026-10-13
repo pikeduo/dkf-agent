@@ -64,6 +64,7 @@
 | `rag.adapter_failed` | 固定适配边界错误码与步骤，不透传 Pydantic 输入、路径、Node 或模型异常 |
 | `dense.started / finished / empty / failed` | 指定知识库/可选文档只读检索开始/成功/空集/安全失败；kb_id、top_k、指定文档数量及单文档doc_id、结果数量/维度/步骤/耗时/固定错误码，不记录ID数组、Query/Node/向量或SQL |
 | `bm25.started / index_built / index_reused / finished / empty / failed` | 当前READY快照的关键词检索、派生索引构建/复用及结果摘要；仅UUID/范围数量/Chunk数/复用/耗时/安全码，不记录Query/词项/正文/索引摘要或SQL，批量Node转换不刷逐项成功日志 |
+| `fusion.started / branch_finished / finished / empty / failed` | 同范围两路检索及稳定RRF摘要；stage区分dense/bm25/rrf，记录UUID/范围数量/结果数/耗时及安全分支错误码，不记录Query/Node/原分数/异常原文，不新增日志文件 |
 | `preset.started / imported / reused` | 用户执行 CLI 后开始批量导入 / 原件已提交并投递 auto / 同内容沿用已有 doc_id，不代表 READY |
 | `preset.advanced / state` | 下一阶段检查点提交后投递 / 业务状态变化，复用原队列与每日日志 |
 | `preset.failed / timeout / finished` | 单项安全错误 / 有界等待超时但不取消任务 / 全批 READY 或未完成数量，不输出清单、路径或正文 |

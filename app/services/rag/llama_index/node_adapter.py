@@ -1,6 +1,7 @@
 """已有 Chunk 与 TextNode/NodeWithScore 的只读互转，不查询、落库或重新处理原件。"""
 
 import logging
+import math
 from time import perf_counter
 
 from llama_index.core.schema import NodeRelationship, NodeWithScore, RelatedNodeInfo, TextNode
@@ -10,7 +11,7 @@ from sqlalchemy.orm.attributes import NO_VALUE
 
 from app.core.business_logging import log_event
 from app.models import Document, DocumentChunk
-from app.schemas.retrieval import RetrievalResult
+from app.schemas.retrieval import FusionProvenance, RetrievalResult
 from app.services.rag.llama_index.validation import RagAdapterError, json_snapshot, vector_snapshot
 
 ADAPTER_VERSION = "chunk-node-v1"
@@ -77,23 +78,28 @@ def chunk_to_node(chunk: DocumentChunk, document: Document, *, include_embedding
     return node
 
 
-def node_to_result(value: TextNode | NodeWithScore) -> RetrievalResult:
-    """从 Node 还原项目 DTO；分数 None/0 原样保留，读取原 text 而非拼接 metadata 的内容。"""
+def node_to_result(value: TextNode | NodeWithScore, *, log_success: bool = True) -> RetrievalResult:
+    """还原原文/证据及可选 RRF 来源；批量校验可省略成功日志，错误仍记录。"""
 
     started = perf_counter()
     try:
         score = value.score if isinstance(value, NodeWithScore) else None
         node = value.node if isinstance(value, NodeWithScore) else value
-        if not isinstance(node, TextNode) or set(node.metadata) != METADATA_FIELDS:
+        if (not isinstance(node, TextNode) or type(log_success) is not bool
+                or set(node.metadata) not in (METADATA_FIELDS, METADATA_FIELDS | {"fusion"})):
             raise RagAdapterError("RAG_ADAPTER_NODE")
         metadata = json_snapshot(node.metadata)
         if metadata["dkf_adapter_version"] != ADAPTER_VERSION:
             raise RagAdapterError("RAG_ADAPTER_NODE")
+        fusion = FusionProvenance.model_validate(metadata["fusion"]) if "fusion" in metadata else None
         result = RetrievalResult(kb_id=metadata["kb_id"], doc_id=metadata["doc_id"], chunk_id=metadata["chunk_id"],
             file_name=metadata["file_name"], file_type=metadata["file_type"], text=node.text,
             page_start=metadata["page_start"], page_end=metadata["page_end"], section=metadata["section"],
             metadata=metadata["chunk_metadata"], embedding_identity=metadata["embedding_identity"],
-            retrieval_score=score)
+            retrieval_score=score, fusion=fusion)
+        if (fusion is not None and score is not None
+                and not math.isclose(score, fusion.fusion_score, rel_tol=1e-12, abs_tol=1e-15)):
+            raise RagAdapterError("RAG_ADAPTER_NODE")
         if (node.node_id != str(result.chunk_id) or node.ref_doc_id != str(result.doc_id)
                 or node.source_node is None
                 or node.source_node.metadata != {"kb_id": str(result.kb_id), "file_name": result.file_name,
@@ -103,6 +109,7 @@ def node_to_result(value: TextNode | NodeWithScore) -> RetrievalResult:
         error = exc if isinstance(exc, RagAdapterError) else RagAdapterError("RAG_ADAPTER_INPUT")
         log_event("rag.adapter_failed", level=logging.WARNING, stage="node_to_result", error_code=error.code)
         raise error from None
-    log_event("rag.result_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
-              duration_ms=(perf_counter() - started) * 1000)
+    if log_success:
+        log_event("rag.result_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
+                  duration_ms=(perf_counter() - started) * 1000)
     return result

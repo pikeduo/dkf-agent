@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段19本地BM25代码已实现、待用户验收；阶段18已由用户确认通过，其他待验收事项保留。** 不自动进入20。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段20 Hybrid稳定RRF代码已实现、待人工验收；阶段19关键词验收仍待确认，阶段18已由用户确认通过，其他待验收事项保留。** 不自动进入21。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮只实现本地READY Chunk派生的BM25与统一Retriever，复用已有依赖/证据边界，不重做业务链路；不触碰素材、执行迁移/测试/真实查询、启动服务或进入Fusion/Rerank/RAG。\
+> 本轮只组合已有Dense/BM25和稳定RRF，保留原证据及排序来源，不重做业务链路；不触碰素材、执行迁移/测试/真实查询、启动服务或进入Rerank/RAG。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2792,6 +2792,8 @@ BM25 Retriever 能返回统一 `NodeWithScore`，并保持 Chunk / Document / Pa
 ---
 
 # 26. 阶段 20：Hybrid Retrieval / Query Fusion
+
+实现说明：[Hybrid Retrieval](HYBRID_RETRIEVAL.md)。已使用LlamaIndex BaseRetriever组合既有两路，各Top20，1-based等权RRF（k=60），默认最终Top20、可设30，按chunk_id去重/UUID同分排序。Node与DTO保留原证据及fusion来源；原分数不直接相加，不调用LLM/改写Query。分支异常/证据冲突整体失败，正常空支允许另一支参与；用例只编写，真实检索与回归待用户执行，不进入21。
 
 ## 目标
 
