@@ -14,7 +14,7 @@ from pydantic import PrivateAttr
 from app.core.business_logging import log_event
 from app.services.embedding import EmbeddingService, get_embedding_service
 from app.services.embedding.service import MODEL_ID, EmbeddingError
-from app.services.rag.llama_index.validation import RagAdapterError, vector_snapshot
+from app.services.rag.llama_index.validation import RagAdapterError, json_snapshot, vector_snapshot
 
 
 class DKFEmbeddingAdapter(BaseEmbedding):
@@ -39,6 +39,15 @@ class DKFEmbeddingAdapter(BaseEmbedding):
         """显式 Query 调用时才获取进程内已有服务，不自行构造 SentenceTransformer。"""
 
         return self._service if self._service is not None else get_embedding_service()
+
+    def query_model_identity(self) -> dict:
+        """显式检索时读取共享服务的实际身份，不猜指纹；首次调用可能加载用户已部署的模型。"""
+        try:
+            return json_snapshot(self._backend().identity())
+        except Exception as exc:
+            error = exc if isinstance(exc, (EmbeddingError, RagAdapterError)) else RagAdapterError("RAG_ADAPTER_EMBEDDING")
+            log_event("rag.adapter_failed", level=logging.WARNING, stage="query_identity", error_code=error.code)
+            raise error from None
 
     def get_query_embedding(self, query: str) -> list[float]:
         """原样转交 Query 并校验返回向量；不走框架携带正文/向量的回调事件或另一套缓存。"""

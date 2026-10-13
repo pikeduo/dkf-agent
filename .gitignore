@@ -38,6 +38,7 @@ docs/*
 !docs/EMBEDDING.md
 !docs/PGVECTOR_INDEX.md
 !docs/LLAMA_INDEX_ADAPTER.md
+!docs/DENSE_RETRIEVAL.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*
@@ -46,3 +47,7 @@ docs/archive/*
 
 # 本地测试结果，不提交到 GitHub
 /results/
+
+# Local benchmark data
+/data/dataset/
+*.crdownload

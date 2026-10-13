@@ -277,3 +277,93 @@ def test_actual_pdf_page_range_is_required_for_every_selected_qa():
                                                7, failures, {}, inspection)
     assert not report["verified_coverage"]["pdf_structure_crc_sha_and_qa_page_ranges"]
     assert reference == b""
+
+
+def test_official_text_maps_only_internal_category():
+    """官方 text 映射内部 plain_text，原始问题、答案、字段与对象内容不被修改。"""
+    raw = schema_row("text-stub", category="text")
+    before = copy.deepcopy(raw)
+    groups, rejected = tool.qa_rows([raw])
+    item = groups[raw["doc_name"]][0]
+    assert not rejected and item["category"] == "plain_text"
+    assert item["original"] == before and raw == before
+    assert item["original"]["evidence_source"] == "text"
+
+
+def test_multi_is_separate_not_guessed_as_five_categories():
+    """multi 明确记录未支持，不变成未知类别、五类问题或伪造的多个分项 QA。"""
+    rows = [schema_row("multi-stub", category="multi"), schema_row("unknown-stub", category="other")]
+    groups, rejected = tool.qa_rows(rows)
+    assert groups == {}
+    assert rejected == {"multi_evidence_unsupported": 1, "unknown_evidence_source": 1}
+    inventory = tool.source_qa_inventory(rows)
+    assert inventory["raw_evidence_source_counts"]["multi"] == 1
+    assert inventory["multi_policy"] == "reported_separately_not_mapped_not_selected"
+
+
+def test_six_domains_report_zero_newspaper_without_manufacturing_qa():
+    """用户选择六领域时不要求虚构 Newspaper，仍明确记录源零 QA、排除及未覆盖。"""
+    requested = tool.DOMAINS - {"newspaper"}
+    pool = [item for item in metadata_pool() if item["domain"] in requested]
+    extra_rows, _ = tool.qa_rows([schema_row("extra-text", "finance/extra_schema", "text")])
+    pool.append({"doc_name": "finance/extra_schema", "domain": "finance",
+                 "zip_member": "root/finance/extra_schema.pdf", "size_bytes": 128,
+                 "crc32": 123, "qas": extra_rows["finance/extra_schema"]})
+    raw_rows = [row["original"] for item in pool for row in item["qas"]]
+    raw_rows.append(schema_row("multi-stub", category="multi"))
+    inventory = tool.source_qa_inventory(raw_rows)
+    selected, failures, inspection = tool.select_documents(pool, None, tool.Limits(),
+        inspector=metadata_inspector, reader=marker_reader)
+    source = {"qa_sha256": "a" * 64}
+    plan, report, refs = tool.build_artifacts(selected, source, tool.Limits(), requested,
+        len(pool), failures, {"multi_evidence_unsupported": 1}, inspection, qa_inventory=inventory)
+    assert len(plan["documents"]) == 7 and plan["gaps"]["domain_shortfall"] == 0
+    assert inventory["raw_domain_counts"]["newspaper"] == 0
+    assert report["domain_coverage"]["source_domains_without_qa"] == ["newspaper"]
+    assert report["domain_coverage"]["excluded_by_user"] == ["newspaper"]
+    assert "newspaper" in report["domain_coverage"]["not_selected"]
+    assert plan["sources"] == source  # 统计不改旧来源摘要契约。
+    references = [json.loads(line) for line in refs.splitlines()]
+    assert all(row["doc_type"] != "newspaper" for row in references)
+    text = next(row for row in references if row["evidence_source"] == "text")
+    assert text["_ohr_reference"]["category"] == "plain_text"
+
+
+def test_default_seven_domains_still_reports_domain_shortfall():
+    """使用完整来源摘要 Stub 验证七领域目标；缺 Newspaper 仍记缺口，不改变用户范围。"""
+    pool = [item for item in metadata_pool() if item["domain"] != "newspaper"]
+    selected, failures, inspection = tool.select_documents(pool, None, tool.Limits(count=6),
+        inspector=metadata_inspector, reader=marker_reader)
+    # 七份目标仍要求尽量覆盖七领域；这里仅构造元数据，不生成或补齐源文件。
+    # 选中 QA 的来源链必需此字段；占位摘要仅用于 Mock，不代表真实官方文件。
+    source = {"qa_sha256": "a" * 64}
+    _, report, references = tool.build_artifacts(selected, source, tool.Limits(count=7), tool.DOMAINS,
+        len(pool), failures, {}, inspection)
+    assert report["gaps"]["domain_shortfall"] == 1
+    assert tool.has_gaps(report["gaps"])
+    assert all(row["_ohr_reference"]["source_qa_sha256"] == source["qa_sha256"]
+               for row in (json.loads(line) for line in references.splitlines()))
+
+
+def test_cli_can_choose_six_domains_and_run03_without_touching_old_plan(monkeypatch):
+    """新命令明确选择六领域和 run-03；Stub 校验只传递参数，不运行预览或读取 PDF。"""
+    seen = {}
+
+    def preview_stub(qa_path, zip_path, results, limits, domains):
+        """捕获运行参数，不创建目录、报告或真实文档样本。"""
+        seen.update(results=results, domains=domains)
+        return {"candidates_count": 0, "selected_count": 0, "gaps": {"document_count_shortfall": 7}}
+
+    monkeypatch.setattr(tool, "preview", preview_stub)
+    from types import SimpleNamespace
+    from app.core import config
+
+    def settings_stub():
+        """只提供上传大小保护，不读取用户配置或连接业务服务。"""
+        return SimpleNamespace(max_upload_size_mb=50)
+
+    monkeypatch.setattr(config, "get_settings", settings_stub)
+    requested = sorted(tool.DOMAINS - {"newspaper"})
+    assert tool.main(["--confirm-official-source", "--domains", *requested,
+        "--results-dir", "docs/test/ohr_bench_preset/results/run-03"]) == 2
+    assert seen["domains"] == set(requested) and seen["results"].name == "run-03"

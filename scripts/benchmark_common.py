@@ -33,6 +33,7 @@ ERRORS = {
 INPUT_NAMES = {
     "dataset_info.json": "官方 HF 元数据（dataset_info.json）",
     "hosted_files.json": "官方托管文件目录（hosted_files.json）",
+    "hosted_files.structured.json": "重新取得的官方对象树（hosted_files.structured.json）",
     "source_review.json": "用户来源/许可审核（source_review.json，可先手动填写空数组 []）",
     "ocb_qna_data.parquet": "官方问答数据（ocb_qna_data.parquet）",
     "ocb_file_sources.parquet": "官方外部来源目录（ocb_file_sources.parquet）",
@@ -41,17 +42,28 @@ INPUT_NAMES = {
 }
 INPUT_LABELS = {dataset + ":" + name: dataset + " / " + label
                 for dataset in REPOS for name, label in INPUT_NAMES.items()}
+STAGES = {
+    "json_read": "JSON 文件读取", "json_utf8": "UTF-8 解码", "json_syntax": "JSON 语法",
+    "json_strict": "JSON 严格编码（有限浮点数及 Unicode）",
+    "source_identity": "source_record 仓库/版本", "source_hash": "source_record 输入摘要",
+    "source_card": "source_record cardData 类型", "hosted_tree": "托管文件树对象结构",
+    "review_schema": "人工审核表结构", "qa_read": "QA 文件读取",
+    "parquet_decode": "Parquet 解码", "qa_rows_schema": "QA 行结构",
+    "qa_strict": "QA 严格编码", "qa_track": "QA Track 分类",
+}
 
 
 class BenchmarkError(ValueError):
     """终端只展示固定错误，不泄露正文、答案、本机路径或底层异常。"""
 
-    def __init__(self, code, *, input_id=None):
-        """保存有限错误类别；输入提示只使用白名单技术名称，不泄露任意文件名或绝对路径。"""
+    def __init__(self, code, *, input_id=None, stage=None):
+        """保存白名单错误/输入/步骤；不把正文、任意路径或底层异常作为排查提示。"""
         self.code = code if code in ERRORS else "IO"
         self.input_id = input_id if input_id in INPUT_LABELS else None
+        self.stage = stage if stage in STAGES else None
         label = f"；输入项：{INPUT_LABELS[self.input_id]}" if self.input_id is not None else ""
-        super().__init__(f"BENCH_{self.code}：{ERRORS[self.code]}{label}")
+        step = f"；步骤：{self.stage}（{STAGES[self.stage]}）" if self.stage is not None else ""
+        super().__init__(f"BENCH_{self.code}：{ERRORS[self.code]}{label}{step}")
 
 
 def read_bytes(path, limit=96 * MIB, beneath=None):
@@ -81,20 +93,33 @@ def read_bytes(path, limit=96 * MIB, beneath=None):
 
 
 def json_file(path, beneath=None):
-    """严格读取有限 JSON，禁止 NaN；原始数据仅保存在本地参考文件。"""
+    """严格读取有限 JSON，分开标识读取/UTF-8/语法/严格编码失败，不清洗原始数据。"""
     try:
-        value = json.loads(read_bytes(path, beneath=beneath).decode("utf-8-sig"))
+        data = read_bytes(path, beneath=beneath)
+    except BenchmarkError as exc:
+        raise BenchmarkError(exc.code, input_id=exc.input_id, stage="json_read") from None
+    try:
+        decoded = data.decode("utf-8-sig")
+    except UnicodeError:
+        raise BenchmarkError("SCHEMA", stage="json_utf8") from None
+    try:
+        value = json.loads(decoded)
+    except ValueError:
+        raise BenchmarkError("SCHEMA", stage="json_syntax") from None
+    try:
         ohr.encoded(value)
-        return value
-    except BenchmarkError:
-        raise
     except (ValueError, UnicodeError):
-        raise BenchmarkError("SCHEMA") from None
+        raise BenchmarkError("SCHEMA", stage="json_strict") from None
+    return value
 
 
 def rows_file(path):
-    """支持官方 JSON/NDJSON 和惰性 PyArrow Parquet，不自动安装或联网。"""
-    data = read_bytes(path)
+    """读取官方 JSON/NDJSON/Parquet，区分行结构和严格编码失败，不替换 NaN 或丢字段。"""
+    try:
+        data = read_bytes(path)
+    except BenchmarkError as exc:
+        raise BenchmarkError(exc.code, stage="qa_read") from None
+    stage = "parquet_decode" if Path(path).suffix.lower() == ".parquet" else "json_syntax"
     try:
         if Path(path).suffix.lower() == ".parquet":
             try:
@@ -110,14 +135,16 @@ def rows_file(path):
             rows = [json.loads(line) for line in data.decode("utf-8-sig").splitlines() if line.strip()]
         else:
             rows = json.loads(data.decode("utf-8-sig"))
+        stage = "qa_rows_schema"
         if not isinstance(rows, list) or not 0 < len(rows) <= 100000 or not all(isinstance(row, dict) for row in rows):
-            raise BenchmarkError("SCHEMA")
+            raise BenchmarkError("SCHEMA", stage=stage)
+        stage = "qa_strict"
         ohr.encoded(rows)
         return rows
     except BenchmarkError:
         raise
     except (ValueError, UnicodeError):
-        raise BenchmarkError("SCHEMA") from None
+        raise BenchmarkError("SCHEMA", stage=stage) from None
 
 
 def source_record(root, dataset, metadata_names):
@@ -125,20 +152,20 @@ def source_record(root, dataset, metadata_names):
     try:
         info = json_file(root / "dataset_info.json", beneath=root)
     except BenchmarkError as exc:
-        raise BenchmarkError(exc.code, input_id=dataset + ":dataset_info.json") from None
-    if (info.get("id") != REPOS[dataset] or not isinstance(info.get("sha"), str)
+        raise BenchmarkError(exc.code, input_id=dataset + ":dataset_info.json", stage=exc.stage) from None
+    if (not isinstance(info, dict) or info.get("id") != REPOS[dataset] or not isinstance(info.get("sha"), str)
             or re.fullmatch(r"[0-9a-f]{40}", info["sha"]) is None):
-        raise BenchmarkError("SOURCE")
+        raise BenchmarkError("SOURCE", input_id=dataset + ":dataset_info.json", stage="source_identity")
     fingerprints = {}
     for name in ["dataset_info.json", *metadata_names]:
         ohr.safe_name(name)
         try:
             fingerprints[name] = hashlib.sha256(read_bytes(root / name, beneath=root)).hexdigest()
         except BenchmarkError as exc:
-            raise BenchmarkError(exc.code, input_id=dataset + ":" + name) from None
+            raise BenchmarkError(exc.code, input_id=dataset + ":" + name, stage="source_hash") from None
     card = info.get("cardData") or {}
     if not isinstance(card, dict):
-        raise BenchmarkError("SCHEMA")
+        raise BenchmarkError("SCHEMA", input_id=dataset + ":dataset_info.json", stage="source_card")
     return {"repo": REPOS[dataset], "revision": info["sha"], "metadata_sha256": fingerprints,
             "license_metadata": card.get("license"),
             "official_url": "https://huggingface.co/datasets/" + REPOS[dataset],
@@ -288,19 +315,27 @@ def cli(dataset):
     return parser
 
 
-def run(dataset, prepare, argv=None):
-    """只打印数量/安全错误；不输出问题、答案、路径或完整 JSON 日志。"""
+def run(dataset, prepare, argv=None, *, diagnose=None):
+    """只打印数量/安全步骤；OCB 诊断模式不生成报告、不读取文档原件或联网。"""
     parser = cli(dataset)
     if dataset == "ocb":
         parser.add_argument("--qa-file", default="ocb_qna_data.parquet")
         parser.add_argument("--schema", choices=["hf", "ndjson"], default="hf")
         parser.add_argument("--per-format", type=int, choices=[1, 2], default=2)
+        parser.add_argument("--hosted-file", choices=["hosted_files.json", "hosted_files.structured.json"],
+                            default="hosted_files.json")
+        parser.add_argument("--diagnose-inputs", action="store_true", help="只读定位输入步骤，不生成计划或解析文档")
     else:
         parser.add_argument("--count", type=int, choices=[4, 5, 6], default=5)
     args = parser.parse_args(argv)
     try:
         if not args.confirm_official_source or not 1 <= args.max_mb <= 20:
             raise BenchmarkError("PERMISSION")
+        if getattr(args, "diagnose_inputs", False):
+            if args.extract or diagnose is None:
+                raise BenchmarkError("PERMISSION")
+            diagnose(args)
+            return 0
         if args.extract:
             if not args.confirm_local_use:
                 raise BenchmarkError("PERMISSION")

@@ -141,6 +141,12 @@ QA、GT、报告、备份都不放进 preset，避免严格 manifest 校验把�
 
 默认 count=7（可选 6/7/8）、seed=42；按稳定身份排序并用 SHA256(seed,ID) 打破平局，不依赖进程随机 Hash、QA 数组或 ZIP 目录顺序。优先补齐 Plain Text/Table/Formula/Chart/Reading Order、为每类保留多个官方问题及新领域，再偏好较小页数下界/文件；领域范围为 Finance、Academic、Textbook、Law、Manual、Newspaper、Administration。每份至少有一条页码有效的 QA，默认每份每类最多保留三条；缺失类别、每类不足两条、数量/领域不足均列入 gaps。贪心策略不保证预算内全局最优，也不保证实际数据一定满足目标。
 
+用户对当前真实 QA 的统计为 text=3409、table=2275、formula=1223、chart=765、reading_order=691、multi=135；Newspaper=0。代码**不硬编码这些数量**，每次从原始 QA 统计 `source_qa_inventory.raw_evidence_source_counts/raw_domain_counts`。仅将官方 text 映射为内部 plain_text；qa_reference 中原 evidence_source/ID/问题/答案/页码均不改，归一类别只进入 _ohr_reference.category。已有 plain_text 兼容保留。
+
+multi 识别为 `multi_evidence_unsupported`，在源计数和拒绝计数单列，不映射为任一五类、不拆成虚构的多个问题，第一版不进入五类抽样参考。未知类别仍单独报告 unknown_evidence_source，不混为 multi。计数发生在结构筛选前，不代表全部行已可用于抽样或质量验收。
+
+默认七领域目标不自动降低；缺 Newspaper 仍有真实领域缺口。用户可显式 --domains 选择实际六领域，count=7 仍要求七份独立 PDF，并非七个领域各造一份。`domain_coverage` 分别保存 requested/selected/excluded_by_user/not_selected/source_domains_without_qa，即使不请求 Newspaper 也记录其源零 QA、未选中。新统计只进入新计划/报告，旧来源摘要契约及已冻结计划保持不变。
+
 默认单 PDF ≤20 MiB/50 页、选中累计 ≤200 页、检查最多 64 个候选/256 MiB；大小还取当前 MAX_UPLOAD_SIZE_MB 和平台 200 MiB 的更小值。预览先只读中央目录/QA；为核对 SHA/CRC/实际页数，**少量候选完整字节会在受限内存中读取**，不落地 PDF、不提取正文或渲染、不解压整个 ZIP。拒绝加密、被修复/损坏、空页树、异常几何、超限和相同 SHA，不拆页/复制/改名凑数量。页树检查不是全面恶意文件或所有字体/内容对象检测。
 
 每份 QA 的证据索引必须在原 PDF 的真实页范围内；不合法 QA 不进入参考集。QA 分类仅用于选样，Plain Text 不能自动等价 text_pdf，Table/Formula/Chart/Reading Order 不能证明表格/公式/图表/多栏已正确解析。text_pdf、scan_pdf、mixed 及真实多栏布局必须由用户目视确认；无法满足时报告缺口，不填造。
@@ -154,27 +160,18 @@ python -m pip install "pymupdf>=1.24.3"
 
 ### 1. 手动下载官方输入
 
-在项目根目录，先核对版权及本地研究用途；以下命令拒绝覆盖已存在的下载文件。下载中断可能留下不完整文件，需用户核对，不让工具盲目重新下载或覆盖。
+使用下节 [统一下载工具](#统一下载工具用户执行)，不再手工创建目录或运行 curl。用户确认本地研究许可后，在项目环境执行：
 
 ```powershell
-$ohrSource = ".\docs\test\ohr_bench_preset\source"
-New-Item -ItemType Directory -Path $ohrSource -Force | Out-Null
-if ((Test-Path "$ohrSource\pdfs.zip") -or (Test-Path "$ohrSource\qas_v2.json")) {
-    throw "源文件已经存在，请先核对来源/完整性，不覆盖原文件。"
-}
-curl.exe --fail --location --output "$ohrSource\pdfs.zip" "https://huggingface.co/datasets/opendatalab/OHR-Bench/resolve/main/pdfs.zip?download=true"
-if ($LASTEXITCODE -ne 0) { throw "PDF ZIP 下载未完成，请人工核对。" }
-curl.exe --fail --location --output "$ohrSource\qas_v2.json" "https://raw.githubusercontent.com/opendatalab/OHR-Bench/main/data/qas_v2.json"
-if ($LASTEXITCODE -ne 0) { throw "QA 下载未完成，请人工核对。" }
-
-# 可选完整原始文件 Hash 留档；读取整个 ZIP 可能需要较长时间。
-"ZIP_SHA256=" + (Get-FileHash "$ohrSource\pdfs.zip" -Algorithm SHA256).Hash
-"QA_SHA256=" + (Get-FileHash "$ohrSource\qas_v2.json" -Algorithm SHA256).Hash
+python scripts/download_benchmarks.py --dataset ohr --scope required
+python scripts/download_benchmarks.py --dataset ohr --scope required --verify-only
 ```
 
-据当前官方文件列表，pdfs.zip 约 **1.52 GB**，GitHub QA 约 **5.81 MB**；这不是 6～8 份 PDF 的下载大小，而是完整原始压缩包。按网速预留下载时间，建议至少 2 GB 可用磁盘，加上已选 PDF/后续缓存与向量的额外空间。默认提取至多约 160 MiB，预览逐个读取候选；提取整批验证需保留多个内存缓冲，预留约数百 MiB 及 PyMuPDF 自身开销，不保证原生库峰值严格等于字节预算。目标/报告发布要求本地 NTFS 等支持硬链接，网络盘或不支持的文件系统安全报错，不改系统设置。
+首次创建 source/，自动冻结 HF revision 和官方 GitHub QA commit；pdfs.zip 与 qas_v2.json 原字节不改、不整体解压。OHR QA 与 PDF 来自两个独立版本，下载器记录而不伪造两者一致性；后续准备仍实际检查文档/QA/页码匹配。
 
-可选参考 [OHR-Bench_v2.parquet](https://huggingface.co/datasets/opendatalab/OHR-Bench/blob/main/OHR-Bench_v2.parquet)（当前约 160 MB）或 [官方 GT 契约](https://github.com/opendatalab/OHR-Bench#dataset-preparation)。不属于工具必需输入，本轮不下载、不增加读取依赖；用户若另行下载，留在 source/受控参考目录，不放入 preset。
+预计 ZIP 约 **1.52 GB**、QA 约 **5.81 MB**，实际以固定来源元数据为准。至少留 2 GB 下载空间，再加抽样原件/缓存/向量；下载器逐文件检查剩余空间且流式写盘，不另建 HF 全量缓存。只读验证需完整读取 ZIP 计算摘要，可能耗时。默认提取至多约 160 MiB；提取验证及 PyMuPDF 仍需数百 MiB 内存余量。正式发布要求本地 NTFS 等支持硬链接，失败不降级覆盖式 rename，不改系统设置。
+
+可选 [OHR-Bench_v2.parquet](https://huggingface.co/datasets/opendatalab/OHR-Bench/blob/main/OHR-Bench_v2.parquet) 或官方 GT 不在 required 下载范围，用户另行准备时留在 source，不放 preset。
 
 ### 2. 离线预览与人工审核
 
@@ -198,6 +195,15 @@ $ohrReport.rejected_candidates | Format-Table doc_name,reason
 ```powershell
 python scripts/prepare_ohr_bench_preset.py --confirm-official-source --count 6 --seed 42 --results-dir "docs/test/ohr_bench_preset/results/run-02"
 ```
+
+此次兼容修复后，用实际六领域在 run-03 中生成**新**计划；不要重新写入已有根目录/run-01/run-02 报告。以下仅由用户运行，包含少量 PDF 结构检查，不是 Codex 的执行授权：
+
+```powershell
+python scripts/prepare_ohr_bench_preset.py --confirm-official-source --domains finance academic textbook law manual administration --results-dir docs/test/ohr_bench_preset/results/run-03
+Get-Content docs/test/ohr_bench_preset/results/run-03/selection_report.json -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object gaps,source_qa_inventory,domain_coverage
+```
+
+退出 0 只说明请求范围的抽样结构目标满足，退出 2 为已生成报告但仍有真实缺口；两者均不代表解析或数据验收通过。run-03 已存在会拒绝覆盖，不自动清理、改名或重新提取。
 
 结果目录只允许固定 results 或其子目录，已有报告一律不覆盖。**不要编辑冻结 selection_plan/qa_reference 来伪造校验**；候选 manifest 条目可复制出来人工补标签，不改原计划。所有未知 QA 类别和拒绝数量均需核对，不能误当成覆盖已通过。
 
@@ -263,7 +269,7 @@ python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800 -
 
 ## 三个公开基准的解析质量验收（用户执行）
 
-本轮仅使用 **OHR-Bench、Microsoft OCB、OmniDocBench**，不引入第四个公开基准。已有 OHR 脚本、默认 7 份抽样、导入业务、数据库、Celery 和 Embedding 均不改变。新增脚本只离线准备/比较；所有下载、预览、提取、评测、测试和导入均由用户手动执行。Codex 本轮没有运行它们，也没有生成真实样本。
+本轮仅使用 **OHR-Bench、Microsoft OCB、OmniDocBench**，不引入第四个公开基准。已有 OHR 脚本、默认 7 份抽样、导入业务、数据库、Celery 和 Embedding 均不改变。准备/比较脚本保持离线，只有统一下载器可以联网；所有下载、预览、提取、评测、测试和导入均由用户手动执行。Codex 本轮没有运行它们，也没有生成真实样本。
 
 ### 来源、用途与真实缺口
 
@@ -362,95 +368,301 @@ OCB 按 File Fidelity、缺口格式、feature、文件体积及 seed=42 确定�
 
 报告不覆盖：已存在目标/结果即停止；重新预览用 `--results-dir .../results/run-02`。来源元数据、版本、GT/SHA/计划均冻结；提取前全部复核，变更即拒绝，不手改冻结计划。仅显式提取复制真实原件；链接/Junction、越界、压缩包非法成员、重复身份/同 SHA、安全预算均拒绝。复制使用现有 OHR 的独占发布，不改该脚本；磁盘失败可能已发布少数完整文件，需用户核对，不自动删除/改名。
 
-### Windows 手动下载、预览及提取
+### 统一下载工具（用户执行）
 
-以下命令在项目根目录、用户确认本地研究使用许可后执行。先核对解释器；读取官方 Parquet 可选 PyArrow、图像结构检查使用 Pillow，仅缺少时用户安装，不升级全环境。已有官方 NDJSON 则不需要 PyArrow（外部 manifest Parquet 除外）：
+`scripts/download_benchmarks.py` 是唯一正式联网入口；三个 prepare 工具及质量对照仍离线。Codex 只编写代码、Mock 用例和说明，**没有运行下载器、请求真实数据、安装依赖或执行测试**。
+
+#### 环境与逐条命令
+
+全新环境先按 README 创建 dkf-agent；已有环境不重建。独立 Windows PowerShell 中执行，确认解释器/pip 一致，仅补缺少的包：
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+python --version
+python -m pip --version
+python -m pip show httpx pyarrow Pillow
+# 以下三行仅缺哪个才运行哪个，不整体升级。
+python -m pip install httpx
+python -m pip install pyarrow
+python -m pip install Pillow
+python -m pip check
+
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+python scripts/download_benchmarks.py --help
+python scripts/download_benchmarks.py --dataset ohr --scope required
+python scripts/download_benchmarks.py --dataset ocb --scope metadata
+python scripts/download_benchmarks.py --dataset omni --scope metadata
+python scripts/download_benchmarks.py --dataset omni --scope candidate-images --count 5
+# 人工查看候选依赖和 NOTICES、编辑 source_review.json 后才执行：
+python scripts/download_benchmarks.py --dataset ocb --scope reviewed
+```
+
+httpx 已在 environment.yml 声明，本轮不增加依赖声明。PyArrow 是现有 Parquet 离线工具的可选读取依赖，下载器验证/QA 预览需要它；Pillow 验证图像。不要安装 datasets/pandas、官方 RAG/评测模型或 Office 转换器。HF_ENDPOINT 仅是当前终端传输设置，脚本不读取应用 .env、不改变部署环境。
+
+首次运行以 `Path(__file__).resolve().parents[1]` 找项目根，用 `mkdir(parents=True, exist_ok=True)` 创建所需 source/及 reference_files/、images/。不会预先建立空的正式目标，OCB 缺少审核文件时只独占初始化 `[]` 并提示“尚未审核”；已有审核/报告/素材不改。用户从其他工作目录执行时使用下载脚本绝对路径，数据仍写回同一个项目，不随当前目录漂移。
+
+下载前无需创建任何数据目录；用户运行后布局如下（按 scope 才产生对应文件）：
+
+```text
+docs/test/
+├── ohr_bench_preset/source/
+│   ├── dataset_info.json
+│   ├── pdfs.zip
+│   └── qas_v2.json
+├── ocb_preset/source/
+│   ├── dataset_info.json
+│   ├── hosted_files.json
+│   ├── ocb_qna_data.parquet
+│   ├── ocb_file_sources.parquet
+│   ├── source_review.json           # 默认 []，用户审核后编辑
+│   └── reference_files/<真实官方路径>
+└── omnidocbench_preset/source/
+    ├── dataset_info.json
+    ├── OmniDocBench.json
+    └── images/<真实标注路径>
+```
+
+每个 source/另有本工具私有 `.download/`：完整固定 Tree、逐文件 spec/大小/SHA 回执、GitHub QA 版本；OCB 的 `ocb_candidates.json`、Omni 的 `omni_candidates.json` 是**下载候选诊断**，不替代 results/的正式 selection_plan/report/qa_reference。中断使用目标旁的 .part；运行中有 .download.lock，正常退出删除本进程锁。异常断电遗留锁须人工确认无进程后处理，工具不删其他进程锁。所有真实输入/私有状态/报告均在已忽略的 docs/test；本轮没有创建这些运行目录。
+
+#### 参数与下载范围
+
+| 参数 | 含义 / 默认 |
+|---|---|
+| --dataset | 必选 ohr / ocb / omni |
+| --scope | OHR: required；OCB: metadata / reviewed / hosted-tree / native-library；Omni: metadata / candidate-images / all-images |
+| --hosted-file | 仅 OCB，canonical hosted_files.json 或独立副本 hosted_files.structured.json；hosted-tree 默认副本，其他模式默认 canonical |
+| --replace-hosted-tree | 仅 OCB hosted-tree 的普通运行：校验新树后备份旧字符串表并原子替换 canonical；不允许与 dry-run/verify-only/list-missing 或 canonical hosted-file 参数组合 |
+| --endpoint | 只允许 https://hf-mirror.com 或 https://huggingface.co；显式参数 > HF_ENDPOINT > 国内镜像 |
+| --revision | 可选实际 40 位 HF commit SHA，不接收 main 或空字符串；缺省首次自动解析，以后固定复用 |
+| --count | Omni 候选图像 4～12，默认 5；不等于最终抽样数 |
+| --seed | 稳定候选种子，默认 42 |
+| --retries | 暂时错误额外重试 0～5 次，默认 3 |
+| --timeout | 每次读取超时 10～300 秒，默认 60；连接固定 10 秒 |
+| --dry-run | 普通范围联网列元数据、不写目录/原件；native-library 离线生成完整计划/许可模板/自有报告，不下载原件 |
+| --list-missing | 离线列当前 scope 缺失项；有缺口退出 2；不作完整性保证 |
+| --verify-only | 离线对当前 scope 全部正式输入做大小/摘要/实际格式验证，缺失/坏文件失败 |
+| --help | 只显示参数，不联网 |
+
+OHR required 先冻结/取得 GitHub QA，再下载 HF 原 ZIP；不取扰动 OCR、Parquet 或额外模型。OCB metadata 只取 Dataset API 原始 JSON、完整 Tree 对象及两个小 Parquet。官方 `data/ocb_source_urls.parquet` 原字节保存为本地 `ocb_file_sources.parquet`，兼容现有工具；不会请求旧错误来源名。OCB 全仓约 3 GB，此模式通常只需约 0.5 MB QA、31 KB 来源表及元数据，实际大小以固定文件树为准。
+
+OCB metadata 后输出**实际** track/后缀分布，完整 QA 依赖及拒绝行保存在 .download/ocb_candidates.json，不输出问题/答案。按用户已确认的官方分类，qa_record 显式接受 File Fidelity Excel、File Fidelity PowerPoint、File Fidelity Word，并兼容旧通用 File Fidelity/FileFidelity/file_fidelity；原始 track/QA/多文件依赖不变。分类先于 File Fidelity 字段校验，Domain 即使用不同字段也明确排除为 qa_track，而不是误报已支持分类的结构错误；未知 schema 不猜作 NDJSON。原始 Parquet 仅读取，未知原始字段也保留在 reference.original，不清洗/重写。Domain 和未知类似名字仍拒绝，不用 startswith 或文件后缀推断分类。用户当前统计为 Domain=120、Excel=277、PowerPoint=238、Word=383；程序实际统计而非硬编码数量，不将 Domain 当选样候选。
+
+#### OCB 兼容诊断：保留正常 dataset_info，仅重新获取对象树
+
+用户已独立确认 dataset_info 的 id/sha/cardData/严格 JSON 均正常、非有限值数为 0，最新 source_record 已通过，本轮不修改或重新下载它。source_record 仅读取该 JSON、检查仓库/版本/cardData 并对列出的输入做 Hash，**不验证 hosted_files 的对象结构，也不读取 Parquet 行**。当前明确故障是 hosted_files.json 的 113 条字符串不符合对象契约，不能继续归因于 cardData、NaN 或 Unicode；条数是用户观测，不硬编码。历史笼统错误没有堆栈不能可靠追溯；诊断通过实际失败步骤定位，不虚构原因。
+
+| 步骤标识 | 表示 | 处理边界 |
+|---|---|---|
+| json_read / json_utf8 / json_syntax / json_strict | 指定 JSON 读取、UTF-8、语法或严格编码失败 | 原数据不清洗；不把 NaN/Infinity 转 null，不自动修复 Unicode |
+| source_identity / source_hash / source_card | source_record 内的身份、输入摘要或 cardData 类型 | 标识白名单输入项；正常元数据不重写 |
+| review_schema | 审核 JSON 结构失败 | 不覆盖或批准人工审核 |
+| hosted_tree | 字符串列表、缺大小/OID、无效 LFS、重复对象 | 拒绝伪造补字段，从官方固定 SHA 取新完整树 |
+| qa_read / parquet_decode / qa_rows_schema / qa_strict / qa_track | QA 输入/解码、行结构、严格编码或分类 | 与 dataset_info 区分；原始 QA/Track 不改 |
+
+`--diagnose-inputs` 只读显示 source_record/审核表/文件树/QA 成功步骤及失败标识，不生成报告、不读取 Office/PDF 原件、不联网。source_record=OK 后报 hosted_tree 表示后续对象树失败；旧程序的笼统错误不再混为同一步。
+
+原 hosted_files.json 为字符串时，不将路径包装成缺字段的伪对象。用户手动执行以下最短恢复流程，使用已验证 dataset_info.sha，无需复制 SHA 或重下 Parquet；仅显式 --replace-hosted-tree 授权校验后备份、替换该表：
 
 ```powershell
 conda activate dkf-agent
-python -c "import sys; print(sys.version); print(sys.executable)"
-python -m pip show pyarrow Pillow
-# 仅确实缺少时由用户手动安装；本轮 Codex 不执行，也不改 environment.yml。
-python -m pip install pyarrow
-python -m pip install Pillow
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+python scripts/download_benchmarks.py --dataset ocb --scope hosted-tree --replace-hosted-tree
+python scripts/prepare_ocb_preset.py --confirm-official-source --diagnose-inputs
+python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42 --results-dir docs/test/ocb_preset/results/run-04
 ```
 
-用户可定义一次安全下载辅助函数（以下函数由用户执行，不属于工具联网能力）：
+hosted-tree 只取得同 SHA 的完整 HF API Tree，保留 type/path/size/oid/lfs（官方文件确有 LFS 时）及未知原字段；新增 source/hosted_files.structured.json 和独立 .download/ocb-structured-tree.json。所有分页 Link 必须继续指向同仓库/同 SHA Tree API，官方 next Link 的 API 传输仍走已选镜像；重复页/路径、第二页失败等不发布半份树。完整仓库树保存在私有缓存，正式 hosted_files 只保留 reference_files/ 下的原对象，不取 siblings/SDK 字符串列表替代。私有缓存记录实际 page_count/每页条数/had_next/complete，不保存分页游标/签名链接；验证分页数量、条数总和、终页、版本、树 Hash 及实际对象字段后才发布副本。已有副本无效/不一致也拒绝覆盖。缺少正常 dataset_info 时停止，不自行重新获取它。
+
+显式替换还要求副本与同 SHA 的已验证树完全一致。旧字符串表原字节按 SHA256 独占保存至 source/.download/backups/hosted_files-<完整SHA256>.json，校验备份后才在同目录写完整临时文件、再次校验并用原子 replace 切换 canonical；从不先删目标。备份冲突、输入在操作期间变化或替换失败均安全停止，旧原字节和已验证副本保留；不要在运行时并发手工编辑 source。只有旧字符串列表允许修复，其他不一致的正式对象表仍拒绝覆盖；已经一致时幂等跳过。不会改 dataset_info、旧树缓存、审核、Parquet 或抽样报告。正常下载随后复用新完整缓存，不再读旧字符串缓存。
+
+如果暂不愿替换 canonical，可不带替换参数仅取副本，后续 metadata/reviewed/prepare 使用 --hosted-file hosted_files.structured.json。新副本是正式对象数组，不是下载候选报告。用户也可在显式替换前先离线核验副本：
 
 ```powershell
-function Get-BenchmarkFile {
-    # 只下载用户指定的公开来源，不覆盖既有原始文件；中断后由用户核对残留。
-    param([string]$Url, [string]$Target)
-    if (Test-Path -LiteralPath $Target) { throw "目标已存在，拒绝覆盖。" }
-    New-Item -ItemType Directory -Path (Split-Path $Target -Parent) -Force | Out-Null
-    curl.exe --fail --location --output $Target $Url
-    if ($LASTEXITCODE -ne 0) { throw "下载未完成，人工核对文件后再决定下一步。" }
-}
-
-$ocbSource = ".\docs\test\ocb_preset\source"
-Get-BenchmarkFile "https://huggingface.co/api/datasets/microsoft/OfficeComprehensionBenchmark" "$ocbSource\dataset_info.json"
-$ocbRevision = (Get-Content "$ocbSource\dataset_info.json" -Raw -Encoding UTF8 | ConvertFrom-Json).sha
-Get-BenchmarkFile "https://huggingface.co/datasets/microsoft/OfficeComprehensionBenchmark/resolve/$ocbRevision/data/ocb_qna_data.parquet" "$ocbSource\ocb_qna_data.parquet"
-Get-BenchmarkFile "https://huggingface.co/datasets/microsoft/OfficeComprehensionBenchmark/resolve/$ocbRevision/data/ocb_file_sources.parquet" "$ocbSource\ocb_file_sources.parquet"
-Get-BenchmarkFile "https://huggingface.co/api/datasets/microsoft/OfficeComprehensionBenchmark/tree/$ocbRevision/reference_files?recursive=true&limit=1000" "$ocbSource\hosted_files.json"
-# 人工核对 API 响应 Link 分页头；若还有 next，按官方 API 完整取得所有页再合并，不能忽略后续页。
+python scripts/download_benchmarks.py --dataset ocb --scope hosted-tree
+python scripts/download_benchmarks.py --dataset ocb --scope hosted-tree --verify-only
 ```
 
-按官方 QA 查 File Fidelity 参考文件（只显示字段，不解析文档）：
+run-04 必须是尚未使用的新目录；存在则人工选择新编号，不清理旧报告。新的对象树改变了 canonical 输入 Hash，因此基于旧表冻结的计划不应继续提取，也不得手改计划 Hash；保留旧计划作为历史记录，用新目录重新预览。使用 structured 副本冻结的有效计划仍通过其实际文件名复核。已有人工审核记录不变，用户自行审核新报告的 gaps/candidate_inventory；未取得原件或许可时缺口继续保留。
 
-```powershell
-python -c "import pyarrow.parquet as pq; rows=pq.read_table('docs/test/ocb_preset/source/ocb_qna_data.parquet').to_pylist(); print([(r['reference_files'],r['track'],r['feature']) for r in rows if str(r['track']).lower().replace(' ','').replace('_','')=='filefidelity'])"
+预期诊断显示 source_record=OK、hosted_tree=OK、qa_read=OK，并报告实际四类 Track 数量；Domain 不进入抽样候选。若后续 QA 严格编码失败，错误必须指向 ocb_qna_data.parquet/qa_strict，而非重下 dataset_info。空审核表允许诊断/缺口预览，不代表可以下载 reviewed 原件，也不代表三类 Office 已准备齐全。镜像固定 Tree/Link 的真实兼容性及新树内容仍由用户执行确认，本轮未联网验证。
+
+OCB reviewed 只下载许可明确的**托管原生 DOCX/XLSX/PPTX**；source_review.source_url 填对应 **官方 huggingface.co 的固定 SHA resolve 地址**，即使传输走镜像，来源身份仍为官方。当前每个相交 File Fidelity QA 的所有依赖必须同时审核；无 QA 关联、遗漏依赖、超 64 个/256 MiB、单份超 20 MiB 均拒绝整批，不拆 QA 成单文件。外部来源返回 DOWNLOAD_EXTERNAL，用户按官方 manifest 手动取得原生文件到 external_files/后交现有准备器检查；不请求审核表中任意 URL、不自动 PDF/HTML 转换。这可能导致三类 Office 每类两份的缺口，必须如实记录，不能降低验收标准。
+
+#### OCB 全量原生素材库下载（用户执行）
+
+统一入口仍为 scripts/download_benchmarks.py，新增 --scope native-library；配套实现位于 scripts/ocb_native_download.py，没有另建下载 CLI。本模式只建立可重复使用的本地原始素材库，**不替代每类两份的预置抽样，不生成业务 manifest、不复制到 preset、不解析、不导入或评测问答**。Codex 本轮只读检查了目录/JSON 与两个 Parquet 的元数据列，未执行新模式、真实下载、格式校验、测试或 API。
+
+本地检查确认：dataset_info 的 SHA 为 0104ac2f88348ecf1148781b85fdb6a189b59671，hosted_files 当前为 113 个对象，而非旧字符串列表；QA 1018 行，来源表 301 行。来源真实列是 filename/url/original_format/required_format/convert，当前 convert 是字符串 yes/no。运行时仍核对完整分页树、摘要、源 JSON 与 Parquet，不将上述观测数字硬编码到工具。用户提供的单文件 QA 初筛是子集，不代表完整文件库数量。
+
+##### 文件身份与原生筛选
+
+- 读取全部 QA、完整来源表和 HF 树的文件身份并集，包括 Domain、File Fidelity、多文件依赖及没有 QA 的官方素材。reference_files/name 与官方 name 的明确前缀统一后精确匹配，不按 basename/模糊文件名猜匹配；大小写冲突、越界、链接拒绝。
+- 同文件的多条 QA 引用只算一份，保留源 Parquet SHA+QA 行号、原 track 和完整依赖，不输出问题/答案正文，不修改官方 Parquet。
+- 默认 DOCX/XLSX/PPTX，可加 CSV/XLSM。只有 original_format=required_format=实际目标后缀且 convert 为明确 no/false/布尔 false 才是原生候选。空值、不明状态、缺来源或多个冲突 manifest 记录分别列缺口；PDF/HTML/ZIP 转换不下载、不伪装后缀。
+- 同身份同时在 HF 和外部来源出现时优先固定 SHA 的 HF 原件，不重复下载外部替代版本，保留 size/OID/LFS 原对象。HF 托管也不自动证明原生或许可，仍需官方原生记录和人工审核。
+- 第三方必须是官方 manifest 中的精确原始 URL、原生格式且逐文件获许可。只接受无凭据公开 HTTPS；HTTP、登录/密钥链接、未知大小、未审跳转都报缺口，不自动改协议或抓登录态。正常 URL 路径空格交给 HTTP 编码，来源身份保留原值。
+
+##### 模式、参数与目录
+
+| 模式/参数 | 行为 |
+|---|---|
+| 默认 / --dry-run | 离线生成完整计划、许可模板、初始自有状态报告；不建立 HTTP 客户端，不读原件 |
+| --execute | 用户显式下载逐文件已审的原件，未审项列缺口，不代批准 |
+| --allow-external | 仅 execute，额外允许已核对的官方第三方原生来源；否则只下载已审 HF |
+| --resume | 仅 execute，显式继续已有执行报告/断点，范围、版本、来源和预算必须一致 |
+| --verify-only | 离线复核本地文件大小/摘要/容器，更新本工具报告；不联网或修改原件 |
+| --list-missing | 离线核对并输出未取得/无效/阻止项，不把仅存在等同下载完整 |
+| --native-formats | 默认 docx xlsx pptx，可选 csv xlsm；不扩展业务格式契约 |
+| --native-results-dir | 默认 OCB results 根，允许新子目录；相对路径按脚本项目根解释 |
+| --workers | 1～3，默认/上限 3；每原件独立客户端/断点，整个 CLI 持有数据集锁 |
+| --max-file-mb | 默认 200 MiB、允许 1～512；CSV 另受 32 MiB 完整性检查上限 |
+| --max-total-mb | 默认 8192 MiB、最大 102400，并发原子预留本轮容量，外部响应长度取得后计入 |
+| --timeout / --retries | 复用连接 10 秒、默认读 60 秒、额外重试 3 次和有界退避 |
+
+用户首次运行自动建所需目录，不预建空正式原件：
+
+```text
+docs/test/ocb_preset/
+├── source/
+│   ├── dataset_info.json / hosted_files.json      # 已有固定来源，不改
+│   ├── ocb_qna_data.parquet / ocb_file_sources.parquet
+│   ├── source_review.json                       # 只由用户审核编辑
+│   ├── reference_files/                         # HF 原件
+│   ├── external_files/                          # 第三方原生原件
+│   └── .download/                               # 身份/Range/ETag/SHA 回执
+└── results/
+    ├── native_download_plan.json
+    ├── native_download_report.json
+    ├── license_review_candidates.json
+    └── 既有抽样计划/报告                          # 绝不修改
 ```
 
-用户审核 QA/文件/NOTICES 后填写 source_review.json；从实际 HF tree 复制路径，**不要填示例名字**。逐份下载所需原件，保留 reference_files/ 原路径；只接受无 `..`/反斜杠/非法字符的真实 tree 路径。可对用户已审核条目手动下载（外部文件需另行按官方 manifest 核对，不自动转换）：
+计划保存固定源摘要、完整 QA 依赖、官方身份及 HF 已知大小。外部大小默认 null，报告给出 HF 已知字节、外部未知数量、按限制得到的保守上界和执行预算，不把上界当真实总量。仅执行时读第三方 GET 响应头取 Content-Length，不落地探测正文，之后再取得原字节；缺长度或超量不发布。
+
+plan/许可模板独占创建，同参数重复可复用；新范围/预算/来源用新 results 子目录，不覆盖旧计划。dry-run 保留已有运行报告；只有本工具拥有、同 plan_sha256 的 native_download_report 才能更新，保留最多 50 次安全状态/HTTP/Hash 历史，不覆盖其他报告。许可文件与下载报告分离，不因下载成功填批准值。
+
+##### 可复制的 PowerShell 操作
+
+以下全部由用户执行，先确认 Python/pip 属于 dkf-agent，复用已声明 httpx 和现有 PyArrow，本轮没有安装依赖：
 
 ```powershell
-$ocbHosted = Get-Content "$ocbSource\hosted_files.json" -Raw -Encoding UTF8 | ConvertFrom-Json
-$ocbReviews = Get-Content "$ocbSource\source_review.json" -Raw -Encoding UTF8 | ConvertFrom-Json
-foreach ($review in $ocbReviews) {
-    $matches = @($ocbHosted | Where-Object { $_.type -eq 'file' -and $_.path -eq ('reference_files/' + $review.reference_file) })
-    if ($matches.Count -ne 1) { throw "原件不是唯一托管路径，请人工核对外部来源，停止批量下载。" }
-    $relative = $matches[0].path
-    if ($relative -match '\.\.|[:\\]' -or $relative.StartsWith('/')) { throw "路径不安全。" }
-    Get-BenchmarkFile "https://huggingface.co/datasets/microsoft/OfficeComprehensionBenchmark/resolve/$ocbRevision/$relative" "$ocbSource/$relative"
-}
+conda activate dkf-agent
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+# 1. 完整离线计划和规模。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --dry-run
+Get-Content docs/test/ocb_preset/results/native_download_plan.json -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object formats,qa_row_count,manifest_row_count,estimated_size
+# 2. 打开审核模板与真实审核表。
+code docs/test/ocb_preset/results/license_review_candidates.json docs/test/ocb_preset/source/source_review.json
+# 3. 完成逐文件人工许可核对后才执行。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --execute --allow-external --workers 3
+# 4. 中断/失败后恢复同一范围、来源与预算。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --execute --allow-external --workers 3 --resume
+# 5. 离线查缺失/失败、校验本地原件。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --list-missing
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --verify-only
+$nativeReport = Get-Content docs/test/ocb_preset/results/native_download_report.json -Raw -Encoding UTF8 | ConvertFrom-Json
+$nativeReport.summary.by_format | ConvertTo-Json -Depth 8
+$nativeReport.records | Where-Object { $_.status -notin @('downloaded','verified_existing') } | Select-Object reference_file,status,reason,http_status,local_file
+# 6. 仍由既有准备器抽取少量已审 Office，旧计划不改；目录存在则换新编号。
+python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42 --results-dir docs/test/ocb_preset/results/native-selection-01
+```
 
+许可审核步骤：
+
+1. 核对每个 candidate 的官方身份、原始格式/目标格式/无需转换事实、真实来源与版权。本地公开 URL 或 HF 数据卡许可不替代原件许可。
+2. 只把已经审核的 review_template 合并进 source_review.json 的 JSON 数组，保留旧条目，禁止重复 reference_file。填写真实 license；人工确认 original_native=true、conversion_required=false、local_use_confirmed=true；source_url 精确保留选择的官方地址。未审核项不填批准，不批量按下载状态批准。模板本身不是审核记录。
+3. 跨域下载跳转需逐域核对，再为对应审核项填 allowed_redirect_hosts 的实际小写域名数组，不能通配；默认空数组只允许原域名。不使用 Cookie/Token/关闭 TLS 绕过登录限制。
+4. 本地使用许可不包含 MinerU 外传授权；下载脚本不会写 source_review、QA、抽样计划、正式 manifest 或数据库。
+
+扩展 CSV/XLSM 时先在新目录冻结一版计划；后续所有命令沿用相同参数：
+
+```powershell
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --dry-run --native-formats docx xlsx pptx csv xlsm --native-results-dir docs/test/ocb_preset/results/native-all-01
+# 人工审核扩展版模板后：
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --execute --allow-external --resume --native-formats docx xlsx pptx csv xlsm --native-results-dir docs/test/ocb_preset/results/native-all-01
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --verify-only --native-formats docx xlsx pptx csv xlsm --native-results-dir docs/test/ocb_preset/results/native-all-01
+```
+
+CSV 有界严格 UTF-8/GB18030 解码与 csv 语法检查，不执行公式或调用 Parser。XLSM 检查 ZIP 路径/规模、工作簿主部件与宏工作簿 Content-Type，不执行宏、不做转换；仅保存未来评测原件，现有 prepare_ocb 仍只选 DOCX/XLSX/PPTX，不偷渡到当前上传/RAG 链路。
+
+##### 完整性、错误及验收边界
+
+HF 校验同 revision 的 size/LFS SHA256 或 Git Blob OID，.part 完整校验后独占硬链接发布，完整原件复核后跳过、坏文件不覆盖。第三方无官方 Hash 时只记本地 SHA256、official_digest_checked=false，回执绑定官方 URL、源版本、实际大小/Hash，不能宣称官方摘要或不可变第三方版本。无来源回执的用户外部原件保留并报 existing_file_unverified。
+
+续传要求同身份、206、精确 Content-Range，以及未变强 ETag 或官方摘要；第三方两者都无则不安全拼接，保留断点、报 resume_rejected。Range 被忽略为 200、ETag 变化、压缩异常或长度不符都拒绝追加，不截断重下。Ctrl+C 停止扩展并发窗口，只等最多三个在途请求按取消/超时结束并刷盘；系统 DNS、读请求和有限退避可能使中断不瞬时。重跑用 --resume，断电遗留锁须人工确认无人运行后处理。
+
+错误分别记录 http_forbidden/403、http_not_found/404、login_required/401 或明确登录页、format_mismatch、file_too_large、unknown_content_length、network_failed、source_redirect_not_reviewed、license_review_pending、conversion_required、native_status_unknown、total_budget_exceeded。每项可追溯文件/来源、QA 行、实际 HTTP、大小/Hash、耗时及历史，不存错误正文、凭据或临时 CDN 签名。单项失败不撤销其他完整原件，也不伪装全量成功。
+
+退出 0 为当前模式处理完成，1 为运行失败，2 为未取得或真实缺口，130 为中断。转换/未审项等缺口继续存在；下载计数不代表全部 QA 依赖齐备，也不代表完整 OCB、解析质量、READY 或问答准确率通过。
+
+安全仅限官方已核对 HTTPS URL/逐域许可及 DNS 拒绝私网，不实现自定义连接级 DNS 锁定；操作系统 DNS 重绑定等风险需可信网络人工确认。容量/ZIP/CSV 检查不是全面恶意文件扫描。实际 Range/Content-Length、失效链接、登录限制、版权、耗时与所有格式容器均待真实用户验证。
+
+用户执行新增 Mock 用例：
+
+```powershell
+python -m pytest tests/test_ocb_native_download.py tests/test_download_benchmarks.py tests/test_public_benchmark_tools.py -q
+```
+
+用例覆盖全 QA/多依赖、yes/no、官方身份去重/HF 优先、许可隔离、显式执行、HTTP 分类、DNS/跳转、Range/强 ETag、旧原件、容量/取消、离线模式/项目路径、CSV/XLSM 范围及容器 Stub；Codex 仅编写未执行。Mock 不替代真实下载或质量验收，阶段 16/17 待人工验收不变，不进入阶段 18。
+
+Omni metadata 仅取原标注（约 42 MB）和 Dataset API，不下全图。candidate-images 复用 page_record 的真实 GT 分类/尺寸/ignore 检查，按缺少类别优先及稳定身份/seed 选择；相对路径只接受原 image_path（若无 images/ 前缀则加该前缀），必须在真实 Tree 中精确存在。默认按现有 20 MiB/图、最多 12 个候选（对应 256 MiB 检查预算）限制，不整库读取，不声称拥有原 PDF。
+
+下载候选不是最终抽样：真实尺寸不匹配、同 SHA 或类别不足保留原件并报告 candidate_shortfall/missing_gt_categories/suggested_next_paths，不伪造成功或悄悄追下载。人工看报告后可显式增加 --count，例如：
+
+```powershell
+python scripts/download_benchmarks.py --dataset omni --scope candidate-images --count 8 --seed 42
+# 只有明确接受约 1.5 GB 图像下载、磁盘和版权后才选全量：
+python scripts/download_benchmarks.py --dataset omni --scope all-images
+```
+
+全量模式是 images/ 中真实 PNG/JPG/JPEG，不自动取原 PDF、渲染/缩放或运行图片转 PDF。最终 prepare 按真实字节大小继续选样，可能与下载候选顺序不同；更多候选也不保证覆盖/独立来源足够。
+
+#### 固定版本、恢复和完整性
+
+终端和 dataset_info.json 显示 HF SHA；首次冻结后同命令沿用本地 revision，不追 main。OHR 另外记录官方 GitHub QA commit/Git Blob OID，两者不是同一个 revision。新版本必须用另一个用户明确管理的项目副本/输入目录，不直接覆盖本项目的冻结原件。现有手动文件在同固定版本的官方大小/摘要及容器验证通过后跳过，失败则停止；来源不明的 .part 不自动接管。
+
+```powershell
+# 不写原件的在线计划；显式覆盖当前终端的镜像设置。
+python scripts/download_benchmarks.py --dataset ocb --scope metadata --dry-run --endpoint https://huggingface.co
+# 指定某个已知真实 SHA 时追加 --revision 实际40位SHA；与已有版本不同将停止。
+python scripts/download_benchmarks.py --dataset ocb --scope metadata --list-missing
+python scripts/download_benchmarks.py --dataset ohr --scope required --verify-only
+python scripts/download_benchmarks.py --dataset ocb --scope metadata --verify-only
+python scripts/download_benchmarks.py --dataset ocb --scope reviewed --verify-only
+python scripts/download_benchmarks.py --dataset omni --scope metadata --verify-only
+python scripts/download_benchmarks.py --dataset omni --scope candidate-images --count 5 --verify-only
+# 如果实际选择 all-images，按同一范围验证，而非仅验证 5 张。
+python scripts/download_benchmarks.py --dataset omni --scope all-images --verify-only
+```
+
+中断/临时网络失败后重跑原命令，不加“强制覆盖”。stream 每块至多 1 MiB，显示已下载/总字节和 MiB/s；未完成文件不发布。401/403/404 立即非零停止，不吞异常继续依赖下载；429/5xx/网络超时额外重试默认 3 次，退避且 Retry-After 秒数上限 60 秒。每文件写入前检查剩余大小+64 MiB 空间；不使用全量 HF 缓存副本，不清除缓存。下载失败可能已有其他完整文件，保留并下次验证跳过。
+
+断点沿用固定仓库/path/revision/大小/官方摘要，强 ETag 可用时核对；必须 206 且 Content-Range 精确匹配未完成区间。收到 200 全文件、变化 ETag、异常压缩、大小不符时拒绝追加并保留 .part，不自动丢弃断点。完成后校验官方 LFS SHA256，非 LFS 对照 Git Blob SHA1；OHR ZIP 只核对容器中央目录安全/基础结构和完整官方字节摘要，不整体解压，单 PDF CRC/页树继续由离线准备器验证。JSON 严格结构，Parquet 真实 PyArrow 解码，Office 主部件及图像结构检查复用既有规则。
+
+验证通过才同文件系统独占硬链接发布目标；不支持硬链接则安全报错，不改用户文件。回执含官方来源、固定版本、官方文件名/本地兼容名、大小、实际 SHA 与摘要对照情况；本地 Hash 不冒充官方签名/版权授权。临时签名仅在内存，HTTP 底层日志禁用；终端只有公开相对身份、计数、速度及固定安全错误，无凭据、本机绝对路径、上游正文。限制入口/已知 HF CDN，未知重定向安全失败，不关闭 TLS 或修改系统网络。
+
+HF API 合同依据 [官方 Hub API](https://huggingface.co/docs/hub/api)、[官方 DatasetInfo/RepoFile/List Repo Tree 实现](https://github.com/huggingface/huggingface_hub/blob/main/src/huggingface_hub/hf_api.py) 及 [Link 分页实现](https://github.com/huggingface/huggingface_hub/blob/v0.36.0/src/huggingface_hub/utils/_pagination.py)：保留 id/sha/cardData 原始响应和 type/path/size/oid/lfs 对象，用 Link next 完整翻页，镜像返回官方 next 地址时只映射相同 API 路径回选定入口。固定来源 schema/分页可与现有准备工具对接，但**真实镜像的 Range、CDN 重定向、revision 可达性、授权和 QA/标注兼容性尚待用户验证**。GitHub 不经 HF 镜像；不可达时单独检查网络，不伪造 QA 或回落不明镜像。
+
+退出 0 为该下载/校验清单完成，2 为缺失/候选覆盖不足，1 为安全失败，Ctrl+C 为 130；任何成功都不等于来源批准、解析质量通过或 READY。
+
+### Windows 离线预览及提取
+
+用户确认 source 原件来源、本地使用许可和下载完整性后执行；不会再下载输入：
+
+```powershell
+python scripts/prepare_ohr_bench_preset.py --confirm-official-source --count 7 --seed 42
 python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42
-# 如已有官方 NDJSON：保留完整官方生成记录，不自己猜字段或删除多文件依赖。
-# python scripts/prepare_ocb_preset.py --confirm-official-source --schema ndjson --qa-file file_fidelity_queries.ndjson --results-dir docs/test/ocb_preset/results/run-02
-Get-Content docs/test/ocb_preset/results/selection_report.json -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object selected_count,gaps,format_coverage
-```
-
-Omni 用户下载真实标注和图像（不要运行官方图片转 PDF 脚本）。以下 `hf download` 仅由用户运行，HF CLI 缺少时用户按其官方文档手动安装；也可逐图使用上面的 curl。默认下载整组 images 以便可靠选样，约 1.55 GB 全库量级，标注约 42 MB，实际以固定 revision 文件列表为准。OCB 全仓约 3 GB，但此处只下载 ~0.5 MB QA、~31 KB URL 表、元数据和已审核少量 Office；选中大小以报告为准。OHR 下载量见上节，另预留缓存/向量与本地报告磁盘空间。
-
-```powershell
-$omniSource = ".\docs\test\omnidocbench_preset\source"
-Get-BenchmarkFile "https://huggingface.co/api/datasets/opendatalab/OmniDocBench" "$omniSource\dataset_info.json"
-$omniRevision = (Get-Content "$omniSource\dataset_info.json" -Raw -Encoding UTF8 | ConvertFrom-Json).sha
-Get-BenchmarkFile "https://huggingface.co/datasets/opendatalab/OmniDocBench/resolve/$omniRevision/OmniDocBench.json" "$omniSource\OmniDocBench.json"
-# 用户已确认 source/images 尚不存在时才执行，避免 CLI 复用/覆盖已有用户图像。
-if (Test-Path "$omniSource\images") { throw "图像目录已存在，请核对来源，不覆盖。" }
-hf download opendatalab/OmniDocBench --repo-type dataset --revision $omniRevision --include "images/*" --local-dir $omniSource
 python scripts/prepare_omnidocbench_preset.py --confirm-official-source --count 5 --seed 42
+Get-Content docs/test/ocb_preset/results/selection_report.json -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object selected_count,gaps,format_coverage
 Get-Content docs/test/omnidocbench_preset/results/selection_report.json -Raw -Encoding UTF8 | ConvertFrom-Json | Select-Object selected_count,gaps,format_coverage
 ```
 
-预览退出 0 仅表示报告已生成（可能有缺口），非零为安全错误；OCB/Omni 不沿用 OHR 的退出 2 语义。报告中的手动质量/原 PDF 缺口始终保留，**不能宣称抽样通过就是质量通过**。读完整 gaps/candidate_inventory，用户接受后才执行：
+报告存在时使用 --results-dir docs/test/对应数据集/results/run-02，不覆盖旧报告。OHR 退出 2 代表报告有真实缺口；OCB/Omni 预览退出 0 仅表示报告已生成，仍必须核对 gaps/candidate_inventory，不算质量通过。已有官方 NDJSON 可用现有 --schema ndjson --qa-file，但下载器不运行官方默认联网生成器。
 
-准备命令不是下载命令，`--confirm-official-source` 仅确认来源，不会创建缺少的输入。若未完成上述手动下载，首先会报 `BENCH_MISSING`，并指出白名单输入项（例如 dataset_info.json）；空下载文件为 `BENCH_EMPTY`，真实大小/读取预算超限才是 `BENCH_LIMIT`，目录充当文件为 `BENCH_SOURCE`，磁盘访问故障为 `BENCH_IO`。不要为缺文件问题扩大预算。OCB 的 source_review.json 须由用户手动创建，可先填写 `[]` 预览未审核缺口，不由工具替用户确认许可。
+prepare 命令不是下载命令，--confirm-official-source 不创建缺少输入。BENCH_MISSING 是缺必需文件，BENCH_EMPTY 是空文件，BENCH_LIMIT 才是实际资源超限，不要扩大预算来掩盖下载未完成；source_review.json 的 [] 不代表任何批准。
 
-仅检查输入是否存在（不读取正文、不下载或执行抽样）：
-
-```powershell
-Test-Path -LiteralPath docs/test/ocb_preset/source/dataset_info.json -PathType Leaf
-Test-Path -LiteralPath docs/test/ocb_preset/source/hosted_files.json -PathType Leaf
-Test-Path -LiteralPath docs/test/ocb_preset/source/ocb_qna_data.parquet -PathType Leaf
-Test-Path -LiteralPath docs/test/ocb_preset/source/source_review.json -PathType Leaf
-Test-Path -LiteralPath docs/test/omnidocbench_preset/source/dataset_info.json -PathType Leaf
-Test-Path -LiteralPath docs/test/omnidocbench_preset/source/OmniDocBench.json -PathType Leaf
-```
-
-目标存在也不代表完整：按固定 revision 及元数据来源核对文件大小/下载状态，不覆盖或伪造输入。OHR 的 ZipInfo 测试替身须显式包含 header_offset（真实 ZipFile 读取中央目录时赋值），不修改生产校验来迁就不完整的 Stub。修复后由用户重跑本文单测；预期不再出现 header_offset 的 AttributeError，输入缺失/空文件/超限和脱敏断言通过。
+目标存在也不代表完整：用下载器 --verify-only 核对当前 scope 的正式原件，不能把 .part 当输入。现有 OHR ZipInfo 测试替身仍须显式包含 header_offset，不修改生产校验迁就不完整 Stub。真实 Tree/QA/标注兼容失败保留明确原因，由用户反馈后修复，不扩大预算或伪造字段。
 
 ```powershell
 python scripts/prepare_ocb_preset.py --extract --confirm-official-source --confirm-local-use --accept-gaps
@@ -539,15 +751,16 @@ python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800 -
 新增用例仅元数据/结果/接口 Stub，不生成真实 PDF/Office/图片；全部由用户执行：
 
 ```powershell
+python -m pytest tests/test_download_benchmarks.py -q
 python -m pytest tests/test_public_benchmark_tools.py tests/test_prepare_ohr_bench_preset.py -q
 python -m pytest tests/test_preset_import.py -q
 # 用户已确认隔离数据库/原有依赖与执行范围后，才运行既有全回归：
 python -m pytest tests -q
 ```
 
-预期：HF/NDJSON 适配、原始字段保留、多文件依赖、确定性选择、未授权/转换原件拒绝、路径/重复/几何保护、GT 页与业务页分离、不自动补零、公式无硬编码、同页完整顺序映射、HTML/指标依赖边界、现有 Chunk Hash/偏移、十三格式缺口和不覆盖输出断言通过。用例通过不替代真实结构读取/下载/提取/解析质量/云权限验收；本轮所有运行结果尚未验证。未开展阶段 17。
+下载器 Mock 预期覆盖镜像/版本、原始 API 字节、完整对象/分页、官方文件名映射、临时错误及 Range/ETag 续传、格式拒绝、已有原件保护、许可/依赖、Omni 精确路径及日志脱敏。本轮补充：替换前的版本/摘要/分页/LFS 校验、备份原字节、原子替换失败保护、备份冲突拒绝、只读模式不写、修复后默认入口、重复修复幂等，以及审核/旧计划不变。QA 用例补充三子类原字段/源字节保留、Domain 分类优先拒绝、未知 schema 拒绝。现有工具预期继续覆盖 HF/NDJSON、原始字段、多文件依赖、确定性选择、路径/重复/几何保护、GT/业务页分离、证据与指标边界；但本轮均未执行。用例通过也不替代真实下载/格式兼容/解析质量/云权限验收。阶段 17 代码此前已实现待用户验收，本轮不修改其业务代码、不推进阶段 18。
 
-工具本身无网络请求、模型、Parser、数据库或 Celery 调用，不自动安装依赖；云费用仍由已有导入任务与 MinerU 预算保护。本轮未下载真实数据、未运行准备工具、未提取样本或测试，实际匹配/五类 QA 覆盖、PDF 结构与权限仍待用户确认。
+三个 prepare 及质量对照工具本身无网络请求、模型、Parser、数据库或 Celery 调用，统一下载器只访问白名单公开来源，不自动安装依赖；云费用仍由已有导入任务与 MinerU 预算保护。本轮未下载真实数据、未运行准备工具、未提取样本或测试，实际匹配/五类 QA 覆盖、PDF 结构与权限仍待用户确认。
 
 仅用户执行对应单元用例（字段/中央目录/状态 Stub，不生成真实 PDF）：
 

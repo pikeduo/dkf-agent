@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度：**阶段 1～10 已完成并完成人工验收；当前进入阶段 11A：多格式文档支持扩展。**  
+> 当前进度以最新代码与 AGENTS 为准：**阶段 16：代码已实现，真实数据验收待完成；阶段 17：Dense 代码已实现后待人工验收，不能宣称真实检索成功。** 用户本轮明确授权先推进 17，不代表 16 已通过或自动放行 18；此前各阶段待验收事项继续保留。  
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 当前新增目标：Codex 只实现 CSV、XLSX、DOC/DOCX、XLS/XLSX、PPT/PPTX 等格式的代码并提供测试方案；真实多格式文档测试由用户手动执行；阶段 11B.1 先实现整份文档完整性优先路由，阶段 11B.2 仅在真实对照证明必要时，对 XLSX 等少数格式启用“Native 主解析 + Visual Bundle 单次 MinerU 增强 + Anchor Merge”；待 pgvector 基线完成后再接入 LlamaIndex Adapter，不打断当前阶段 11A。  
+> 本轮范围：只实现指定知识库的 Dense Retriever，复用现有 Parse/Chunk/BGE-M3/pgvector/15A Adapter，不重做已有阶段。禁止安装依赖、下载资源、触碰下载中素材、执行迁移/测试/真实查询或启动服务；不进入单文档检索、BM25、Fusion、Rerank、RAG。  
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2605,7 +2605,7 @@ page / section 不丢失
 ## 当前实现与待验收
 
 - 已实现 `scripts/import_knowledge_base.py`：默认只读预检；用户显式确认云外传/费用后，复用默认库 Seed、单文件存储、auto Router 与独立 Chunk/Embedding/Index 检查点，有界推进至 READY。
-- 素材目录仅有占位，真实十份以上多格式资料与人工覆盖清单由用户准备；不自动生成/下载/导入。标签不证明 OCR、公式、图表或 Reading Order 质量。
+- **阶段 16：代码已实现，真实数据验收待完成。** 真实数据集正在由用户独立 PowerShell 下载；真实十份以上多格式资料、覆盖清单、导入与质量验收仍待用户完成，不自动生成/下载/导入或干扰素材。标签不证明 OCR、公式、图表或 Reading Order 质量。
 - 无新增依赖、环境变量、数据库迁移或 API；普通上传保持 uploaded。重复导入复用 preset 内容，FAILED/已有检查点不自动重投，收费恢复继续遵守 Parse Cache 约束。
 - 用例仅编写，未执行预检/导入/回归或真实云/GPU 测试。部署命令见 README，完整人工验收与 SQL 见 [预置导入](PRESET_IMPORT.md)。本阶段只准备默认库 READY 数据；查询需后续阶段，不提前实现 Retrieval/RAG。
 
@@ -2645,6 +2645,16 @@ scripts/import_knowledge_base.py
 ---
 
 # 23. 阶段 17：Dense Retrieval（LlamaIndex Retriever）
+
+## 当前实现与验收边界
+
+- **阶段 17：代码已实现后待人工验收，不能宣称真实检索成功。** 用户明确允许阶段 16 待验收期间先实现本阶段，非阶段 16 验收结论，不授权自动进入 18。
+- `app/services/rag/llama_index/dense_retriever.py` 继承 BaseRetriever，复用 DKFEmbeddingAdapter 与进程共享 BGE-M3；Query 编码前后核对实际模型身份，文档编码禁止项不变。
+- `app/services/rag/dense.py` 用现有 SQLAlchemy/pgvector `<=>` 参数化查询 document_chunks；限定 kb_id/ACTIVE 库、READY、非空向量、实际完整模型身份和当前解析/切片/GPU 代次，未知历史向量排除。
+- 首版过滤候选物化后执行精确 Top-K，默认 20、范围 1～100，余弦距离升序/稳定 chunk_id 处理同分；既有 HNSW 保留，未声称 ANN 性能或大库吞吐验收。相似度 1-distance 不代表概率。
+- Node/NodeWithScore 复用 15A 转换，正文/标识/页码/章节/source_spans 保持原值；独立短会话只读事务与超时，不写库、不重新 Parse/Chunk/Embed/Index、不注册全局 Tracing。
+- 仅 Python 库级入口，没有 HTTP Retrieval/RAG API、doc_id 筛选、BM25、Fusion、Rerank 或 Agent。没有新依赖、环境变量、迁移、表、模型或 Worker。
+- 单元/SQL/框架/日志 Stub 用例只编写，不执行。Mock 不证明真实 PostgreSQL/CUDA/语义相关性；部署入口见 README，真实只读人工验收与风险见 [Dense Retrieval](DENSE_RETRIEVAL.md)。此前阶段与 16 的真实验收仍待用户完成。
 
 ## 目标
 

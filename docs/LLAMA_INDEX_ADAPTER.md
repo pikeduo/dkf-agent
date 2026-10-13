@@ -2,6 +2,8 @@
 
 阶段 15A 仅建立运行时表示和 Query Embedding 适配。唯一持久化真相来源仍是 PostgreSQL document_chunks；不新增表、索引、迁移、API、Worker 或框架存储。阶段 1～15 的数据处理状态不变，不实现 Dense/BM25/Fusion/Reranker/Response Synthesis/Query Engine。
 
+上述为 15A 独立范围；用户后续已授权 [阶段 17 Dense Retriever](DENSE_RETRIEVAL.md)。Adapter 新增 query_model_identity() 仅在显式检索时委托同一已有 Service.identity()，不猜权重指纹、不创建另一套模型；15A 的文档编码拒绝、Node 契约及待人工验收项不变。
+
 ## 手动准备最小依赖
 
 用户已确认新增 `llama-index-core>=0.14,<0.15`，Python 3.11 在该系列支持范围内。只使用 [官方 Schema](https://developers.llamaindex.ai/python/framework-api-reference/schema/) 与 [BaseEmbedding](https://developers.llamaindex.ai/python/framework-api-reference/embeddings/)；不安装全量 llama-index 或默认 OpenAI、Reader、PGVectorStore 集成。

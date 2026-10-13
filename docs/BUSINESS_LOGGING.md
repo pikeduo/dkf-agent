@@ -61,6 +61,7 @@
 | `rag.node_converted / result_converted` | 已有 Chunk/Node/内部结果互转，仅资源 UUID 和耗时；不代表检索、推理或落库 |
 | `rag.query_encoded / nodes_reused` | Query 委托既有共享服务 / 原 Node 向量复用；仅维度/数量/耗时，不输出输入或向量 |
 | `rag.adapter_failed` | 固定适配边界错误码与步骤，不透传 Pydantic 输入、路径、Node 或模型异常 |
+| `dense.started / finished / empty / failed` | 指定知识库只读检索开始/成功/空集/安全失败；仅 kb_id、top_k、数量、维度、步骤、耗时、固定错误码，不记录 Query/Node/向量或 SQL |
 | `preset.started / imported / reused` | 用户执行 CLI 后开始批量导入 / 原件已提交并投递 auto / 同内容沿用已有 doc_id，不代表 READY |
 | `preset.advanced / state` | 下一阶段检查点提交后投递 / 业务状态变化，复用原队列与每日日志 |
 | `preset.failed / timeout / finished` | 单项安全错误 / 有界等待超时但不取消任务 / 全批 READY 或未完成数量，不输出清单、路径或正文 |
@@ -99,3 +100,5 @@ python -m pytest tests/test_embedding_service.py tests/test_embedding_artifacts.
 日志设施自身不发 API；缓存、切片、Embedding 与 pgvector 入库继续使用每日同一文件。任务用独立 task_id 与 doc_id 关联，业务成功事件在 SQL 提交后写入；GPU 暂存与入库批次日志不代表整文档完成，只有 index.persisted 表示向量及 READY 已提交。日志不输出 Chunk/Query 正文、向量、模型/结果路径。真实费用按 MinerU batch 与平台核对；本地模型、入库及新增测试待用户执行，不包含检索/RAG。
 
 15A Adapter 使用同一业务 Logger，增加白名单 chunk_id；转换成功不是事务落库事件。Query Adapter 不使用 BaseEmbedding 的含正文/向量回调 payload，不注册第三方 Tracing。框架/依赖自身诊断输出不在本项目日志脱敏保证内，禁止开启可能记录 Node/Query 的第三方调试、回调或全局 instrumentation 导出。
+
+阶段 17 增加白名单 top_k（中文“检索上限”），复用原每日日志、不新增日志文件。Dense 公共入口不调用 BaseRetriever 含原文 callback payload/递归 Query Engine 的路径；继承框架仍可能被外部配置的全局 instrumentation 观察，不能据此宣称任意第三方 Tracing 均已脱敏。请禁用 Query/Node 追踪导出及 SQL echo/debug。dense.finished 仅表示本次只读结果构建完成，不是文档状态提交或语义准确率结论；empty 不代表知识库无内容，可能仅无同模型 READY 数据。

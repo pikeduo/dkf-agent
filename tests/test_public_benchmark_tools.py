@@ -2,6 +2,9 @@
 
 import copy
 import hashlib
+import json
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -383,3 +386,146 @@ def test_input_error_labels_never_echo_untrusted_paths():
     """任意未知输入标识不会进入异常，只有预定义技术文件名可用于人工排查。"""
     error = common.BenchmarkError("MISSING", input_id="__private_path_or_content__")
     assert error.input_id is None and "__private_path_or_content__" not in str(error)
+
+
+@pytest.mark.parametrize("track,subtype", [("File Fidelity Excel", "Excel"),
+    ("File Fidelity PowerPoint", "PowerPoint"), ("File Fidelity Word", "Word")])
+@pytest.mark.parametrize("schema", ["hf", "ndjson"])
+def test_official_fidelity_subtypes_preserve_track(track, subtype, schema):
+    """显式官方分类保留原值/依赖/断言，HF 和 NDJSON 同样适配，不按文件后缀猜类别。"""
+    raw = hf_row(["a.docx", "b.xlsx"]) | {"track": track}
+    if schema == "ndjson":
+        raw = {"id": "0", "filepath": raw["reference_files"], "query": raw["question"],
+               "gold": raw["expected_assertions"], "track": track}
+    before = copy.deepcopy(raw)
+    result = ocb.qa_record(raw, 0, schema, "a" * 64)
+    assert result["track"] == track and result["track_subtype"] == subtype
+    assert result["original"] == before and raw == before
+    assert result["reference_files"] == ["a.docx", "b.xlsx"]
+
+
+@pytest.mark.parametrize("track", ["Domain", "File Fidelity Q&A", "File Fidelity Unknown", "File Fidelity Excel Extra"])
+def test_no_broad_track_prefix_acceptance(track):
+    """Domain 和不在明确白名单的相似分类仍拒绝，不能宽泛匹配 File Fidelity 前缀。"""
+    with pytest.raises(common.BenchmarkError, match="qa_track"):
+        ocb.qa_record(hf_row() | {"track": track}, 0, "hf", "a" * 64)
+
+
+def test_domain_is_excluded_before_format_specific_schema():
+    """Domain 即使使用不同问题字段也先报 qa_track，不误报 File Fidelity 结构故障。"""
+    raw = {"track": "Domain", "domain_specific_field": {"untouched": True}}
+    before = copy.deepcopy(raw)
+    with pytest.raises(common.BenchmarkError) as failure:
+        ocb.qa_record(raw, 0, "hf", "a" * 64)
+    assert failure.value.code == "SOURCE" and failure.value.stage == "qa_track"
+    assert raw == before
+
+
+@pytest.mark.parametrize("schema", ["unknown", None])
+def test_qa_adapter_rejects_unknown_schema(schema):
+    """仅接受已定义的 HF/NDJSON 契约，不把未知 schema 猜作 NDJSON 或修改源行。"""
+    raw = hf_row() | {"track": "File Fidelity Excel"}
+    before = copy.deepcopy(raw)
+    with pytest.raises(common.BenchmarkError, match="qa_rows_schema"):
+        ocb.qa_record(raw, 0, schema, "a" * 64)
+    assert raw == before
+
+
+def test_qa_adapter_preserves_all_official_fields_and_source_bytes(tmp_path, monkeypatch):
+    """使用 Parquet 行读取 Stub 验证三子类/原字段不变，绝不解析/生成真实 Parquet 或 Office。"""
+    path = tmp_path / "ocb_qna_data.parquet"
+    source_bytes = b"parquet-reader-is-stubbed-no-real-dataset"
+    path.write_bytes(source_bytes)
+    rows = [hf_row() | {"track": track, "feature": "metadata-feature", "version": "original-version",
+        "domain": "original-domain", "weights": [0.25, 0.75], "extra_official": {"keep": [1, 2]}}
+        for track in ("File Fidelity Excel", "File Fidelity Word", "File Fidelity PowerPoint")]
+    before = copy.deepcopy(rows)
+    monkeypatch.setattr(common, "rows_file", Mock(return_value=rows))
+    source_hash = hashlib.sha256(source_bytes).hexdigest()
+    results = [ocb.qa_record(row, index, "hf", source_hash) for index, row in enumerate(common.rows_file(path))]
+    assert [result["track_subtype"] for result in results] == ["Excel", "Word", "PowerPoint"]
+    assert [result["original"] for result in results] == before and rows == before
+    for result, original in zip(results, before):
+        for field in ("track", "feature", "version", "domain", "weights"):
+            assert result[field] == original[field]
+    assert path.read_bytes() == source_bytes
+
+
+@pytest.mark.parametrize("data,stage", [(b"\xff", "json_utf8"), (b"{", "json_syntax"),
+    (b'{"private":NaN}', "json_strict"), (b'{"private":Infinity}', "json_strict"),
+    (b'{"private":"\\ud800"}', "json_strict")])
+def test_json_diagnosis_distinguishes_failure_steps(tmp_path, data, stage):
+    """严格编码不放宽，区分 Unicode/语法/非有限数，异常不暴露字段值或本机路径。"""
+    path = tmp_path / "metadata.json"
+    path.write_bytes(data)
+    with pytest.raises(common.BenchmarkError) as failure:
+        common.json_file(path)
+    assert failure.value.stage == stage
+    assert "private" not in str(failure.value) and str(tmp_path) not in str(failure.value)
+    assert path.read_bytes() == data
+
+
+def test_source_record_ok_then_hosted_tree_failure(tmp_path, monkeypatch, capsys):
+    """已通过 JSON/身份/cardData 时 source_record 成功，字符串树在后续明确失败，不重写元数据。"""
+    monkeypatch.setattr(common, "ROOT", tmp_path)
+    root = tmp_path / "docs/test/ocb_preset/source"
+    root.mkdir(parents=True)
+    metadata = json.dumps({"id": common.REPOS["ocb"], "sha": "a" * 40, "cardData": {"license": "metadata-stub"}}).encode()
+    (root / "dataset_info.json").write_bytes(metadata)
+    (root / "hosted_files.json").write_bytes(b'["reference_files/a.xlsx"]')
+    (root / "source_review.json").write_bytes(b"[]")
+    (root / "ocb_qna_data.parquet").write_bytes(b"metadata-only-stub")
+    source = common.source_record(root, "ocb", ["hosted_files.json"])
+    assert source["revision"] == "a" * 40
+    rows = Mock(side_effect=AssertionError("字符串树失败前不应读取 Parquet"))
+    monkeypatch.setattr(common, "rows_file", rows)
+    exit_code = common.run("ocb", ocb.prepare, ["--confirm-official-source", "--diagnose-inputs"], diagnose=ocb.diagnose_inputs)
+    output = capsys.readouterr().out
+    assert exit_code == 1 and "source_record=OK" in output
+    assert "hosted_tree" in output and "hosted_files.json" in output and "BENCH_SCHEMA" in output
+    assert str(tmp_path) not in output
+    rows.assert_not_called()
+    assert (root / "dataset_info.json").read_bytes() == metadata
+    assert not (root.parent / "results").exists()
+
+
+def test_hosted_index_keeps_complete_official_objects():
+    """原始对象字段完整保留，拒绝字符串路径及无大小/OID 的伪对象。"""
+    raw = {"type": "file", "path": "reference_files/a.xlsx", "size": 32, "oid": "a" * 40,
+           "lfs": {"oid": "b" * 64, "size": 32, "pointerSize": 128}, "upstream_extra": "metadata"}
+    assert ocb.hosted_index([raw])["a.xlsx"] is raw
+    for bad in ([raw["path"]], [{"type": "file", "path": raw["path"]}], [raw | {"size": "32"}]):
+        with pytest.raises(common.BenchmarkError, match="hosted_tree"):
+            ocb.hosted_index(bad)
+
+
+def test_failure_stage_cannot_echo_untrusted_text():
+    """步骤只接受固定白名单，不把上游正文、签名或未知路径放进错误信息。"""
+    error = common.BenchmarkError("SCHEMA", stage="private-body?token=secret")
+    assert error.stage is None and "token=" not in str(error)
+
+
+def test_qa_strict_error_is_not_misattributed_to_dataset_info(tmp_path, monkeypatch):
+    """QA 非有限值明确归于 qa_strict，不改写元数据或把 QA 行问题当 cardData 故障。"""
+    path = tmp_path / "rows.json"
+    path.write_bytes(b'[{"metadata":NaN}]')
+    with pytest.raises(common.BenchmarkError) as failure:
+        common.rows_file(path)
+    assert failure.value.stage == "qa_strict"
+    assert "dataset_info" not in str(failure.value)
+
+
+def test_diagnostic_reports_real_tracks_without_generating_plan(monkeypatch, capsys):
+    """只读诊断从行 Stub 统计三种子类和 Domain，不生成计划或调用原件/网络。"""
+    rows = [hf_row() | {"track": track} for track in
+            ["Domain", "File Fidelity Excel", "File Fidelity PowerPoint", "File Fidelity Word"]]
+    source = {"metadata_sha256": {"ocb_qna_data.parquet": "a" * 64}}
+    monkeypatch.setattr(ocb, "load_inputs", Mock(return_value=(None, source, {}, {}, rows)))
+    publish = Mock(side_effect=AssertionError("诊断不得生成报告"))
+    monkeypatch.setattr(common, "publish_reports", publish)
+    ocb.diagnose_inputs(SimpleNamespace(schema="hf", qa_file="ocb_qna_data.parquet"))
+    output = capsys.readouterr().out
+    for row in rows:
+        assert row["track"] in output
+    assert "Domain 未进入候选" in output and "__schema_question__" not in output
+    publish.assert_not_called()

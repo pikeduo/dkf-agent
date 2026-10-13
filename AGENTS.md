@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**16：预置知识库批量导入。已实现目录/覆盖清单预检、preset 来源存储、幂等导入与有界任务推进至 READY；真实素材准备、导入及验收由用户执行。此前待验收事项继续保留。**
+当前阶段：**17：Dense Retrieval。代码已实现后待人工验收，不能宣称真实检索成功。阶段 16：代码已实现，真实数据验收待完成；用户明确授权本轮先推进 17，不代表放行阶段 18。此前待验收事项继续保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -41,12 +41,13 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
-| 16 | 已实现预置导入、只读预检、幂等阶段推进及三类公开基准工具；已修复输入诊断和测试替身，待用户复验，真实素材/导入/质量仍待验收 |
-| 17 及后续 | 未开展，等待用户确认 |
+| 16 | 已实现预置导入与公开基准工具；OHR 分类/领域缺口、OCB 三类 Track/分步诊断及对象树校验备份替换已补齐；用例待用户复测，真实下载兼容、导入与质量待验收 |
+| 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
+| 18 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
-- 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成，尚无检索或问答接口。
-- 当前仅实施用户授权的阶段 16；11B.2/12/13/14/15/15A 待验收事项仍保留。未经用户确认，不进入 Dense/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
+- 本轮仅实施阶段 16 配套下载工具、Mock 用例和说明，不改变阶段 17 已实现待验收状态；阶段 16 真实数据及 11B.2/12/13/14/15/15A 待验收事项仍保留。本轮不安装依赖/实际下载，不碰已有素材；未经用户确认，不进入单文档 Retrieval/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid；不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 
 最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
@@ -179,8 +180,16 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 
 - 素材及 manifest 由用户准备，不自动生成/下载；预检的格式/Hash/标签覆盖不等于内容质量验收。默认 dry-run，正式执行必须显式确认云外传/费用。
 - 公开基准仅 OHR-Bench、Microsoft OCB、OmniDocBench；官方 QA/GT/断言/来源与报告留在 docs/test，不导入业务库。离线诊断不是官方总分，READY 不证明解析正确或问答准确；缺格式/原件/页映射/授权时报告真实缺口，不转换伪造或降低预检标准。
+- 统一 download_benchmarks 由用户运行，固定项目根目录、官方版本及镜像 API/resolve，安全续传后独占发布完整输入；不覆盖已有原件/审核/报告，不清缓存。OCB 只自动取已审核且 QA 依赖完整的托管原生 Office，缺审核仅初始化 []；三个 prepare 工具仍保持离线，不以下载成功代替许可/质量验收。
 - 复用原存储、Router 与各阶段检查点，单文件单 doc_id/source_type=preset；同内容不覆盖原来源/文件名、不自动重投失败或已有检查点、不隐式 Force Reparse。CLI 有界查数据库，不直接解析/推理/轮询 MinerU，不安装或启动服务。
 - 全批 READY 须验证入库身份及全量向量；中断/超时不取消后台任务，脚本退出后无下一阶段自动补投。当前数据准备完成不代表检索/问答已实现。
+
+### Dense Retrieval
+
+- 复用已有 DKFEmbeddingAdapter/进程共享 BGE-M3，实际模型身份前后核对；不接收未绑定模型身份的外部 Query 向量/变换文本，不重编码文档，不启用框架存储或 Query Engine。
+- 指定 kb_id/ACTIVE 库、READY、非空向量、完整 model_fingerprint/编码版本/长度/精度/归一化及当前解析/切片/GPU 代次在 SQL 内过滤；未知历史身份不能混用。独立只读短会话、有界超时，不 flush/commit/写业务数据，不共享线程绑定 Session。
+- 首版物化过滤候选后精确余弦距离/稳定 chunk_id Top-K（默认 20，上限 100），保留既有 HNSW 但不声称使用 ANN；大库扫描成本待验收。1-distance 是相似度而非概率，空集不扩大范围/触发重建；Node 原 ID/正文/全部证据不变。
+- 公共入口不发基类含正文的 callback payload、不递归检索，业务日志只记 UUID/Top-K/数量/耗时/安全错误；不注册全局 Tracing，第三方 instrumentation/SQL echo 仍须禁用。结果代表 SQL 查询快照，不保证查询后文档仍 READY。
 
 ## 5. 专题文档与交付要求
 
@@ -196,6 +205,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 本地模型、GPU 批处理、向量结果与人工验收 | [Embedding](docs/EMBEDDING.md) |
 | 向量入库、HNSW、READY 与人工验收 | [pgvector 入库](docs/PGVECTOR_INDEX.md) |
 | LlamaIndex Node/证据 DTO、Query 边界与人工验收 | [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) |
+| Dense SQL/模型隔离、Top-K、日志与人工验收 | [Dense Retrieval](docs/DENSE_RETRIEVAL.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库，当前尚无检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -86,7 +86,7 @@ python -m pip install "llama-index-core>=0.14,<0.15"
 python -m pip check
 ```
 
-不安装全量 llama-index 或 OpenAI/PGVectorStore/Reader 集成，不需要新 API Key、模型或迁移。安装前核对 Python 3.11 及现有 Pydantic/SQLAlchemy/tenacity 依赖；pip 可能调整传递依赖，冲突时停止并记录，不无条件升级。core 包含 NLTK/tiktoken 等依赖，首次导入可能校验/下载缺失的 NLP 资源，需由用户预先准备缓存，具体见 [Adapter 部署与使用](docs/LLAMA_INDEX_ADAPTER.md)。仅建立类型与 Embedding 边界，尚无检索或问答接口。
+不安装全量 llama-index 或 OpenAI/PGVectorStore/Reader 集成，不需要新 API Key、模型或迁移。安装前核对 Python 3.11 及现有 Pydantic/SQLAlchemy/tenacity 依赖；pip 可能调整传递依赖，冲突时停止并记录，不无条件升级。core 包含 NLTK/tiktoken 等依赖，首次导入可能校验/下载缺失的 NLP 资源，需由用户预先准备缓存，具体见 [Adapter 部署与使用](docs/LLAMA_INDEX_ADAPTER.md)。Dense Python Retriever 复用同一依赖，尚无 HTTP 检索或问答接口。
 
 ## 2. 手动部署基础服务
 
@@ -445,6 +445,12 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 入库失败整体回滚并记录安全 `INDEX_*` 错误；修复后再次 `/index` 恢复同一代次，不用 `/embed` 重算。缺失/损坏结果不自动推理或调用云端。重复完成请求不重投，READY 文档重复 `/chunk`、`/embed` 也不重建。活动入库拒绝 Reindex/Reparse，完成后才可显式维护；READY 不等于检索/RAG 已实现。完整验收和 SQL 见 [pgvector 入库](docs/PGVECTOR_INDEX.md)。
 
+### Dense Python Retriever
+
+仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认 20，1～100）；调用 `retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回项目证据 DTO。Query 首次调用会加载已有本地 BGE-M3，构造不会加载。
+
+用户先准备已有 core/NLP 缓存、PostgreSQL 和同版本 BGE-M3；检索时不需要 API/Worker，避免与 GPU Worker 同时各加载一份模型。无匹配返回空集，不扩大库或重建数据；首版精确排序有扫描成本，分数为余弦相似度而非概率。完整使用与手动验收见 [Dense Retrieval](docs/DENSE_RETRIEVAL.md)。
+
 ### 预置知识库导入
 
 将已有且允许云外传的 10+ 多格式资料放入 `data/knowledge_base/preset/`，按 [素材清单说明](docs/PRESET_IMPORT.md#素材与人工清单) 手动准备 `manifest.json`；包括普通/扫描 PDF、混合内容、表格、公式、图表、Reading Order，以及 DOC/XLS/PPT 各一份。目录只带占位文件，不自动生成或下载素材。
@@ -463,9 +469,119 @@ python scripts/import_knowledge_base.py --execute --allow-cloud --timeout 1800
 
 默认使用固定默认知识库，逐文件保存 `source_type=preset` 并自动提交解析→切片→向量化→入库任务；脚本需保持运行以推进下一阶段。同内容复用已有 doc_id，不自动重投 FAILED 或已有检查点；超时/中断不取消后台任务，可核对状态后重跑。全批 READY 才返回成功，READY 仍不代表已提供查询/RAG。选项、幂等限制及恢复见 [预置导入说明](docs/PRESET_IMPORT.md)。
 
-公开基准数据集验收仅使用 OHR-Bench、Microsoft OCB、OmniDocBench；离线准备工具、手动下载/提取、格式缺口及质量对照见 [公开基准验收说明](docs/PRESET_IMPORT.md#三个公开基准的解析质量验收用户执行)。工具不联网、不自动导入；QA/GT/报告仅放 docs/test，不作为知识库内容，READY 不代表解析或问答准确率达标。
+### 公开基准数据集下载（用户手动执行）
+
+仅使用 [OHR-Bench](https://huggingface.co/datasets/opendatalab/OHR-Bench)（原 PDF/QA）、[Microsoft OCB](https://huggingface.co/datasets/microsoft/OfficeComprehensionBenchmark)（Office/问答断言）、[OmniDocBench](https://huggingface.co/datasets/opendatalab/OmniDocBench)（页面图像/区域 GT）。统一入口是 `scripts/download_benchmarks.py`，不再用混合 curl/PowerShell 下载流程。
+
+打开独立 PowerShell。已有项目环境无需重建；全新 Conda 环境先按第 1 节创建。确认 Python/pip 同属 dkf-agent，**只执行检查确认缺少的安装行**，不升级整个环境：
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+python --version
+python -m pip --version
+python -m pip show httpx pyarrow Pillow
+# 缺哪个才安装哪个；httpx 已在 environment.yml 中声明。
+python -m pip install httpx
+python -m pip install pyarrow
+python -m pip install Pillow
+python -m pip check
+```
+
+PyArrow 用于验证官方 Parquet/预览 OCB QA；Pillow 用于图片完整性检查。下载器复用已声明的 httpx，不要求安装 datasets/pandas/官方评测框架。以下均由用户执行，Codex 不自行下载或测试：
+
+```powershell
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+python scripts/download_benchmarks.py --help
+python scripts/download_benchmarks.py --dataset ohr --scope required
+python scripts/download_benchmarks.py --dataset ocb --scope metadata
+python scripts/download_benchmarks.py --dataset omni --scope metadata
+# 先取得真实标注，再下载少量候选图片，不等于最终抽样已通过。
+python scripts/download_benchmarks.py --dataset omni --scope candidate-images --count 5
+# 先查看 .download/ocb_candidates.json，人工填写 source_review.json；空审核表会拒绝此命令。
+python scripts/download_benchmarks.py --dataset ocb --scope reviewed
+```
+
+首次运行自动创建各数据集的 `docs/test/*_preset/source/` 及所需子目录；不用手工 mkdir。输入路径以脚本所在项目为准，不依赖 PowerShell 当前目录。若从其他目录启动，用脚本绝对路径，如 `python "D:\python project\dkf-agent\scripts\download_benchmarks.py" --dataset ocb --scope metadata`。不存在的 OCB 审核文件只初始化为 `[]`，不批准、不覆盖已有审核。
+
+HF API 和 resolve 下载都使用选定镜像，GitHub QA 仍来自官方 GitHub；不会把镜像当新的官方来源。需要切官方入口时在同一命令追加 `--endpoint https://huggingface.co`（优先于环境变量）。首次自动冻结 HF 40 位 SHA，之后复用本地版本；终端和 dataset_info.json 均可查看 revision，无需手工取得。指定历史版本用 `--revision 实际40位SHA`，与既有版本不一致会停止，不混下载。
+
+终端持续显示文件、已下载/总字节、速度、有限重试和摘要。OHR ZIP 约 1.52 GB，OCB 默认只取元数据/小 Parquet，不下载约 3 GB 全仓；Omni 标注约 42 MB，默认不下载约 1.5 GB 图像。实际大小以固定文件树为准，另留磁盘余量。全部图像仅显式使用 `--dataset omni --scope all-images`。
+
+下载中断后**重跑完全相同的命令**；已完成原件校验后跳过，本工具 .part/检查点继续恢复。查看缺失项、验证对应范围所有文件：
+
+```powershell
+python scripts/download_benchmarks.py --dataset ocb --scope metadata --list-missing
+python scripts/download_benchmarks.py --dataset ohr --scope required --verify-only
+python scripts/download_benchmarks.py --dataset ocb --scope metadata --verify-only
+python scripts/download_benchmarks.py --dataset ocb --scope reviewed --verify-only
+python scripts/download_benchmarks.py --dataset omni --scope metadata --verify-only
+python scripts/download_benchmarks.py --dataset omni --scope candidate-images --count 5 --verify-only
+```
+
+这两个检查模式不联网；普通范围的 `--dry-run` 仅联网列版本/元数据计划，不下载原件、不建目录；下方 native-library 则离线生成自有计划/报告。404/鉴权拒绝立即停止当前文件；超时/429/5xx 有限重试；磁盘不足先腾出空间。坏正式文件、未知来源 .part 或不匹配 Range 不覆盖、不盲目重启下载；先人工核对。镜像失败可显式切官方后重跑，仍沿用相同版本与摘要。不会清空 source 或 HF 缓存。
+
+已有 OCB 的 dataset_info.json/source_record 校验正常，但 hosted_files.json 是字符串列表时，**不要重下 dataset_info 或 Parquet**。以下显式修复命令读取本地固定 SHA，完整取得并校验官方分页对象树，再备份旧表、原子替换 hosted_files.json；不删旧表原字节、不改审核表或抽样结果：
+
+```powershell
+python scripts/download_benchmarks.py --dataset ocb --scope hosted-tree --replace-hosted-tree
+python scripts/prepare_ocb_preset.py --confirm-official-source --diagnose-inputs
+python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42 --results-dir docs/test/ocb_preset/results/run-04
+```
+
+修复前保留已验证的 source/hosted_files.structured.json；旧字符串表完整备份至 source/.download/backups/hosted_files-<原字节SHA256>.json。无替换参数时只生成副本；副本无效、分页缺失、版本不一致或备份冲突均停止，绝不先删除正式文件。重复修复会跳过已一致的对象树。修复后下载/prepare 默认入口直接可用；--verify-only 等只读模式不能与替换参数组合。
+
+run-04 必须是尚未使用的结果目录；若已存在，手动换新编号，不改旧计划。诊断显示 source_record、审核表、文件树、QA 读取各步骤；OCB 支持官方 File Fidelity Excel、File Fidelity Word、File Fidelity PowerPoint，保留原 track/QA/Parquet，排除 Domain。空审核或原件未齐时预览仍如实报告缺口，不代表素材验收通过。详细校验、备份及旧计划边界见 [OCB 兼容诊断](docs/PRESET_IMPORT.md#ocb-兼容诊断保留正常-dataset_info仅重新获取对象树)。
+
+下载后运行既有**离线**准备工具，再审核报告、显式提取、补合法多格式资料并合并 manifest：
+
+```powershell
+python scripts/prepare_ohr_bench_preset.py --confirm-official-source --count 7 --seed 42
+python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42
+python scripts/prepare_omnidocbench_preset.py --confirm-official-source --count 5 --seed 42
+```
+
+OHR 官方 `text` 仅在内部映射为 plain_text，原始 QA 字段不变；`multi` 单独报告，不猜分项类别。用户已确认当前版本 Newspaper QA 为 0，可明确选择其他六领域，在新目录生成计划，不覆盖旧报告：
+
+```powershell
+python scripts/prepare_ohr_bench_preset.py --confirm-official-source --domains finance academic textbook law manual administration --results-dir docs/test/ohr_bench_preset/results/run-03
+```
+
+报告仍记录 Newspaper 源 QA 数和未覆盖状态；没有自动补题、改官方数据或取消其他抽样/质量要求。
+
+Omni 候选不足/覆盖缺口返回 2，查看 .download/omni_candidates.json 后手动增加 `--count`（最多 12）重跑；最终离线选择仍可能不同，不能伪造覆盖。OCB 原 reviewed 模式只下载已审核、依赖完整的托管 Office；全量素材库另用下节 native-library，均不自动转换。详细目录、全部参数、许可审核和缺口处理见 [公开基准准备与验收](docs/PRESET_IMPORT.md#统一下载工具用户执行)。
+
+QA/GT、下载检查点和报告仅留 docs/test，不能进入 preset 或 Git。**下载成功不代表版权/云外传授权、解析质量合格、READY 或问答准确率通过**；三个 prepare 工具依旧离线，不自动导入。
 
 运行准备工具前，先手动准备说明中的 source 输入。`BENCH_MISSING` 为缺输入、`BENCH_EMPTY` 为空文件，只有实际超限才返回 `BENCH_LIMIT`；不要据此直接调大预算或跳过来源校验。
+
+#### OCB 全量原生素材库（用户执行）
+
+复用已有 OCB 元数据和固定 revision，读取全部 QA（包括 Domain/多文件依赖），按官方文件身份去重，优先 HF 托管原件。默认 DOCX/XLSX/PPTX，不限每类两份；只有原始/目标格式一致且明确 convert=no/false 才为原生候选。无需重下载已经正常的 dataset_info 或 Parquet。
+
+```powershell
+conda activate dkf-agent
+$env:HF_ENDPOINT = "https://hf-mirror.com"
+# 1. 离线生成完整候选/规模报告；首次自动创建目录，不下载原件。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --dry-run
+# 2. 人工查看计划/许可模板；只把实际审核过的 review_template 合并到 source_review。
+code docs/test/ocb_preset/results/native_download_plan.json docs/test/ocb_preset/results/license_review_candidates.json docs/test/ocb_preset/source/source_review.json
+# 3. 核对原始格式、来源和本地使用许可后，逐项确认再执行；不代表云外传授权。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --execute --allow-external --workers 3
+# 4. 中断/失败后恢复同一范围、预算与来源；完整文件验证后跳过。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --execute --allow-external --workers 3 --resume
+# 5. 离线查缺失/失败，并单独复核已经取得的文件。
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --list-missing
+python scripts/download_benchmarks.py --dataset ocb --scope native-library --verify-only
+# 6. 仍由既有准备器选择少量已审核 Office；目标已存在请换新编号，不覆盖旧计划。
+python scripts/prepare_ocb_preset.py --confirm-official-source --per-format 2 --seed 42 --results-dir docs/test/ocb_preset/results/native-selection-01
+```
+
+source_review 保持 JSON 数组。审核通过需正确的 reference_file/source_url、original_native=true、conversion_required=false、local_use_confirmed=true 及真实 license；没有审核的项保留未批准，禁止一键按“已下载”批准。第三方跨域跳转需逐域核对 allowed_redirect_hosts，默认只允许原域名；公开 HTTP、登录/密钥链接、内网及未审跳转均拒绝，不关闭 TLS、不抓登录态。
+
+报告仅写 OCB results 中的 native_download_plan.json、native_download_report.json、license_review_candidates.json，不改旧抽样结果。默认单文件 200 MiB、本轮容量 8192 MiB，可用 --max-file-mb/--max-total-mb 显式设置；第三方大小未知时报告已知 HF 字节、未知数量和上界，执行时再核对响应长度。不覆盖已有完整原件；错误原件/身份不明断点保留供人审。
+
+原件只进入 source/reference_files 或 source/external_files，不复制到 preset。可选 CSV/XLSM 另生成一版计划：追加 `--native-formats docx xlsx pptx csv xlsm --native-results-dir docs/test/ocb_preset/results/native-all-01`，后续所有命令沿用同参数。CSV 完整性检查额外限 32 MiB；XLSM 只存原件、检查宏工作簿容器，不运行宏，也不扩展当前业务上传/解析契约。新参数与范围不一致时拒绝覆盖计划；详细审核、缺口及退出码见 [OCB 全量素材说明](docs/PRESET_IMPORT.md#ocb-全量原生素材库下载用户执行)。
 
 ## 5. 部署检查与排障
 
@@ -488,4 +604,4 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 ## 6. 开发文档
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [预置导入](docs/PRESET_IMPORT.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [Dense Retrieval](docs/DENSE_RETRIEVAL.md) · [预置导入](docs/PRESET_IMPORT.md) · [业务日志](docs/BUSINESS_LOGGING.md)

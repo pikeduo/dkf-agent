@@ -22,6 +22,7 @@ MIB = 1024 ** 2
 VERSION = "ohr-selection-v1"
 DOMAINS = {"finance", "academic", "textbook", "law", "manual", "newspaper", "administration"}
 EVIDENCE = {"plain_text", "table", "formula", "chart", "reading_order"}
+EVIDENCE_ALIASES = {"text": "plain_text"}
 SOURCES = {
     "github": "https://github.com/opendatalab/OHR-Bench",
     "dataset": "https://huggingface.co/datasets/opendatalab/OHR-Bench",
@@ -126,7 +127,7 @@ def plain_path(path, *, beneath=None):
 
 
 def qa_rows(value):
-    """读取官方字段；保留问题/答案原值，拒绝非法或重复 ID，页码为官方 0-based int/list。"""
+    """保留原 QA；仅 text 显式映射 plain_text，multi 单独报告且不进入五类抽样。"""
 
     if not isinstance(value, list) or not 1 <= len(value) <= 100000:
         raise PreparationError("OHR_QA")
@@ -149,6 +150,11 @@ def qa_rows(value):
                 rejected["ambiguous_source_identity"] += 1
                 continue
             category = row["evidence_source"].strip().casefold().replace(" ", "_")
+            if category == "multi":
+                # 未提供可确定的分项类别/证据关联，不把一条 multi 拆成虚构的多个问题。
+                rejected["multi_evidence_unsupported"] += 1
+                continue
+            category = EVIDENCE_ALIASES.get(category, category)
             if category not in EVIDENCE:
                 rejected["unknown_evidence_source"] += 1
                 continue
@@ -366,8 +372,8 @@ def descriptor_name_doc(value):
 
 
 def build_artifacts(selected, source, limits, domains, candidates_count, rejected, qa_rejected, inspection,
-                    *, inventory=None):
-    """发布真实 QA 参考和身份计划；已验证覆盖仅指官方 QA/结构，不宣称解析质量通过。"""
+                    *, inventory=None, qa_inventory=None):
+    """冻结真实参考和源 QA 分类/领域清单；排除领域、零 QA 和 multi 不冒充已覆盖。"""
 
     references, documents = [], []
     counts, domain_counts = Counter(), Counter()
@@ -400,6 +406,9 @@ def build_artifacts(selected, source, limits, domains, candidates_count, rejecte
     payload = {"version": VERSION, "sources": source, "limits": vars(limits), "domains": sorted(domains),
                "candidate_inventory": inventory or [],
                "documents": documents, "gaps": missing, "qa_reference_sha256": hashlib.sha256(reference_bytes).hexdigest()}
+    if qa_inventory is not None:
+        # 诊断只进入新计划/报告，source 身份契约不变，旧冻结计划不会被改写或失效。
+        payload["source_qa_inventory"] = qa_inventory
     plan = payload | {"plan_sha256": digest(payload)}
     report = {"version": VERSION, "plan_sha256": plan["plan_sha256"], "candidates_count": candidates_count,
         "selected_count": len(documents), "gaps": missing, "inspection": inspection,
@@ -407,6 +416,12 @@ def build_artifacts(selected, source, limits, domains, candidates_count, rejecte
                               "domains": dict(sorted(domain_counts.items())),
                               "pdf_structure_crc_sha_and_qa_page_ranges": bool(documents)},
         "documents": documents, "rejected_candidates": rejected, "rejected_qa_counts": qa_rejected,
+        "source_qa_inventory": qa_inventory,
+        "domain_coverage": {"requested": sorted(domains), "selected": sorted(domain_counts),
+            "excluded_by_user": sorted(DOMAINS - set(domains)),
+            "not_selected": sorted(DOMAINS - set(domain_counts)),
+            "source_domains_without_qa": (sorted(key for key, count in qa_inventory["raw_domain_counts"].items() if count == 0)
+                                          if qa_inventory is not None else None)},
         "not_verified": ["text_pdf/scan_pdf/mixed 标签", "表格/公式/图表/多栏真实视觉内容",
                          "Parser/OCR 阅读顺序及质量", "版权与云外传权限", "READY", "问答准确率"],
         "estimated_cloud_upper_bound": {"source_files": len(documents),
@@ -430,8 +445,25 @@ def inventory_entry(item):
             "actual_pdf_page_count": None, "sha256": None}
 
 
-def load_source(qa_path, zip_path):
-    """读取用户已下载 QA，记录 SHA；ZIP 只在后续读取目录及少量候选，不散落复制源文件。"""
+def source_qa_inventory(value):
+    """统计原始官方分类及七领域的实际行数；零值来自真实输入，不生成问题或猜多证据类别。"""
+    categories, domains = Counter(), Counter()
+    for row in value:
+        if not isinstance(row, dict):
+            continue
+        category, domain = row.get("evidence_source"), row.get("doc_type")
+        if isinstance(category, str):
+            categories[category] += 1
+        if isinstance(domain, str) and domain.casefold() in DOMAINS:
+            domains[domain.casefold()] += 1
+    return {"counts_before_schema_filtering": True, "raw_evidence_source_counts": dict(sorted(categories.items())),
+            "raw_domain_counts": {domain: domains[domain] for domain in sorted(DOMAINS)},
+            "evidence_aliases": EVIDENCE_ALIASES.copy(),
+            "multi_policy": "reported_separately_not_mapped_not_selected"}
+
+
+def load_source(qa_path, zip_path, *, inventory=None):
+    """读取原 QA 并可输出统计；来源摘要结构保持不变，不下载或改写输入。"""
 
     qa_path, zip_path = plain_path(qa_path), plain_path(zip_path)
     if not qa_path.is_file() or not zip_path.is_file() or not 0 < qa_path.stat().st_size <= 32 * MIB:
@@ -442,6 +474,8 @@ def load_source(qa_path, zip_path):
     except (ValueError, UnicodeError):
         raise PreparationError("OHR_QA") from None
     groups, rejected = qa_rows(value)
+    if inventory is not None:
+        inventory.update(source_qa_inventory(value))
     observed = sorted({row["evidence_source"] for row in value
                        if isinstance(row, dict) and isinstance(row.get("evidence_source"), str)
                        and len(row["evidence_source"]) <= 128})
@@ -491,7 +525,8 @@ def preview(qa_path, zip_path, results, limits, domains):
     targets = [results / name for name in ("selection_plan.json", "selection_report.json", "qa_reference.jsonl")]
     if any(target.exists() or target.is_symlink() for target in targets):
         raise PreparationError("OHR_EXISTS")
-    groups, qa_rejected, source = load_source(qa_path, zip_path)
+    qa_inventory = {}
+    groups, qa_rejected, source = load_source(qa_path, zip_path, inventory=qa_inventory)
     with ZipFile(zip_path) as archive:
         pdfs, fingerprint = archive_index(archive)
         pool, rejected = candidates(groups, pdfs, limits, domains)
@@ -500,7 +535,7 @@ def preview(qa_path, zip_path, results, limits, domains):
         selected, failures, inspection = select_documents(pool, archive, limits)
     plan, report, references = build_artifacts(selected, source, limits, domains, len(pool),
                                                rejected + failures, qa_rejected, inspection,
-                                               inventory=[inventory_entry(item) for item in pool])
+                                               inventory=[inventory_entry(item) for item in pool], qa_inventory=qa_inventory)
     if len(references) > 32 * MIB or len(encoded(plan)) > 16 * MIB or len(encoded(report)) > 16 * MIB:
         raise PreparationError("OHR_LIMIT")
     for target, data in zip(targets, (encoded(plan) + b"\n", encoded(report) + b"\n", references)):
