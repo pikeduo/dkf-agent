@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25 Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -450,6 +450,12 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认20，1～100），以及 `doc_ids=["目标文档UUID"]` 限定单/多文档（最多100个）。省略 doc_ids 检索该库全部合格文档；空列表/非法UUID拒绝，文档过滤在 PostgreSQL Top-K 前执行，无匹配不扩大范围。`retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回原始证据 DTO。Query 首次调用会加载已有本地 BGE-M3，构造不会加载；尚无 HTTP 检索或问答接口。
 
 用户先准备已有 core/NLP 缓存、PostgreSQL 和同版本 BGE-M3；检索时不需要 API/Worker，避免与 GPU Worker 同时各加载一份模型。无匹配返回空集，不扩大库或重建数据；首版精确排序有扫描成本，分数为余弦相似度而非概率。完整使用与手动验收见 [Dense Retrieval](docs/DENSE_RETRIEVAL.md)。
+
+### BM25 Python Retriever
+
+已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key，尚无HTTP检索/问答接口。
+
+使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次读取当前READY语料，不产生第二套业务表或磁盘索引。首次构建有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
 
 ### 预置知识库导入
 

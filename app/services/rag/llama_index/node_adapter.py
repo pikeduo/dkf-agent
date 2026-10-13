@@ -30,12 +30,14 @@ def loaded_snapshot(instance, fields: tuple[str, ...]) -> dict:
     return values
 
 
-def chunk_to_node(chunk: DocumentChunk, document: Document, *, include_embedding: bool = True) -> TextNode:
-    """用业务 chunk_id 构建稳定 Node，保留完整证据；默认只复制已有向量，不计算新向量。"""
+def chunk_to_node(chunk: DocumentChunk, document: Document, *, include_embedding: bool = True,
+                  log_success: bool = True) -> TextNode:
+    """用原 chunk_id/证据构建 Node，不重编码；批量调用可关闭逐项成功日志，错误仍记录。"""
 
     started = perf_counter()
     try:
-        if not isinstance(chunk, DocumentChunk) or not isinstance(document, Document) or type(include_embedding) is not bool:
+        if (not isinstance(chunk, DocumentChunk) or not isinstance(document, Document)
+                or type(include_embedding) is not bool or type(log_success) is not bool):
             raise RagAdapterError("RAG_ADAPTER_INPUT")
         source = loaded_snapshot(chunk, CHUNK_FIELDS + (("embedding",) if include_embedding else ()))
         owner = loaded_snapshot(document, DOCUMENT_FIELDS)
@@ -69,8 +71,9 @@ def chunk_to_node(chunk: DocumentChunk, document: Document, *, include_embedding
         error = exc if isinstance(exc, RagAdapterError) else RagAdapterError("RAG_ADAPTER_INPUT")
         log_event("rag.adapter_failed", level=logging.WARNING, stage="chunk_to_node", error_code=error.code)
         raise error from None
-    log_event("rag.node_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
-              artifact_reused=embedding is not None, duration_ms=(perf_counter() - started) * 1000)
+    if log_success:
+        log_event("rag.node_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
+                  artifact_reused=embedding is not None, duration_ms=(perf_counter() - started) * 1000)
     return node
 
 

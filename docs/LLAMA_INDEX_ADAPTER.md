@@ -43,6 +43,7 @@ result = node_to_result(NodeWithScore(node=node, score=0.0))
 - metadata 含 kb_id/doc_id/chunk_id/file_name/file_type/page_start/page_end/section；chunk_metadata 深复制完整原字段，包括 source_spans、page_semantics、输入 Hash 和算法信息，不伪造页码/坐标。可用时保存原 index_config.result.model 的 embedding_identity。
 - metadata 从 LlamaIndex EMBED/LLM 文本中排除，不把文件名/页码/ID 前缀混入已有编码；内部结果读取原 node.text，不使用附加 metadata 或修剪后的内容。
 - 默认复制已有向量（兼容 pgvector NumPy 输出），严格校验 1024 维、有限单位向量但不重新归一化。尚未向量化时保持 None，不补向量；include_embedding=False 可明确只转换证据。Node/DTO 的 metadata 不共享 ORM 可变对象。
+- 批量调用可显式传 `log_success=False` 省略逐项转换成功日志并由调用方记录汇总；错误事件仍记录，默认True不改变原15A/Dense行为或Node契约。
 - 内部 RetrievalResult 不依赖 LlamaIndex、不包含向量；含稳定 UUID、文档/页码/章节/text/完整 metadata/可选模型身份与 retrieval_score。未知分数保留 None，0/负分原样，非有限值拒绝，不解释成置信度。
 - 必需 ORM 字段未加载返回 RAG_ADAPTER_UNLOADED，转换不隐式 SELECT/autoflush。Document 需 doc_id/kb_id/file_name/file_type/index_config；Chunk 需 ID/归属/text/页范围/section/chunk_metadata，默认另需 embedding。调用方使用普通 ORM select 并在会话内显式 refresh/load 字段；不要把 partial ORM 或过期对象交给 Adapter。
 - 互转只校验内存来源一致性，不证明数据库当前 READY、权限、完整证据或 Query 模型相容性。未来 Retriever 仍必须限定 READY 和实际模型/编码版本，读取后不得任意修改来源 metadata。

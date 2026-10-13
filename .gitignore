@@ -39,6 +39,7 @@ docs/*
 !docs/PGVECTOR_INDEX.md
 !docs/LLAMA_INDEX_ADAPTER.md
 !docs/DENSE_RETRIEVAL.md
+!docs/BM25_RETRIEVAL.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*

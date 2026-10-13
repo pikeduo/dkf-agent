@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**18：单文档 Retrieval。doc_ids SQL过滤及证据保留已由用户测试并确认通过。阶段16正式数据验收及阶段17、此前待验收事项继续保留；不据此宣告其他阶段通过，阶段19等待用户授权。**
+当前阶段：**19：BM25 Retriever。已实现本地READY派生索引与统一Node返回，待用户验收；阶段18已确认通过。阶段16/17及此前其他验收事项保留，不自动进入20。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -44,11 +44,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 16 | 已实现预置导入与 OHR/Omni/OCB 三数据集联合冒烟（约14份、原API链路、完整QA/GT、分数据集Dense报告）；新增用例仅编写，真实导入与正式质量验收待用户完成 |
 | 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
 | 18 | 固定单/多文档范围、参数校验、SQL Top-K前过滤与原始证据保留；用户已确认测试通过 |
-| 19 及后续 | 未开展，等待用户确认 |
+| 19 | 已实现本地BM25、kb/doc范围、当前READY快照、派生缓存重建和原始证据保留；用例未运行，待验收 |
+| 20 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 阶段18已完成用户验收，Codex不代跑测试或自动推进；阶段16正式数据及此前验收事项保留。未经用户授权不进入BM25/Fusion/Rerank/RAG，不扩展Hybrid或旧Office Native Parser。
+- 本轮只增量实现阶段19及必要用例/说明，不改解析/切片/向量化/索引、素材或已有验收结论；不执行检索/测试/部署，不进入Fusion/Rerank/RAG或扩展Hybrid。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -195,6 +196,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 首版物化过滤候选后精确余弦距离/稳定 chunk_id Top-K（默认 20，上限 100），保留既有 HNSW 但不声称使用 ANN；大库扫描成本待验收。1-distance 是相似度而非概率，空集不扩大范围/触发重建；Node 原 ID/正文/全部证据不变。
 - 公共入口不发基类含正文的 callback payload、不递归检索，业务日志只记 UUID/Top-K/数量/耗时/安全错误；不注册全局 Tracing，第三方 instrumentation/SQL echo 仍须禁用。结果代表 SQL 查询快照，不保证查询后文档仍 READY。
 
+### 本地 BM25
+
+- 仅从同kb_id/ACTIVE库、可选doc_ids、READY及当前代次的document_chunks派生原TextNode；不读原件、重切片/Embedding或建立新业务表。BM25无Query向量，不要求当前BGE模型身份匹配，原Node证据及存储模型身份仍保留。
+- 使用已声明rank-bm25的BM25Plus与版本化词项规则，稳定同分UUID；只返回真实词项重叠，分数不是概率，不与Dense直接相加。中文字符/二元片段存在部分匹配边界，不宣称专业分词或语义准确率。
+- 实例内词频索引可重建，每次先查当前READY快照；内容/集合/版本变化重建，返回Node只用当前证据。失败不返回旧缓存，不写磁盘/pickle；超限报错，不静默截断全库语料。批量转换可省略逐项成功日志，但保留汇总及错误，默认Adapter行为不变。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -210,6 +217,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 向量入库、HNSW、READY 与人工验收 | [pgvector 入库](docs/PGVECTOR_INDEX.md) |
 | LlamaIndex Node/证据 DTO、Query 边界与人工验收 | [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) |
 | Dense SQL/模型隔离、Top-K、日志与人工验收 | [Dense Retrieval](docs/DENSE_RETRIEVAL.md) |
+| BM25词项、READY快照、派生缓存及人工验收 | [BM25 Retriever](docs/BM25_RETRIEVAL.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

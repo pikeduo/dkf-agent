@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段18单文档过滤已由用户测试并确认通过；阶段16正式数据验收及阶段17等此前待验收事项仍保留。** 不自动放行19。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段19本地BM25代码已实现、待用户验收；阶段18已由用户确认通过，其他待验收事项保留。** 不自动进入20。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 当前停在阶段18验收收尾，复用原SQL/Query编码/Node Adapter，不重做业务链路。未经用户授权，不下载资源、触碰素材、执行迁移/测试/真实查询、启动服务或进入BM25/Fusion/Rerank/RAG。\
+> 本轮只实现本地READY Chunk派生的BM25与统一Retriever，复用已有依赖/证据边界，不重做业务链路；不触碰素材、执行迁移/测试/真实查询、启动服务或进入Fusion/Rerank/RAG。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2750,6 +2750,14 @@ doc_ids = ["xxx"]
 ---
 
 # 25. 阶段 19：BM25 Retriever
+
+## 当前实现与验收边界
+
+- 已实现本地BM25Plus包装及NodeWithScore/DTO返回，待用户执行单测与真实关键词验收；不宣告问答或正式基准通过。
+- 固定kb_id/可选doc_ids/Top-K，SQL限定ACTIVE、READY及当前代次；无向量列读取、Query模型调用、原件读取或新业务表。
+- 原TextNode派生词频索引，实例内缓存按内容/Chunk集合/版本失效；每次查当前READY，元数据只用新Node，失败不返回旧缓存。无磁盘持久化或第二套真相。
+- 数字/型号/缩写完整词、NFKC与中文字符/二元片段；分数降序/同分chunk_id，零词项重叠为空，非概率且不与Dense直接加分。安全预算与质量边界见 [BM25说明](BM25_RETRIEVAL.md)。
+- 本轮仅补装已声明轻量rank-bm25=0.2.2，不升级其他依赖；不运行pytest/数据库/模型/云API或准备样本。停止等待用户验收，不进入20。
 
 ## 目标
 
