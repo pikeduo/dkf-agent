@@ -1,4 +1,4 @@
-"""阶段 17 的只读 Dense SQL 边界；只查询既有 Chunk，不连接模型或接管向量存储。"""
+"""知识库/指定文档的只读 Dense SQL 边界；只查询既有 Chunk，不接管向量存储。"""
 
 import math
 import re
@@ -17,11 +17,12 @@ from app.services.rag.llama_index.validation import json_snapshot, vector_snapsh
 
 DEFAULT_TOP_K = 20
 MAX_TOP_K = 100
+MAX_DOC_IDS = 100
 MAX_QUERY_CHARS = 32768
 MODEL_FIELDS = {"model_name", "model_fingerprint", "dimension", "normalized", "version", "max_length", "precision"}
 ERRORS = {
-    "DENSE_INPUT": "知识库、Query 或 Top-K 参数无效",
-    "DENSE_LIMIT": "Query 或 Top-K 超过安全上限",
+    "DENSE_INPUT": "知识库、文档范围、Query 或 Top-K 参数无效",
+    "DENSE_LIMIT": "文档数量、Query 或 Top-K 超过安全上限",
     "DENSE_MODEL": "Query 模型身份或编码版本不可用",
     "DENSE_MODEL_CHANGED": "Query 编码期间模型身份变化，本次未返回检索结果",
     "DENSE_QUERY_EMBEDDING": "Query 编码未完成，请人工检查已有 BGE-M3 部署",
@@ -82,6 +83,18 @@ def validate_query(query: str) -> str:
     return query
 
 
+def validate_doc_ids(doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None) -> tuple[UUID, ...] | None:
+    """省略表示全库；显式范围须为1～100个非零UUID，去重排序并冻结，空列表不放宽为全库。"""
+    if doc_ids is None:
+        return None
+    if not isinstance(doc_ids, (list, tuple)) or not doc_ids:
+        raise DenseRetrievalError("DENSE_INPUT")
+    if len(doc_ids) > MAX_DOC_IDS:
+        raise DenseRetrievalError("DENSE_LIMIT")
+    # 复用现有 UUID 严格校验；不读取 Document、不按字符串插入 SQL。
+    return tuple(sorted({validate_scope(value, DEFAULT_TOP_K) for value in doc_ids}))
+
+
 def model_snapshot(value: dict) -> dict:
     """严格冻结阶段 14 实际身份：文件指纹、版本、维度、归一化、长度及精度均须相容。"""
     try:
@@ -99,11 +112,11 @@ def model_snapshot(value: dict) -> dict:
         raise DenseRetrievalError("DENSE_MODEL") from None
 
 
-def eligibility(kb_id: UUID, identity: dict) -> tuple:
-    """所有过滤进入 SQL，再做 Top-K；未知旧向量/失效代次/跨库或禁用知识库不参与。"""
+def eligibility(kb_id: UUID, identity: dict, doc_ids: tuple[UUID, ...] | None = None) -> tuple:
+    """知识库及可选文档过滤均进入候选 SQL，再做 Top-K；未知模型/失效代次不参与。"""
     config = Document.index_config
     parse_id = cast(Document.processing_task_id, String)
-    return (
+    filters = (
         DocumentChunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
         KnowledgeBase.status == "ACTIVE", Document.status == "READY", DocumentChunk.embedding.is_not(None),
         Document.index_task_id.is_not(None),
@@ -114,15 +127,18 @@ def eligibility(kb_id: UUID, identity: dict) -> tuple:
         config["source_parse_task_id"].as_string() == parse_id,
         DocumentChunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id,
     )
+    return filters if doc_ids is None else filters + (DocumentChunk.doc_id.in_(doc_ids),)
 
 
 def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict,
-                    top_k: int = DEFAULT_TOP_K):
-    """构建参数化精确检索：过滤候选物化 CTE、余弦距离/UUID 稳定排序，再只读取 Top-K 正文。
+                    top_k: int = DEFAULT_TOP_K, *,
+                    doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None):
+    """构建参数化精确检索：知识库/文档候选物化 CTE、距离/UUID 排序，再读取 Top-K 正文。
 
     物化屏障避免 HNSW 近似候选截断造成过滤后的漏项；不修改索引或向量值。
     """
     kb_id = validate_scope(kb_id, top_k)
+    doc_ids = validate_doc_ids(doc_ids)
     identity = model_snapshot(identity)
     try:
         vector = vector_snapshot(query_vector)
@@ -131,7 +147,7 @@ def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict
     owner_join = (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id)
     candidates = (select(DocumentChunk.chunk_id, DocumentChunk.embedding).select_from(DocumentChunk)
         .join(Document, owner_join).join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id)
-        .where(*eligibility(kb_id, identity)).cte("dense_eligible").prefix_with("MATERIALIZED", dialect="postgresql"))
+        .where(*eligibility(kb_id, identity, doc_ids)).cte("dense_eligible").prefix_with("MATERIALIZED", dialect="postgresql"))
     distance = candidates.c.embedding.cosine_distance(vector)
     ranked = (select(candidates.c.chunk_id, distance.label("cosine_distance"))
         .order_by(distance.asc(), candidates.c.chunk_id.asc()).limit(top_k).cte("dense_ranked"))
@@ -148,11 +164,13 @@ def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict
 
 
 def select_dense_hits(session: Session, kb_id: UUID | str, query_vector: list[float], identity: dict,
-                      top_k: int = DEFAULT_TOP_K) -> list[DenseHit]:
-    """只执行有界 SELECT；不 flush/commit/rollback、落库或重编码，坏结果全批拒绝而非部分返回。"""
+                      top_k: int = DEFAULT_TOP_K, *,
+                      doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None) -> list[DenseHit]:
+    """只读执行已下推范围的 SELECT；越界行全批拒绝，不以 Python 删除其他文档冒充 SQL 过滤。"""
     kb_id = validate_scope(kb_id, top_k)
+    doc_ids = validate_doc_ids(doc_ids)
     identity = model_snapshot(identity)
-    statement = dense_statement(kb_id, query_vector, identity, top_k)
+    statement = dense_statement(kb_id, query_vector, identity, top_k, doc_ids=doc_ids)
     if session.new or session.dirty or session.deleted:
         raise DenseRetrievalError("DENSE_SESSION")
     try:
@@ -168,6 +186,7 @@ def select_dense_hits(session: Session, kb_id: UUID | str, query_vector: list[fl
             chunk, document, distance = row
             config = document.index_config
             if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
+                    or (doc_ids is not None and chunk.doc_id not in doc_ids)
                     or document.status != "READY" or document.index_task_id is None
                     or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
                     or model_snapshot(config["result"]["model"]) != identity

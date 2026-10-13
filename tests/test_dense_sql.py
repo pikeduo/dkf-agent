@@ -10,8 +10,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import Document, DocumentChunk
 from app.services.rag.dense import (
-    DEFAULT_TOP_K, MAX_QUERY_CHARS, DenseRetrievalError, dense_statement, model_snapshot,
-    select_dense_hits, validate_query, validate_scope,
+    DEFAULT_TOP_K, MAX_DOC_IDS, MAX_QUERY_CHARS, DenseRetrievalError, dense_statement, model_snapshot,
+    select_dense_hits, validate_doc_ids, validate_query, validate_scope,
 )
 from app.services.indexing import INDEX_VERSION
 
@@ -80,6 +80,75 @@ def test_statement_filters_before_exact_top_k_and_binds_identity():
     assert "CREATE" not in sql and "UPDATE" not in sql and "FOR UPDATE" not in sql
 
 
+@pytest.mark.parametrize("multiple", [False, True])
+def test_document_filter_is_bound_before_distance_and_limit(multiple):
+    """单/多文档 UUID 在物化候选内参数化过滤，不先全库 Top-K 再删除证据。"""
+    kb_id, first, second = uuid4(), uuid4(), uuid4()
+    doc_ids = [str(first), second, first] if multiple else [str(first)]
+    statement = dense_statement(kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=doc_ids)
+    compiled = statement.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert sql.index("document_chunks.doc_id IN") < sql.index(" <=> ") < sql.index("LIMIT")
+    assert any(value == list(validate_doc_ids(doc_ids)) for value in compiled.params.values() if isinstance(value, list))
+    assert str(first) not in sql and str(second) not in sql
+    assert sql.count("kb_id =") >= 3
+    assert "READY" in compiled.params.values() and "ACTIVE" in compiled.params.values()
+    assert "document_chunks.embedding IS NOT NULL" in sql and model_identity() in compiled.params.values()
+
+
+def test_omitted_document_scope_keeps_stage17_full_kb_statement():
+    """省略/None 不添加文档谓词，保留阶段17全库语义，但显式空范围不能被当作 None。"""
+    kb_id, vector = uuid4(), [1.0] + [0.0] * 1023
+    original = dense_statement(kb_id, vector, model_identity()).compile(dialect=postgresql.dialect())
+    explicit = dense_statement(kb_id, vector, model_identity(), doc_ids=None).compile(dialect=postgresql.dialect())
+    assert str(original) == str(explicit) and original.params == explicit.params
+    assert "document_chunks.doc_id IN" not in str(original)
+    assert validate_doc_ids(None) is None
+
+
+@pytest.mark.parametrize("doc_ids", [[], (), "private-document-id", 123, {}, {UUID(int=1)},
+    [None], [True], [UUID(int=0)], ["private-document-id"]])
+def test_invalid_document_scope_is_rejected_safely(doc_ids):
+    """空/非列表/非法 UUID 范围立即拒绝，异常不带原始参数，也不放宽到全库。"""
+    with pytest.raises(DenseRetrievalError, match="DENSE_INPUT") as error:
+        dense_statement(uuid4(), [1.0] + [0.0] * 1023, model_identity(), doc_ids=doc_ids)
+    assert "private-document-id" not in str(error.value)
+
+
+def test_document_scope_is_frozen_deduplicated_and_bounded():
+    """字符串与 UUID 归一化为稳定元组，不改调用方列表；限制按输入数量生效。"""
+    first, second = UUID(int=1), UUID(int=2)
+    incoming = [second, str(first), first]
+    before = incoming[:]
+    assert validate_doc_ids(incoming) == (first, second) and incoming == before
+    assert len(validate_doc_ids([UUID(int=n) for n in range(1, MAX_DOC_IDS + 1)])) == MAX_DOC_IDS
+    with pytest.raises(DenseRetrievalError, match="DENSE_LIMIT"):
+        validate_doc_ids([first] * (MAX_DOC_IDS + 1))
+
+
+def test_out_of_document_scope_rejects_whole_result_not_python_filters():
+    """同库的其他文档也不能混入；模拟错误查询返回混合行时全批失败，不事后删行冒充成功。"""
+    first = stored_pair(chunk_number=1)
+    other = stored_pair(first[0].kb_id, chunk_number=2)
+    session = SqlSessionStub([(*first, 0.1), (*other, 0.2)])
+    with pytest.raises(DenseRetrievalError, match="DENSE_RESULT"):
+        select_dense_hits(session, first[0].kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=[first[1].doc_id])
+    assert len(session.statements) == 1
+
+
+def test_multiple_document_hits_keep_order_and_empty_scope_never_falls_back():
+    """多文档仍按距离/Chunk ID排序；不存在/跨库/非READY等被SQL排除后为空，不扩大范围。"""
+    first = stored_pair(chunk_number=1)
+    second = stored_pair(first[0].kb_id, chunk_number=2)
+    ids = [second[1].doc_id, first[1].doc_id]
+    session = SqlSessionStub([(*first, 0.1), (*second, 0.1)])
+    hits = select_dense_hits(session, first[0].kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=ids)
+    assert [hit.chunk.chunk_id for hit in hits] == [first[0].chunk_id, second[0].chunk_id]
+    empty = SqlSessionStub([])
+    assert select_dense_hits(empty, first[0].kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=[uuid4()]) == []
+    assert len(empty.statements) == 1 and "document_chunks.doc_id IN" in str(empty.statements[0])
+
+
 @pytest.mark.parametrize("kb_id,top_k", [(None, 20), (True, 20), ("private_invalid_id", 20),
     (UUID(int=0), 20), (uuid4(), 0), (uuid4(), -1), (uuid4(), True), (uuid4(), 1.5), (uuid4(), "20")])
 def test_invalid_scope_never_builds_sql(kb_id, top_k):
@@ -140,8 +209,9 @@ def test_sorted_rows_zero_negative_score_and_repeat_are_preserved():
 
 
 @pytest.mark.parametrize("change", ["cross_kb", "not_ready", "wrong_document", "model_fingerprint", "precision", "stale_parse", "stale_chunk"])
-def test_unsafe_returned_rows_are_rejected_not_repaired(change):
-    """SQL 外再防御性检查身份/状态/代次，任何不安全行都拒绝全批，不扩大范围或返回半份。"""
+@pytest.mark.parametrize("scoped", [False, True])
+def test_unsafe_returned_rows_are_rejected_not_repaired(change, scoped):
+    """全库/指定文档均保留知识库、READY、模型及代次防线；不安全行全批拒绝不修复。"""
     chunk, document = stored_pair()
     kb_id = chunk.kb_id
     if change == "cross_kb":
@@ -157,7 +227,8 @@ def test_unsafe_returned_rows_are_rejected_not_repaired(change):
     else:
         document.chunk_task_id = uuid4()
     with pytest.raises(DenseRetrievalError, match="DENSE_RESULT"):
-        select_dense_hits(SqlSessionStub([(chunk, document, 0.1)]), kb_id, [1.0] + [0.0] * 1023, model_identity())
+        select_dense_hits(SqlSessionStub([(chunk, document, 0.1)]), kb_id, [1.0] + [0.0] * 1023,
+                          model_identity(), doc_ids=[document.doc_id] if scoped else None)
 
 
 @pytest.mark.parametrize("rows_case", ["distance_order", "tie_order", "duplicate", "nan", "over_top_k"])

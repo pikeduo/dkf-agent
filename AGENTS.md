@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**17：Dense Retrieval。代码已实现后待人工验收，不能宣称真实检索成功。阶段 16：代码已实现，真实数据验收待完成；用户明确授权本轮先推进 17，不代表放行阶段 18。此前待验收事项继续保留。**
+当前阶段：**18：单文档 Retrieval。已实现 doc_ids SQL 过滤，待人工验收，不能宣称真实检索成功。阶段16正式数据验收及阶段17、此前待验收事项继续保留；用户本轮明确授权开发18，不代表其他阶段已通过或放行19。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -43,11 +43,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
 | 16 | 已实现预置导入与 OHR/Omni/OCB 三数据集联合冒烟（约14份、原API链路、完整QA/GT、分数据集Dense报告）；新增用例仅编写，真实导入与正式质量验收待用户完成 |
 | 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
-| 18 及后续 | 未开展，等待用户确认 |
+| 18 | 已实现固定单/多文档范围、参数校验、SQL Top-K 前过滤与原始证据保留；用例仅编写，待人工验收 |
+| 19 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮仅实施阶段 16/17 联合冒烟辅助工具、Mock 用例和操作说明，不改变业务语义或阶段 17 待验收状态；阶段 16 正式数据验收及此前待验收事项仍保留。不安装/下载/执行验收、不碰已有素材；未经用户确认，不进入单文档 Retrieval/BM25/Fusion/Rerank/RAG，不扩展 DOCX/PDF/PPT Hybrid，不新增旧 Office Native Parser、LibreOffice 或 GUI 截图链路。
+- 本轮仅增量实现阶段18的文档检索过滤、Mock用例和说明；不改解析/向量化/索引或既有素材，不安装/下载/执行验收。阶段16正式数据及此前验收事项保留；不进入BM25/Fusion/Rerank/RAG，不扩展Hybrid或旧Office Native Parser。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -190,7 +191,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 ### Dense Retrieval
 
 - 复用已有 DKFEmbeddingAdapter/进程共享 BGE-M3，实际模型身份前后核对；不接收未绑定模型身份的外部 Query 向量/变换文本，不重编码文档，不启用框架存储或 Query Engine。
-- 指定 kb_id/ACTIVE 库、READY、非空向量、完整 model_fingerprint/编码版本/长度/精度/归一化及当前解析/切片/GPU 代次在 SQL 内过滤；未知历史身份不能混用。独立只读短会话、有界超时，不 flush/commit/写业务数据，不共享线程绑定 Session。
+- 指定 kb_id/ACTIVE 库、可选 doc_ids、READY、非空向量、完整模型身份及当前解析/切片/GPU代次在候选SQL内过滤，再做Top-K。doc_ids冻结为非零UUID元组，最多100个；None保留全库语义，显式空/非法范围拒绝。不存在/跨库/不合格文档不扩大范围；越界返回行全批拒绝，不靠Python删行。独立只读短会话、有界超时，不flush/commit或共享线程Session。
 - 首版物化过滤候选后精确余弦距离/稳定 chunk_id Top-K（默认 20，上限 100），保留既有 HNSW 但不声称使用 ANN；大库扫描成本待验收。1-distance 是相似度而非概率，空集不扩大范围/触发重建；Node 原 ID/正文/全部证据不变。
 - 公共入口不发基类含正文的 callback payload、不递归检索，业务日志只记 UUID/Top-K/数量/耗时/安全错误；不注册全局 Tracing，第三方 instrumentation/SQL echo 仍须禁用。结果代表 SQL 查询快照，不保证查询后文档仍 READY。
 

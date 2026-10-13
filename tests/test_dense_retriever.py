@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.core import business_logging as logs
 from app.services.rag.dense import DenseRetrievalError
 from app.services.rag.llama_index import embedding_adapter
+from app.services.rag.llama_index import dense_retriever as retrievers
 from app.services.rag.llama_index.dense_retriever import DenseRetriever
 from app.services.rag.llama_index.embedding_adapter import DKFEmbeddingAdapter
 from app.services.rag.llama_index.node_adapter import node_to_result
@@ -138,6 +139,80 @@ def test_top_k_nodes_are_stable_and_metadata_roundtrip_is_complete():
     assert service.queries == ["PRIVATE_QUERY", "PRIVATE_QUERY"]
 
 
+@pytest.mark.parametrize("multiple", [False, True])
+def test_document_scope_is_immutable_and_nodes_keep_original_evidence(multiple):
+    """SQL文档范围冻结后不受原列表修改影响；单/多文档 Node/DTO 保留原 ID、页与来源。"""
+    first = stored_pair(chunk_number=1)
+    second = stored_pair(first[0].kb_id, chunk_number=2)
+    pairs = [first, second] if multiple else [first]
+    incoming = [str(pair[1].doc_id) for pair in pairs]
+    expected = tuple(sorted(pair[1].doc_id for pair in pairs))
+    service, (factory, sessions) = QueryServiceStub(), factory_for([(*pair, 0.1) for pair in pairs])
+    retriever = DenseRetriever(first[0].kb_id, doc_ids=incoming,
+        embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    incoming.clear()
+    assert retriever.doc_ids == expected and service.queries == [] and sessions == []
+    nodes = retriever.retrieve("PRIVATE_QUERY")
+    results = retriever.retrieve_results("PRIVATE_QUERY")
+    assert [result.doc_id for result in results] == [pair[1].doc_id for pair in pairs]
+    for node, (chunk, document) in zip(nodes, pairs):
+        assert node.node.node_id == str(chunk.chunk_id) and node.node.ref_doc_id == str(document.doc_id)
+        assert node.node.metadata["doc_id"] == str(document.doc_id)
+        assert node.node.metadata["chunk_id"] == str(chunk.chunk_id)
+        assert (node.node.metadata["page_start"], node.node.metadata["page_end"]) == (3, 4)
+        assert node.node.metadata["chunk_metadata"]["source_spans"][0]["page"] == 3
+        assert node.node.metadata["chunk_metadata"] == chunk.chunk_metadata
+    for session in sessions:
+        compiled = session.statements[0].compile()
+        assert any(value == list(expected) for value in compiled.params.values() if isinstance(value, list))
+        assert session.closed
+    assert service.queries == ["PRIVATE_QUERY", "PRIVATE_QUERY"] and service.identity_calls == 4
+
+
+@pytest.mark.parametrize("doc_ids", [[], (), "PRIVATE_DOC", ["PRIVATE_DOC"], [None], [True]])
+def test_invalid_document_scope_never_loads_model_or_database(doc_ids):
+    """构造拒绝非法文档范围，无 Query/模型身份读取、数据库查询或隐式全库退回。"""
+    chunk, _ = stored_pair()
+    service, (factory, sessions) = QueryServiceStub(), factory_for([])
+    with pytest.raises(DenseRetrievalError, match="DENSE_INPUT") as error:
+        DenseRetriever(chunk.kb_id, doc_ids=doc_ids, embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    assert sessions == [] and service.queries == [] and service.identity_calls == 0
+    assert "PRIVATE_DOC" not in str(error.value)
+
+
+def test_scoped_empty_result_never_retries_full_kb():
+    """合法UUID但SQL没有同库同模型READY证据时返回空集，只执行原限定范围的一次查询。"""
+    chunk, document = stored_pair()
+    service, (factory, sessions) = QueryServiceStub(), factory_for([])
+    retriever = DenseRetriever(chunk.kb_id, doc_ids=[document.doc_id],
+        embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    assert retriever.retrieve_results("PRIVATE_QUERY") == []
+    assert len(sessions) == 1 and len(sessions[0].statements) == 1
+    assert "document_chunks.doc_id IN" in str(sessions[0].statements[0])
+    assert service.queries == ["PRIVATE_QUERY"]
+
+
+def test_other_document_evidence_is_rejected_and_scope_logs_are_safe(monkeypatch):
+    """模拟同库越界证据，全批拒绝；既有日志仅保存目标UUID与数量，不记录 Query 或ID数组。"""
+    target = stored_pair(chunk_number=1)
+    other = stored_pair(target[0].kb_id, chunk_number=2)
+    service, (factory, _) = QueryServiceStub(), factory_for([(*other, 0.1)])
+    events = []
+
+    def log(event, **fields):
+        """捕获本模块安全摘要，不配置或写入真实日志。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(retrievers, "log_event", log)
+    retriever = DenseRetriever(target[0].kb_id, doc_ids=[target[1].doc_id],
+        embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    with pytest.raises(DenseRetrievalError, match="DENSE_RESULT"):
+        retriever.retrieve("PRIVATE_QUERY")
+    assert [event for event, fields in events] == ["dense.started", "dense.failed"]
+    assert all(fields["doc_id"] == target[1].doc_id and fields["source_document_count"] == 1 for event, fields in events)
+    assert "PRIVATE_QUERY" not in repr(events) and all("doc_ids" not in fields for event, fields in events)
+
+
 def test_model_change_stops_before_sql_and_never_falls_back():
     """身份前后改变时不执行数据库查询、不使用缓存外部向量或重编码文档。"""
     chunk, _ = stored_pair()
@@ -174,13 +249,15 @@ def test_empty_query_results_do_not_retry_or_enlarge_scope():
 
 
 def test_async_uses_separate_session_and_same_service():
-    """异步入口仍同进程委托现有服务，每次在执行线程建立独立只读会话。"""
+    """异步入口保留同一文档范围/共享服务，在执行线程建立独立只读会话。"""
     chunk, document = stored_pair()
     service, (factory, sessions) = QueryServiceStub(), factory_for([(chunk, document, 1.0)])
-    retriever = DenseRetriever(chunk.kb_id, embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    retriever = DenseRetriever(chunk.kb_id, doc_ids=[document.doc_id],
+        embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
     nodes = asyncio.run(retriever.aretrieve("PRIVATE_QUERY"))
     assert len(nodes) == 1 and nodes[0].score == 0.0
     assert len(sessions) == 1 and sessions[0].closed and len(service.queries) == 1
+    assert "document_chunks.doc_id IN" in str(sessions[0].statements[0])
 
 
 def test_framework_public_callback_payload_is_bypassed(monkeypatch):

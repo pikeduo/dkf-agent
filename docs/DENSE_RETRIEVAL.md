@@ -1,17 +1,31 @@
 # Dense Retrieval：只读边界与用户验收
 
-**阶段 16：代码已实现，真实数据验收待完成。阶段 17：代码已实现后待人工验收，不能宣称真实检索成功。** 用户明确允许在 16 数据下载/导入待完成期间先开发 17；本文件不宣告此前阶段已验收，也不授权进入 18。
+**阶段16正式数据验收、阶段17真实Dense验收仍待完成；阶段18单文档过滤代码已实现、待人工验收。** 用户明确授权本轮开发18，不宣告此前验收通过，不进入19或完整RAG。
 
 ## 范围与复用
 
-仅指定知识库的 Python Dense Retriever，不新增 HTTP API、任务、迁移、环境变量、表或依赖，不实现 doc_id 过滤、BM25、Fusion、Rerank、Query Engine、LLM 或 RAG。原上传/Parse/Chunk/Embedding/Index 不变，数据库 document_chunks 仍唯一向量真相来源。
+指定知识库及可选单/多文档的 Python Dense Retriever，不新增 HTTP API、任务、迁移、环境变量、表或依赖，不实现 BM25、Fusion、Rerank、Query Engine、LLM 或 RAG。原上传/Parse/Chunk/Embedding/Index 不变，数据库 document_chunks 仍唯一向量真相来源。
 
 | 入口 | 行为 |
 |---|---|
-| `DenseRetriever(kb_id, top_k=20)` | 构造只验证范围，不加载模型或连接数据库；top_k 严格整数 1～100 |
+| `DenseRetriever(kb_id, top_k=20, doc_ids=None)` | 构造验证并冻结范围，不加载模型或连接数据库；top_k 严格整数1～100 |
 | `retrieve(str / QueryBundle)` | 返回 `list[NodeWithScore]`；Query 原文一次编码，不加指令/前缀 |
 | `aretrieve(...)` | 同进程线程内独立 Session，仍使用同一模型锁；不共享线程绑定数据库会话 |
 | `retrieve_results(...)` | 复用 node_to_result，返回项目内部 RetrievalResult；不是问答响应 |
+
+## 单文档范围
+
+```python
+# 用现有 READY 文档的真实 UUID，不重新上传或生成文档向量。
+retriever = DenseRetriever(kb_id, doc_ids=["目标文档UUID"], top_k=20)
+nodes = retriever.retrieve(query)
+```
+
+`doc_ids` 接受列表/元组中的非零UUID对象或UUID字符串，输入最多100个；归一化、去重、稳定排序为不可变元组，修改调用方列表不改变已构造实例。单个ID限定单文档，多个ID表示该知识库内这些文档的并集。省略/None保留阶段17全库检索，显式 `[]`/空元组/单个字符串或非法ID抛 `DENSE_INPUT`，数量超限抛 `DENSE_LIMIT`，不静默放宽或截断。QueryBundle不能覆盖固定范围。
+
+有效UUID但不存在、跨知识库、非READY或模型/代次不匹配的文档由SQL排除；全部不合格返回空集，混合范围只返回合格交集，不自动重试全库、读原件或重算。文档ID存在不等于授权，未来HTTP入口仍需另做用户权限检查；本阶段不建立RBAC。
+
+文档IN谓词在MATERIALIZED候选CTE内、距离排序/LIMIT之前执行；已有SQL行校验再防御性拒绝越界行，不在Python里删除其他文档。Node.id_/metadata.doc_id/metadata.chunk_id/SOURCE仍为原身份，页码保留page_start/page_end与chunk_metadata.source_spans[].page，逻辑页不冒充物理页。
 
 QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_strs/image_path，避免未知模型向量混用或改变本阶段编码语义。空 Query、非法控制符安全拒绝；字符上限 32768，模型实际 token 上限仍由 BGE-M3 校验，不截断。空结果不扩大知识库、不触发任务或重新索引；每次检索编码一次 Query，无新增 Query 缓存。
 
@@ -22,6 +36,7 @@ QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_str
 复用 [pgvector SQLAlchemy cosine_distance](https://github.com/pgvector/pgvector-python#sqlalchemy)，不是 PGVectorStore 或 VectorStoreIndex。所有过滤先进入 SQL：
 
 - Chunk/Document/KnowledgeBase 均属于指定 kb_id，关联键同时使用 doc_id/kb_id；知识库 ACTIVE、文档 READY、embedding 非空。
+- 指定doc_ids时，Chunk.doc_id IN参数化ID列表与上述条件取交集，先过滤候选再计算Top-K。
 - index_config.version 为现有 pgvector-index-v1，result.model 与 Query 完整身份 JSON 相等。
 - index_task_id 非空，冻结 embedding_task_id/source_chunk_task_id/source_parse_task_id 与当前 Document 标识相同；Chunk.source_parse_task_id 同当前解析代次。
 
@@ -37,7 +52,7 @@ QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_str
 
 ## 日志、依赖与安全
 
-采用既有 UTF-8 中文白名单每日日志，dense.started/finished/empty/failed 仅 kb_id、top_k、数量/维度、阶段、耗时和安全错误码。不记录 Query、正文、Node、向量、SQL、连接串、模型目录或异常原文。空结果是一个正常结果，不解释成语义上“没有答案”。
+采用既有 UTF-8 中文白名单每日日志，dense.started/finished/empty/failed 仅 kb_id、top_k、数量/维度、阶段、耗时和安全错误码；指定范围时复用source_document_count，单文档另记doc_id，不输出ID数组。不记录 Query、正文、Node、向量、SQL、连接串、模型目录或异常原文。空结果是一个正常结果，不解释成语义上“没有答案”。
 
 遵循 [LlamaIndex BaseRetriever 抽象](https://developers.llamaindex.ai/python/framework-api-reference/retrievers/)，但复写公共 retrieve/aretrieve，避免基类含 Query/Node 的 callback payload、递归检索和默认 Query Engine。显式空 CallbackManager、不改全局 Settings/LLM/Tracing；第三方全局 instrumentation 或数据库 echo/debug 若被调用方开启仍可能记录参数，必须禁用未经审查的追踪导出，不能把第三方输出当作项目脱敏日志。
 
@@ -54,7 +69,7 @@ python -m pytest tests/test_dense_sql.py tests/test_dense_retriever.py -q
 python -m pytest tests/test_llama_index_adapter.py tests/test_indexing.py tests/test_business_logging.py -q
 ```
 
-core 缺失会跳过框架测试，跳过不是通过。预期覆盖过滤先于 LIMIT、知识库/ACTIVE/READY/非空/完整模型与代次谓词、默认/边界 Top-K、正确升序/同分 UUID、零负分、空结果、错误输入/模型变化、稳定重复查询、原始正文/全部证据深复制、独立只读会话/超时、无文档编码及日志脱敏。Stub 不证明 PostgreSQL 真执行计划、真实语义相关性、GPU 或本地模型已可用。
+core 缺失会跳过框架测试，跳过不是通过。预期覆盖过滤先于距离/LIMIT、单/多文档参数绑定、None兼容、空/非法/超限范围拒绝、输入列表冻结、越界行全批拒绝、空结果不回退、同步/异步范围及完整Node/DTO证据；原有知识库/READY/模型/代次、排序、只读、无文档编码和脱敏用例保留。Stub 不证明 PostgreSQL 真执行计划、真实语义相关性、GPU 或本地模型已可用。
 
 ## PostgreSQL + BGE-M3 真实验收：阶段 16 READY 数据具备后由用户执行
 
@@ -65,13 +80,13 @@ core 缺失会跳过框架测试，跳过不是通过。预期覆盖过滤先于
 1. 用户在 pgAdmin 只读查看目标库（替换 UUID），确认已有 READY/非空向量及一致模型，勿导出向量正文：
 
 ```sql
-SELECT d.kb_id,d.status,
+SELECT d.doc_id,d.file_name,d.kb_id,d.status,
        d.index_config->'result'->'model' AS model_identity,
        count(c.chunk_id) AS chunk_count,count(c.embedding) AS vector_count
 FROM documents d LEFT JOIN document_chunks c
 ON c.doc_id=d.doc_id AND c.kb_id=d.kb_id
 WHERE d.kb_id='知识库UUID'::uuid
-GROUP BY d.kb_id,d.status,d.index_config->'result'->'model';
+GROUP BY d.doc_id,d.file_name,d.kb_id,d.status,d.index_config->'result'->'model';
 ```
 
 预期目标 READY 行有向量，身份字段完整；阶段 16 的每文档 chunk_count=vector_count>0、1024 维/归一化和来源验证仍不可跳过。没有 READY 数据或身份缺失时停止，不把空检索当验收通过。
@@ -89,15 +104,19 @@ from app.services.rag.llama_index.node_adapter import node_to_result
 
 configure_logging(get_settings(), role='dense-cli')
 kb_id = UUID('你的知识库UUID')
-retriever = DenseRetriever(kb_id, top_k=20)
+doc_ids = [UUID('目标READY文档UUID')]
+retriever = DenseRetriever(kb_id, doc_ids=doc_ids, top_k=20)
+# 全库基线省略 doc_ids；多文档验收在同一列表添加另一个真实文档 UUID。
 query = '你从已入库原文或官方QA选择的真实问题'
 nodes = retriever.retrieve(query)
 assert nodes, '本次真实验收需已有同模型 READY 证据，空集不视为成功'
 assert len(nodes) <= 20
 results = [node_to_result(node) for node in nodes]
-assert all(result.kb_id == kb_id and result.metadata.get('source_spans') for result in results)
+assert all(result.kb_id == kb_id and result.doc_id in doc_ids and result.metadata.get('source_spans') for result in results)
+assert all(node.node.metadata['doc_id'] in {str(value) for value in doc_ids} and
+           node.node.node_id == node.node.metadata['chunk_id'] for node in nodes)
 assert all(nodes[index].score >= nodes[index + 1].score for index in range(len(nodes) - 1))
-print('count=',len(results),'same_kb=',True,'evidence_preserved=',True)
+print('count=',len(results),'same_kb=',True,'same_document_scope=',True,'evidence_preserved=',True)
 print([(str(result.chunk_id),str(result.doc_id),result.page_start,result.page_end,result.retrieval_score) for result in results])
 '@
 python -c $denseReadCheck
@@ -107,8 +126,8 @@ python -c $denseReadCheck
 
 3. 通过已有 `/chunks` 或 pgAdmin 只读核对每个返回 chunk_id 的正文、文件名、页码/section/source_spans，查所属 Document=READY、index_config.result.model 与本地 Query 一致。使用确定具有证据的真实问题人工判断相关性，Top-K 的存在或同文件并不证明 Retrieval/RAG 准确率；不生成回答。
 
-4. 同数据快照重复相同 Query，预期 ID/顺序稳定；分数可能有硬件数值微差。换到另一个已存在的知识库实例，只能返回它自己的 READY 证据。未导入或只有其他模型/未 READY 数据的库应为空，不自动跨库或重算。负向状态/模型篡改优先使用 Stub，禁止为了验收污染共用库或正在处理的文档。
+4. 同数据快照重复相同 Query，预期ID/顺序稳定；分数可能有硬件数值微差。在已有同库A/B两份READY文档上：限定[A]后用B相关问题查询，可返回A或空，但不能混入B；限定[A,B]只能返回这两份；换成已核实不存在或属于其他库的文档UUID，应为空，不扩大范围。省略doc_ids仍保留全库模式。负向状态/模型篡改优先使用Stub，不污染共用库或正在处理的文档。
 
 5. 记录检索前后目标库 Document/Chunk 数量、解析/切片/Embedding/Index task_id 和 MinerU batch，预期没有变化或额外收费；用户并发导入造成的变化须区分，不能归咎检索。日志每天同一文件，出现 dense.started 与 finished/empty/failed 的固定摘要，无 Query/正文/向量/SQL。Stage 16/14/15 的真实模型、数据库全量入库和费用待验收事项继续保留。
 
-本轮没有运行上述命令、pytest、Smoke、数据库、GPU、迁移、Parser 或任何云 API，没有新增测试文档或下载素材。代码完成后等待用户反馈，不进入阶段 18。
+本轮没有运行上述命令、pytest、Smoke、数据库、GPU、迁移、Parser 或任何云 API，没有新增测试文档或下载素材。阶段18实现完成后等待用户反馈，不进入阶段19。

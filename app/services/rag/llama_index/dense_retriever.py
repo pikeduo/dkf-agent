@@ -18,7 +18,7 @@ from app.db.session import get_engine
 from app.schemas.retrieval import RetrievalResult
 from app.services.embedding.service import EmbeddingError
 from app.services.rag.dense import (
-    DEFAULT_TOP_K, DenseRetrievalError, model_snapshot, select_dense_hits, validate_query, validate_scope,
+    DEFAULT_TOP_K, DenseRetrievalError, model_snapshot, select_dense_hits, validate_doc_ids, validate_query, validate_scope,
 )
 from app.services.rag.llama_index.embedding_adapter import DKFEmbeddingAdapter
 from app.services.rag.llama_index.node_adapter import chunk_to_node, node_to_result
@@ -31,13 +31,15 @@ def readonly_session() -> Session:
 
 
 class DenseRetriever(BaseRetriever):
-    """固定知识库的只读 Dense 边界；返回稳定 NodeWithScore，没有文档级筛选或状态写入。"""
+    """固定知识库及可选文档范围的只读 Dense 边界，原始 Node 证据与状态保持不变。"""
 
     def __init__(self, kb_id: UUID | str, *, top_k: int = DEFAULT_TOP_K,
+                 doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None,
                  embedding_adapter: DKFEmbeddingAdapter | None = None,
                  session_factory: Callable | None = None):
-        """构造仅验证参数、保存现有 Adapter/会话工厂，不加载 BGE-M3 或读取数据库。"""
+        """构造验证并冻结范围、保存已有 Adapter/会话工厂；不加载模型、读库或修改输入列表。"""
         self._kb_id = validate_scope(kb_id, top_k)
+        self._doc_ids = validate_doc_ids(doc_ids)
         self._top_k = top_k
         if embedding_adapter is not None and not isinstance(embedding_adapter, DKFEmbeddingAdapter):
             raise DenseRetrievalError("DENSE_INPUT")
@@ -57,6 +59,11 @@ class DenseRetriever(BaseRetriever):
         """公开经过校验的固定 Top-K，不以 QueryBundle 或额外 kwargs 放宽上限。"""
         return self._top_k
 
+    @property
+    def doc_ids(self) -> tuple[UUID, ...] | None:
+        """返回不可变文档范围，None 表示全库；QueryBundle 不得临时扩大范围。"""
+        return self._doc_ids
+
     def retrieve(self, str_or_query_bundle: str | QueryBundle) -> list[NodeWithScore]:
         """复写公共入口，避免基类含 Query/Node 正文的 callback payload 与递归 Query Engine。"""
         return self._retrieve(str_or_query_bundle)
@@ -66,11 +73,16 @@ class DenseRetriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """原始 Query 一次编码、身份前后核对、只读精确查询与 Node 转换；失败不返回半份证据。"""
+        """原 Query 一次编码，同模型及指定文档 SQL 检索后转换 Node；失败不返回半份证据。"""
         started = perf_counter()
         stage = "input"
+        scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
             validate_scope(self._kb_id, self._top_k)
+            doc_ids = validate_doc_ids(self._doc_ids)
+            # 复用既有日志白名单，只记录单文档 UUID 或范围数量，不输出 ID 列表/Query。
+            scope_log.update(doc_id=doc_ids[0] if doc_ids and len(doc_ids) == 1 else None,
+                             source_document_count=len(doc_ids) if doc_ids is not None else None)
             if isinstance(query_bundle, QueryBundle):
                 if (query_bundle.embedding is not None or query_bundle.custom_embedding_strs is not None
                         or query_bundle.image_path is not None):
@@ -78,7 +90,7 @@ class DenseRetriever(BaseRetriever):
                 query = validate_query(query_bundle.query_str)
             else:
                 query = validate_query(query_bundle)
-            log_event("dense.started", kb_id=self._kb_id, top_k=self._top_k)
+            log_event("dense.started", **scope_log)
             stage = "query_embedding"
             identity = model_snapshot(self._embedding.query_model_identity())
             vector = vector_snapshot(self._embedding.get_query_embedding(query))
@@ -92,12 +104,12 @@ class DenseRetriever(BaseRetriever):
                 session.execute(text("SET TRANSACTION READ ONLY"))
                 session.execute(text("SET LOCAL statement_timeout = '10s'"))
                 session.execute(text("SET LOCAL lock_timeout = '2s'"))
-                hits = select_dense_hits(session, self._kb_id, vector, identity, self._top_k)
+                hits = select_dense_hits(session, self._kb_id, vector, identity, self._top_k, doc_ids=doc_ids)
                 stage = "node_adapter"
                 nodes = [NodeWithScore(node=chunk_to_node(hit.chunk, hit.document, include_embedding=False),
                                        score=hit.similarity) for hit in hits]
-            log_event("dense.empty" if not nodes else "dense.finished", kb_id=self._kb_id,
-                      top_k=self._top_k, item_count=len(nodes), dimension=len(vector),
+            log_event("dense.empty" if not nodes else "dense.finished", **scope_log,
+                      item_count=len(nodes), dimension=len(vector),
                       duration_ms=(perf_counter() - started) * 1000)
             return nodes
         except Exception as exc:
@@ -109,7 +121,7 @@ class DenseRetriever(BaseRetriever):
                 error = DenseRetrievalError("DENSE_QUERY_EMBEDDING")
             else:
                 error = DenseRetrievalError("DENSE_RESULT" if stage == "node_adapter" else "DENSE_FAILED")
-            log_event("dense.failed", level=logging.WARNING, kb_id=self._kb_id, top_k=self._top_k,
+            log_event("dense.failed", level=logging.WARNING, **scope_log,
                       stage=stage, error_code=error.code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 

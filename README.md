@@ -447,7 +447,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 ### Dense Python Retriever
 
-仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认 20，1～100）；调用 `retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回项目证据 DTO。Query 首次调用会加载已有本地 BGE-M3，构造不会加载。
+仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认20，1～100），以及 `doc_ids=["目标文档UUID"]` 限定单/多文档（最多100个）。省略 doc_ids 检索该库全部合格文档；空列表/非法UUID拒绝，文档过滤在 PostgreSQL Top-K 前执行，无匹配不扩大范围。`retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回原始证据 DTO。Query 首次调用会加载已有本地 BGE-M3，构造不会加载；尚无 HTTP 检索或问答接口。
 
 用户先准备已有 core/NLP 缓存、PostgreSQL 和同版本 BGE-M3；检索时不需要 API/Worker，避免与 GPU Worker 同时各加载一份模型。无匹配返回空集，不扩大库或重建数据；首版精确排序有扫描成本，分数为余弦相似度而非概率。完整使用与手动验收见 [Dense Retrieval](docs/DENSE_RETRIEVAL.md)。
 

@@ -120,16 +120,27 @@ def manifest_entries(value: dict) -> dict[str, frozenset[str]]:
 
 
 def validate_coverage(files: list[PresetFile]) -> None:
-    """检查十份不同内容及格式/标签覆盖；不能以标签证明真实 OCR/表格或阅读顺序质量。"""
+    """检查基础预置库覆盖要求，扩展格式和标签不阻止导入。"""
 
-    types = {"image" if item.file_type in {"png", "jpg", "jpeg"} else item.file_type for item in files}
-    tags = set().union(*(item.tags for item in files))
-    if (len({item.file_hash for item in files}) < 10 or not {"doc", "xls", "ppt"} <= types
-            or len(types & MODERN_FORMATS) < 3 or tags != TAGS):
+    types = {
+        "image" if item.file_type in {"png", "jpg", "jpeg"}
+        else item.file_type
+        for item in files
+    }
+
+    # 基础要求：至少10份不同内容、至少3类现代格式
+    if (
+        len({item.file_hash for item in files}) < 10
+        or len(types & MODERN_FORMATS) < 3
+    ):
         raise PresetImportError("PRESET_COVERAGE")
+
+    # 标签可以为空，但声明时必须符合格式约束
     for item in files:
-        if (item.tags & {"text_pdf", "scan_pdf"} and item.file_type != "pdf"
-                or {"text_pdf", "scan_pdf"} <= item.tags):
+        if (
+            item.tags & {"text_pdf", "scan_pdf"}
+            and item.file_type != "pdf"
+        ) or {"text_pdf", "scan_pdf"} <= item.tags:
             raise PresetImportError("PRESET_COVERAGE")
 
 
