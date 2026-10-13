@@ -327,6 +327,91 @@ def test_two_page_cloud_result_missing_page_fails_without_cache(cloud_context):
     assert context.provider.queries == context.provider.downloads == 1
 
 
+def test_verified_cross_page_merge_persists_source_pages_once(cloud_context):
+    """跨页空占位恢复原页并事务入库，重复消息不增块、不再次下载或提交批次。"""
+
+    from test_mineru_merge import merged_case
+
+    context = cloud_context
+    values, layout, _ = merged_case(cross_page=True)
+    context.provider.archive = result_zip(values, layout=layout)
+    job = upload(context, content=pdf_bytes(2))
+    execute(job)
+    context.provider.state = "done"
+    assert execute(job, "check").result["block_count"] == 2
+    with context.session() as session:
+        rows = session.scalars(select(DocumentBlock).where(
+            DocumentBlock.doc_id == UUID(job["doc_id"])).order_by(DocumentBlock.block_index)).all()
+        ids = [row.block_id for row in rows]
+        assert [row.page for row in rows] == [1, 2]
+        assert [row.text.strip() for row in rows] == ["前段正文", "续段正文"]
+        assert [row.block_index for row in rows] == [1, 2]
+    assert execute(job, "check").result["status"] == "skipped"
+    with context.session() as session:
+        assert session.scalars(select(DocumentBlock.block_id).where(
+            DocumentBlock.doc_id == UUID(job["doc_id"])).order_by(DocumentBlock.block_index)).all() == ids
+    assert detail(context, job)[0]["status"] == "CHUNKING"
+    assert context.provider.submissions == context.provider.downloads == 1
+
+
+def test_uncertain_merge_fails_without_blocks_or_success_cache(cloud_context):
+    """合并来源不完整必须 FAILED/零块/无成功缓存，保留原批次且不自动再次付费。"""
+
+    from test_mineru_merge import merged_case
+
+    context = cloud_context
+    values, layout, _ = merged_case()
+    layout["pdf_info"][0]["para_blocks"][0]["lines"][1]["spans"][0]["content"] = "来源冲突"
+    context.provider.archive = result_zip(values, layout=layout)
+    job = upload(context)
+    execute(job)
+    context.provider.state = "done"
+    execute(job, "check", expected_state="FAILURE")
+    document, current = detail(context, job)
+    assert document["status"] == "FAILED" and current["error_code"] == "MERGE_EVIDENCE"
+    assert current["state"] == "failed" and not current["is_active"]
+    with context.session() as session:
+        assert session.scalar(select(func.count()).select_from(DocumentBlock).where(
+            DocumentBlock.doc_id == UUID(job["doc_id"]))) == 0
+    assert not list(context.settings.parsed_dir.rglob("ready.json"))
+    assert not (context.settings.parsed_dir / job["doc_id"] / "latest.json").exists()
+    assert execute(job, "check").result["status"] == "skipped"
+    assert context.provider.submissions == context.provider.downloads == 1
+
+
+def test_old_frozen_normalizer_does_not_publish_new_version_under_old_key(cloud_context):
+    """旧活动任务不可用新代码覆盖 v1 冻结键，安全停止且不追加批次或下载 ZIP。"""
+
+    context = cloud_context
+    job = upload(context)
+    execute(job)
+    with context.session() as session:
+        row = session.get(DocumentParseJob, UUID(job["job_id"]))
+        old_recipe = row.parse_options["_cache_recipe"] | {"normalizer_version": "mineru-adapter-v1"}
+        row.parse_options = row.parse_options | {"_cache_recipe": old_recipe}
+        session.commit()
+    context.provider.state = "done"
+    execute(job, "check", expected_state="FAILURE")
+    assert detail(context, job)[1]["error_code"] == "CACHE_CONFIG_CHANGED"
+    assert context.provider.submissions == 1 and context.provider.queries == context.provider.downloads == 0
+    assert not list(context.settings.parsed_dir.rglob("ready.json"))
+
+
+def test_old_queued_normalizer_is_rejected_before_cloud_submission(cloud_context):
+    """升级前未提交的旧冻结任务先拒绝，不能先花云额度再发现版本不兼容。"""
+
+    context = cloud_context
+    job = upload(context)
+    with context.session() as session:
+        row = session.get(DocumentParseJob, UUID(job["job_id"]))
+        row.parse_options = row.parse_options | {"_cache_recipe":
+            row.parse_options["_cache_recipe"] | {"normalizer_version": "mineru-adapter-v1"}}
+        session.commit()
+    execute(job, expected_state="FAILURE")
+    assert detail(context, job)[1]["error_code"] == "CACHE_CONFIG_CHANGED"
+    assert context.provider.submissions == context.provider.uploads == 0
+
+
 @pytest.mark.parametrize("state", ["waiting-file", "pending", "running", "converting"])
 def test_pending_state_schedules_one_short_check(cloud_context, state):
     """未完成状态只 GET 一次并投递 countdown，保存外部状态而不阻塞等待。"""

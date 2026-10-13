@@ -18,7 +18,8 @@ from app.parsers.common import ParserError
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 
 VERSION = "parse-cache-v1"
-NORMALIZER_VERSION = "mineru-adapter-v1"
+# 合并占位恢复改变页/坐标归属，新解析与旧成功缓存必须隔离；不删除或自动重算旧代次。
+NORMALIZER_VERSION = "mineru-adapter-v2"
 NATIVE_VERSION = "native-v1"
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACTS = frozenset({"normalized_document.json", "raw/mineru_result.zip",

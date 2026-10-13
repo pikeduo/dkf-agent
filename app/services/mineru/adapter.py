@@ -1,6 +1,7 @@
-"""读取云端 ZIP 的 content_list，转换为现有统一契约，不实现持久化 Parse Cache。"""
+"""读取 V1 正文并核对布局证据，恢复合并段落的原页/坐标，不承担缓存或落库。"""
 
 import json
+import logging
 import math
 from io import BytesIO
 from itertools import pairwise
@@ -12,6 +13,7 @@ from zipfile import BadZipFile, ZipFile
 import pymupdf
 from pydantic import ValidationError
 
+from app.core.business_logging import log_event
 from app.core.file_formats import MINERU_TYPES, OFFICE_TYPES
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.mineru.errors import MinerUError
@@ -264,14 +266,16 @@ def order_page_margins(
     return proposed
 
 
-def ordered_content_items(archive: bytes, items: list[dict]) -> list[tuple[int, dict]]:
+def ordered_content_items(
+    archive: bytes, items: list[dict], *, pages: dict[int, dict] | None = None
+) -> list[tuple[int, dict]]:
     """按页恢复经过验证的页边界项，并携带原始数组位置保证 Block ID 不变。
 
     不改变原有 page_idx 序列，交错页面也只替换该页自己的槽位；不做全局排序。
     """
 
     ordered = list(enumerate(items, start=1))
-    pages = read_layout_pages(archive)
+    pages = read_layout_pages(archive) if pages is None else pages
     slots = {}
     for slot, (_, item) in enumerate(ordered):
         index = item.get("page_idx")
@@ -309,6 +313,184 @@ def convert_bbox(value: object, size: tuple[float, float]) -> list[float] | None
     ]
 
 
+def merge_evidence_error() -> MinerUError:
+    """生成固定安全错误；不带正文、坐标、文件地址或上游异常，且不自动重试收费。"""
+
+    return MinerUError(
+        "MERGE_EVIDENCE", "MinerU 合并段落的正文或来源证据无法唯一核对，未保存不完整结果"
+    )
+
+
+def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict, list]:
+    """按同页类型/坐标唯一关联前后父块，索引须一致；坐标仅用于关联、不用于排序。"""
+
+    index = item.get("page_idx")
+    page = pages.get(index) if type(index) is int else None
+    if (not isinstance(page, dict) or type(item.get("text_level", 0)) is not int
+            or item.get("text_level", 0) != 0):
+        raise merge_evidence_error()
+    box = convert_bbox(item.get("bbox"), (1000, 1000))
+    if box is None:
+        raise merge_evidence_error()
+    matches = []
+    for group in ("para_blocks", "preproc_blocks"):
+        blocks = page.get(group)
+        if not isinstance(blocks, list) or not 1 <= len(blocks) <= 512:
+            raise merge_evidence_error()
+        indices = [b.get("index") for b in blocks if isinstance(b, dict)]
+        if (len(indices) != len(blocks) or any(type(i) is not int or i < 0 for i in indices)
+                or len(set(indices)) != len(indices)):
+            raise merge_evidence_error()
+        found = []
+        for block in blocks:
+            candidate = layout_bbox(block, page.get("page_size"))
+            if (block.get("type") == "text" and candidate is not None
+                    and all(abs(a - b) <= 2 for a, b in zip(box, candidate))):
+                found.append(block)
+        if len(found) != 1:
+            raise merge_evidence_error()
+        matches.append(found[0])
+    if matches[0]["index"] != matches[1]["index"]:
+        raise merge_evidence_error()
+    return matches[0], matches[1], page["page_size"]
+
+
+def plain_layout_spans(block: dict) -> list[dict]:
+    """只接受每行一个非空纯文本 span；公式、混合 span 或未知布局不猜测拆分。"""
+
+    lines = block.get("lines")
+    if not isinstance(lines, list) or not lines:
+        raise merge_evidence_error()
+    spans = []
+    for line in lines:
+        if not isinstance(line, dict) or not isinstance(line.get("spans"), list):
+            raise merge_evidence_error()
+        if len(line["spans"]) != 1:
+            raise merge_evidence_error()
+        span = line["spans"][0]
+        if (not isinstance(span, dict) or span.get("type") != "text"
+                or not isinstance(span.get("content"), str) or not span["content"].strip()):
+            raise merge_evidence_error()
+        spans.append(span)
+    return spans
+
+
+def merged_text_slices(text: str, originals: list[str]) -> list[str]:
+    """逐字符核对完整 V1 正文，返回其原始切片；只兼容空白分隔和 Markdown 字符转义。
+
+    不用 layout 生成新正文，不去重、不模糊匹配；所有字符须被原序消费。分隔空白
+    留在前一切片，切片拼接必须与 V1 原字符串完全相同，拒绝遗漏或额外文字。
+    """
+
+    if (len(text) > 1024**2 or not originals
+            or any(not isinstance(part, str) or not part.strip() for part in originals)):
+        raise merge_evidence_error()
+    escapable = frozenset("\\`*_{}[]()#+-.!$<>|")
+    cursor, cuts = 0, [0]
+    for original in originals:
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        for char in original.strip():
+            if cursor < len(text) and text[cursor] == char:
+                cursor += 1
+            elif (char in escapable and text[cursor:cursor + 2] == "\\" + char):
+                cursor += 2
+            else:
+                raise merge_evidence_error()
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        cuts.append(cursor)
+    if cursor != len(text):
+        raise merge_evidence_error()
+    return [text[left:right] for left, right in pairwise(cuts)]
+
+
+def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list[dict], int]:
+    """恢复紧邻正文的已证实合并占位，保留原数组位置、页面、bbox 和其他字段。
+
+    第一版仅支持每个源段落一个纯文本 span、最多 64 个连续占位。必须有
+    lines_deleted=true、空后处理 lines、完整前处理来源及目标 span 顺序证据；
+    跨页要求 cross_page=true 且只跨相邻后一页。歧义安全失败，不跳过真空正文。
+    """
+
+    if not pages:
+        return items, 0
+    restored, count, offset = list(items), 0, 0
+    while offset < len(items):
+        item = items[offset]
+        if item.get("type") != "text" or item.get("text") != "":
+            offset += 1
+            continue
+        # 无删除标记的空项仍交给原 EMPTY_BLOCK 检查；不把任意空正文当作合并占位。
+        if type(item.get("page_idx")) is not int:
+            offset += 1
+            continue
+        page = pages.get(item["page_idx"], {})
+        candidates = page.get("para_blocks", [])
+        if isinstance(candidates, list) and len(candidates) > 512:
+            raise merge_evidence_error()
+        box = convert_bbox(item.get("bbox"), (1000, 1000))
+        marked = []
+        if isinstance(candidates, list) and box is not None:
+            for block in candidates:
+                candidate = layout_bbox(block, page.get("page_size")) if isinstance(block, dict) else None
+                if (isinstance(block, dict) and block.get("type") == "text"
+                        and block.get("lines_deleted") is True and candidate is not None
+                        and all(abs(a - b) <= 2 for a, b in zip(box, candidate))):
+                    marked.append(block)
+        if not marked:
+            offset += 1
+            continue
+        if len(marked) != 1:
+            raise merge_evidence_error()
+        end = offset
+        while (end < len(items) and items[end].get("type") == "text"
+               and items[end].get("text") == ""):
+            end += 1
+        if offset == 0 or end - offset > 64:
+            raise merge_evidence_error()
+        group = items[offset - 1:end]
+        target = group[0]
+        if (target.get("type") != "text" or not isinstance(target.get("text"), str)
+                or not target["text"].strip()):
+            raise merge_evidence_error()
+        evidence = [matched_text_layout(value, pages) for value in group]
+        if evidence[0][0].get("lines_deleted", False) is not False:
+            raise merge_evidence_error()
+        source_spans = []
+        for index, (parent, before, size) in enumerate(evidence):
+            if index and (parent.get("lines_deleted") is not True or parent.get("lines") != []):
+                raise merge_evidence_error()
+            spans = plain_layout_spans(before)
+            if len(spans) != 1 or layout_bbox(spans[0], size) is None:
+                raise merge_evidence_error()
+            # 当前只处理源 span 覆盖整个段落的情形，不把局部 span 坐标冒充整个源块。
+            span_box, parent_box = layout_bbox(spans[0], size), layout_bbox(before, size)
+            if any(abs(a - b) > 2 for a, b in zip(span_box, parent_box)):
+                raise merge_evidence_error()
+            source_spans.append(spans[0])
+        target_spans = plain_layout_spans(evidence[0][0])
+        if len(target_spans) != len(source_spans):
+            raise merge_evidence_error()
+        for value, original, moved, (_, _, size) in zip(group, source_spans, target_spans, evidence):
+            source_page, target_page = value.get("page_idx"), target.get("page_idx")
+            if (type(source_page) is not int or type(target_page) is not int
+                    or source_page not in {target_page, target_page + 1}
+                    or moved.get("content") != original["content"]
+                    or moved.get("cross_page", False) is not (source_page != target_page)
+                    or original.get("cross_page", False) is not False):
+                raise merge_evidence_error()
+            moved_box, original_box = layout_bbox(moved, size), layout_bbox(original, size)
+            if moved_box is None or any(abs(a - b) > 2 for a, b in zip(moved_box, original_box)):
+                raise merge_evidence_error()
+        parts = merged_text_slices(target["text"], [s["content"] for s in source_spans])
+        for index, (value, text) in enumerate(zip(group, parts), start=offset - 1):
+            restored[index] = value | {"text": text}
+        count += end - offset
+        offset = end
+    return restored, count
+
+
 class MinerUResultAdapter:
     """保留正文原序并恢复有证据的页边界项；不改写表格、公式或伪造置信度。"""
 
@@ -322,18 +504,29 @@ class MinerUResultAdapter:
         geometry: dict[int, tuple[float, float]] | None,
         identity: str,
     ) -> ParsedDocument:
-        """统一 V4 Block；Office 使用云端转换逻辑页和空坐标，PDF/图片保留原件几何校验。"""
+        """统一 V4 Block；PDF/图片核对合并来源，Office 保持原逻辑页和空坐标规则。"""
 
         if file_type not in MINERU_TYPES:
             raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
         office = file_type in OFFICE_TYPES
         items = read_content_list(archive)
+        pages = {} if office else read_layout_pages(archive)
+        if not office:
+            try:
+                items, restored_count = restore_merged_text(items, pages)
+            except MinerUError as exc:
+                log_event("mineru.merge_rejected", level=logging.WARNING,
+                          doc_id=doc_id, error_code=exc.code, stage="adapter")
+                raise
+            if restored_count:
+                log_event("mineru.merge_restored", doc_id=doc_id,
+                          item_count=restored_count, stage="adapter")
         blocks, headings, title = [], {}, ""
         # ID 使用原始 position，block_index 使用最终列表顺序；改序不能换掉既有块身份。
         ordered = (
             list(enumerate(items, start=1))
             if office
-            else ordered_content_items(archive, items)
+            else ordered_content_items(archive, items, pages=pages)
         )
         for position, item in ordered:
             page_idx = item.get("page_idx")

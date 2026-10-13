@@ -27,7 +27,7 @@ from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
 from app.parsers.hybrid import BundleManifest
 from app.services.xlsx_primary import prepare_primary, complete_primary
-from app.services.parse_cache import (CacheError, ParseCache, recipe, key_for, canonical,
+from app.services.parse_cache import (CacheError, ParseCache, NORMALIZER_VERSION, recipe, key_for, canonical,
     visual_recipe, archive_artifacts, guard_cached)
 from app.services.cache_claims import lock_keys, claim_miss
 
@@ -297,10 +297,20 @@ def check_deadline(job: DocumentParseJob, settings: Settings) -> None:
         raise MinerUError("JOB_TIMEOUT", "MinerU 云端解析等待超时，请人工核对任务")
 
 
+def check_normalizer_recipe(job: DocumentParseJob) -> None:
+    """新转换只能使用当前归一化冻结身份；旧已验证结果由缓存恢复，不重新付费。"""
+
+    frozen = job.parse_options.get("_cache_recipe")
+    if frozen is not None and (
+        not isinstance(frozen, dict) or frozen.get("normalizer_version") != NORMALIZER_VERSION
+    ):
+        raise MinerUError("CACHE_CONFIG_CHANGED", "MinerU 归一化版本已变化，旧任务未重新解析或提交云批次")
+
+
 def submit_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """持久化申请意图及 batch 后 PUT，同一 batch 上传恢复不重复 POST；返回下一短步骤。"""
+    """先核对冻结版本，再持久化意图及 batch 后 PUT；同批次恢复不重复 POST。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -310,6 +320,7 @@ def submit_step(
         return "skipped", 0
     document, job = locked
     check_deadline(job, settings)
+    check_normalizer_recipe(job)
     if job.upload_complete:
         return "check", 0
     if job.batch_id is None:
@@ -393,7 +404,7 @@ def result_failure(payload: dict) -> MinerUError:
 def check_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """只检查一次；Whole 或 Hybrid 全部校验后原子写块，未完成延时再查。"""
+    """一次检查后原子写块；沿用已验证缓存，拒绝用新归一化覆盖旧冻结身份。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -403,6 +414,7 @@ def check_step(
         return "skipped", 0
     document, job = locked
     check_deadline(job, settings)
+    check_normalizer_recipe(job)
     if not job.upload_complete or not job.batch_id:
         return "submit", 0
     result = provider.query(job.batch_id, job.data_id)

@@ -116,6 +116,8 @@ notepad $smokeReport.FullName
 
 若日志为 `MinerU remote_state=done → result_downloaded → EMPTY_BLOCK`，说明云端与 ZIP 下载已完成，但 Adapter 遇到某个非 image/chart 的空文本项，**不等于整个 PDF 没有正文**。先按报告中的 doc_id/job_id/batch_id，在 MinerU 平台找到**原有批次**，下载原结果 ZIP，提取唯一 `content_list.json`（或 `*_content_list.json`），保留 ZIP 和原始 JSON，不编辑正文/表格/公式。人工放在独立诊断目录，例如 `docs/test/stage16_smoke/run-01/mineru_debug/<doc_id>/`，保持三份结果分开且不覆盖旧材料，再提供文件供只读诊断。此操作由用户执行，Codex 不代取签名链接或请求云端；没有取得旧结果前，不重传、Force Reparse 或直接跳过空正文/表格/公式。失败结果未通过 Adapter 时通常尚未发布 Parse Cache，因此不能假设 `data/parsed/` 已保存相应 ZIP；旧结果无法取得时如实报告该诊断缺口。
 
+已有 ZIP 的合并占位修复与不联网转换命令见 [MinerU 合并来源验收](MINERU_CLOUD.md#合并正文空占位保留原页和坐标)。新兼容规则同时保留跨页/跨栏来源，不把空正文一律跳过；MERGE_EVIDENCE 与 CACHE_CONFIG_CHANGED 可在新冒烟报告中追踪。原 FAILED 文档不会自动恢复，先验收旧 ZIP，不重新上传或默认 Force Reparse。缓存版本升级不删除旧文件，也不降低以下正式验收标准。
+
 三个层次始终分开：
 
 - **小样本真实冒烟：PASS / FAIL / BLOCKED**，以实际报告为准。

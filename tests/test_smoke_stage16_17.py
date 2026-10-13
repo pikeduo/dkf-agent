@@ -529,6 +529,14 @@ def test_readonly_session_sets_constraints_and_never_commits(monkeypatch):
                         "SET LOCAL statement_timeout = '10s'", "SET LOCAL lock_timeout = '2s'"]
 
 
+def test_merge_and_normalizer_codes_remain_traceable_without_error_body():
+    """新合并/冻结版本错误在报告中保留安全代码，不把私有错误原文公开。"""
+
+    assert tool.safe_job_code("MERGE_EVIDENCE") == "MERGE_EVIDENCE"
+    assert tool.safe_job_code("CACHE_CONFIG_CHANGED") == "CACHE_CONFIG_CHANGED"
+    assert tool.safe_job_code("MERGE_EVIDENCE\nprivate-error-body") == "UNKNOWN_ERROR_CODE"
+
+
 def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch):
     """Retriever Stub 只接收原始 question，不用答案，不触发 Parse/文档 Embedding/索引。"""
     from app.core import business_logging, config

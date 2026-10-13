@@ -28,6 +28,81 @@
 
 阶段 10 已完成真实上传和落库人工验收，扫描页边界顺序与图片落库问题已确认修复。旧 CHUNKING 数据仍不会因更新 Adapter 自动改写；保留上述保护条件，不承诺任意复杂版式恢复。
 
+### 合并正文空占位：保留原页和坐标
+
+阶段16三份已有批次的原 ZIP 显示：上游段落合并留下 `type=text / text=""`；对应 `para_blocks` 为 `lines_deleted=true / lines=[]`，`preproc_blocks` 仍含原文字，文字已经进入前一个正文父块的 span。Academic 有一处跨页，span 明确 `cross_page=true`。这不是整份文档无正文，也不能简单跳过空项：跨页文字会被错归前页，跨栏文字会沿用不完整的目标 bbox。V2 也有空段落，切换 V2 不能代替修复。
+
+Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
+
+- V1 仍是唯一正文来源。只对紧邻前一纯正文的连续空占位核对 layout，不使用 full.md/V2 补字，不根据文件名或具体文本判断。
+- 页内类型、归一化 bbox 必须唯一对应前后父块，index 一致且无重复；空来源必须有删除标记，源段落当前只支持一个非空纯 text span。目标的所有 span 必须按原顺序与这些源 span 的文本/坐标完全对应。坐标容差仅兼容取整，不作为排序依据。
+- 逐字符核对整段 V1，允许段落间空白与 Markdown 标点转义。输出直接切取 V1 原字符串，所有切片拼接须等于原字符串；不模糊匹配、改写 OCR、重复拼入 layout 文字或丢掉额外内容。
+- 每个切片回到原数组位置，保留该项的 page_idx、bbox、类型、source、置信度及稳定 Block ID。跨页只接受相邻后一页且目标 span 明确 cross_page=true；不跨页排序、不按 y 排序，不拆 table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
+- 第一版最多64个连续占位、每组合并 V1 正文最多1 MiB、每页关联父块最多512个。多 span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为 `MERGE_EVIDENCE`；没有合并证据的真空正文/表格/公式仍为 `EMPTY_BLOCK`，失败不落半份 Block、不发布成功缓存。
+- `mineru.merge_restored / merge_rejected` 只记录 doc_id、数量、阶段或安全错误码；恢复日志不等于事务提交。原来的 blocks_persisted 仍在 SQL 提交后记录。
+
+归一化缓存身份更新为 `mineru-adapter-v2`，Native 缓存版本不变。旧成功文件不删除、不改写；旧 v1 云缓存不混入新版 Whole/视觉键，Reindex 遇到版本不一致安全返回 CACHE_CONFIG_CHANGED，不自动重算或收费。已经验证的同 Job 缓存可按原检查点恢复；尚未完成的旧冻结任务在 POST/PUT/GET 前拒绝版本不一致，不用新版结果覆盖旧键。所有进程须由用户按 README 手动重启。
+
+先运行 Mock 单测（不需要数据库、Worker、GPU或云端）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_merge.py tests/test_mineru_order.py tests/test_mineru_provider.py tests/test_parse_cache.py tests/test_smoke_stage16_17.py -q
+```
+
+隔离数据库的事务/幂等回归另由用户执行，需要已有 PostgreSQL；Provider/Broker 都是 Mock，不消耗 MinerU：
+
+```powershell
+python -m pytest tests/mineru_db_smoke.py -q
+```
+
+#### 只读验证三份旧 ZIP（用户手动执行）
+
+以下命令只转换已有 ZIP 的 JSON 并打印摘要，不读/渲染 PDF、不发云请求、不写数据库或缓存。geometry 使用 ZIP 的 layout 声明，**仅验证适配兼容，不证明它与原 PDF 的实际尺寸、OCR或阅读顺序一致**。稳定身份是本地检查专用，不用于业务回填。
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+$mineruZipCheck = @'
+import json
+from pathlib import Path
+from uuid import UUID
+from app.services.mineru.adapter import MinerUResultAdapter, read_content_list, read_layout_pages
+from app.services.mineru.errors import MinerUError
+
+# 使用原导出中的真实文件名；只读原 ZIP，所有错误仅输出受控错误码。
+root = Path("docs/test/stage16_smoke/run-01")
+snapshot = json.loads((root / "reports/20261013T045527924270Z-f57bc325-export.json").read_text(encoding="utf-8-sig"))
+documents = {row["doc_id"]: row for row in snapshot["documents"]}
+for path in sorted((root / "mineru_debug").glob("*/mineru_result.zip")):
+    doc_id = path.parent.name
+    if path.stat().st_size > 256 * 1024**2:
+        print(doc_id, "FAIL ZIP_SIZE")
+        continue
+    archive = path.read_bytes()
+    try:
+        # 先验证 ZIP，再读取可选布局几何；不解压或修改原件。
+        read_content_list(archive)
+        pages = read_layout_pages(archive)
+        geometry = {idx: tuple(page["page_size"]) for idx, page in pages.items()}
+        arguments = dict(doc_id=UUID(doc_id), file_name=documents[doc_id]["file_name"],
+                         file_type="pdf", geometry=geometry, identity="manual-zip-check")
+        first = MinerUResultAdapter().normalize(archive, **arguments)
+        second = MinerUResultAdapter().normalize(archive, **arguments)
+        assert first == second and len({b.block_id for b in first.blocks}) == len(first.blocks)
+        print(doc_id, "PASS", "blocks=", len(first.blocks), "pages=", sorted({b.page for b in first.blocks}))
+    except MinerUError as error:
+        print(doc_id, "FAIL", error.code)
+    except (KeyError, TypeError, ValueError, AssertionError):
+        print(doc_id, "FAIL LOCAL_INPUT_OR_IDENTITY")
+'@
+python -c $mineruZipCheck
+```
+
+按原 ZIP 条目统计，若全部占位通过上述核对，预期 Academic/Textbook/Finance 的 Block 数分别为135/14/72（无文字 image/chart 沿用原跳过规则）；这只是待验证预期，不是已执行结论。用户还须对照原 PDF 核对 Academic 第4页文字是否恢复到第4页、左右栏 bbox 与原件是否一致，不能仅按数量验收。
+
+**离线转换成功不复活原 FAILED Document/Job，不发布 Parse Cache，也不触发 Chunk/Embedding/Index。** 当前没有旧 ZIP 回填或终态批次重放接口；不得修改 SQL 状态假装成功，不通过 Force Reparse 偷换成新收费批次。先反馈以上验证结果，再单独确认只使用原 batch/原文件身份的显式恢复方案。真实云接口的后续复验仍由用户授权并手动执行，本次旧 ZIP 检查不是新 API 调用验收。
+
 ### 阶段 11A：Office 格式与页面语义
 
 - [官方批量上传文档](https://mineru.net/apiManage/docs)的 file.name 支持 DOC/DOCX/PPT/PPTX/XLS/XLSX，复用原 POST→PUT→GET 流程；不发送 CSV/TXT/MD。

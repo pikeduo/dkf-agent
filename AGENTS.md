@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 已实现原接口多选上传、中文业务日志及按日期合并日志文件 |
+| 配套功能 | 已实现原接口多选上传、中文业务日志；MinerU 合并空占位的原页/bbox恢复及 v2 缓存隔离已补齐，用例与旧 ZIP 转换待用户验收 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
@@ -133,6 +133,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
 - POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
 - 唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
+- 已证实的合并空占位只在前后 layout 父块/span 唯一、完整 V1 字符可无损核对时恢复到原项，保留原页/bbox/ID；跨页须有相邻后一页 cross_page=true。未知合并仍失败，不用 layout 补字或跳过真空正文；归一化缓存 v2 与旧版本隔离，不自动复活 FAILED、回填旧 ZIP 或新增收费批次。
 
 ### 整份 Router v1
 

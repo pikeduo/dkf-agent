@@ -133,6 +133,8 @@ EVENT_LABELS = {
     "mineru.remote_state": "收到 MinerU 远端解析状态",
     "mineru.result_downloaded": "MinerU 结果 ZIP 下载完成",
     "mineru.adapter_validated": "MinerU 解析结果结构校验通过",
+    "mineru.merge_restored": "MinerU 合并正文已按证据恢复原页与位置，尚未落库",
+    "mineru.merge_rejected": "MinerU 合并正文的来源证据不足，未保存不完整结果",
     "mineru.blocks_persisted": "MinerU 解析结果已落库",
     "mineru.retry": "MinerU 任务等待重试",
     "mineru.failed": "MinerU 任务失败",

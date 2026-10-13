@@ -88,6 +88,27 @@ def test_reindex_miss_and_config_change_fail_closed(cache_context):
         ctx.cache.replay(ctx.document, changed)
 
 
+def test_merge_normalizer_version_isolates_whole_and_visual_cache(cache_context, monkeypatch):
+    """新旧归一化隔离 Whole/视觉键；旧成功代次保留，Reindex 不静默重算或收费。"""
+
+    ctx = cache_context
+    current_version = module.NORMALIZER_VERSION
+    assert current_version == "mineru-adapter-v2"
+    monkeypatch.setattr(module, "NORMALIZER_VERSION", "mineru-adapter-v1")
+    old_whole = recipe(ctx.document, ctx.settings, "mineru_whole")
+    old_visual = visual_recipe("b" * 64, cloud_options(ctx.settings), VERSION)
+    ctx.cache.save_document(ctx.document, old_whole, ctx.parsed)
+    pointer = ctx.cache.root / str(ctx.document.doc_id) / "latest.json"
+    original_pointer = pointer.read_bytes()
+    monkeypatch.setattr(module, "NORMALIZER_VERSION", current_version)
+    assert key_for(old_whole) != key_for(recipe(ctx.document, ctx.settings, "mineru_whole"))
+    assert key_for(old_visual) != key_for(visual_recipe("b" * 64, cloud_options(ctx.settings), VERSION))
+    with pytest.raises(CacheError, match="CACHE_CONFIG_CHANGED"):
+        ctx.cache.replay(ctx.document, ctx.settings)
+    assert pointer.read_bytes() == original_pointer
+    assert ctx.cache.load(old_whole) is not None
+
+
 @pytest.mark.parametrize("damage", ["bytes", "missing", "pointer"])
 def test_corrupt_cache_is_not_normal_miss(cache_context, damage):
     """指针/正文残缺或被改动均安全拒绝，错误不含缓存原文或机器路径。"""
