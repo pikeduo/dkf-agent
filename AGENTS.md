@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**18：单文档 Retrieval。已实现 doc_ids SQL 过滤，待人工验收，不能宣称真实检索成功。阶段16正式数据验收及阶段17、此前待验收事项继续保留；用户本轮明确授权开发18，不代表其他阶段已通过或放行19。**
+当前阶段：**18：单文档 Retrieval。doc_ids SQL过滤及证据保留已由用户测试并确认通过。阶段16正式数据验收及阶段17、此前待验收事项继续保留；不据此宣告其他阶段通过，阶段19等待用户授权。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -43,12 +43,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
 | 16 | 已实现预置导入与 OHR/Omni/OCB 三数据集联合冒烟（约14份、原API链路、完整QA/GT、分数据集Dense报告）；新增用例仅编写，真实导入与正式质量验收待用户完成 |
 | 17 | 已实现 LlamaIndex Dense Retriever、共享 Query 编码、同模型 READY/知识库隔离、稳定精确 Top-K 与证据互转；用例未执行，待人工验收 |
-| 18 | 已实现固定单/多文档范围、参数校验、SQL Top-K 前过滤与原始证据保留；用例仅编写，待人工验收 |
+| 18 | 固定单/多文档范围、参数校验、SQL Top-K前过滤与原始证据保留；用户已确认测试通过 |
 | 19 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮仅增量实现阶段18的文档检索过滤、Mock用例和说明；不改解析/向量化/索引或既有素材，不安装/下载/执行验收。阶段16正式数据及此前验收事项保留；不进入BM25/Fusion/Rerank/RAG，不扩展Hybrid或旧Office Native Parser。
+- 阶段18已完成用户验收，Codex不代跑测试或自动推进；阶段16正式数据及此前验收事项保留。未经用户授权不进入BM25/Fusion/Rerank/RAG，不扩展Hybrid或旧Office Native Parser。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。

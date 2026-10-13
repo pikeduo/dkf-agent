@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段16正式数据验收及阶段17真实Dense验收仍待完成；阶段18单文档过滤代码已实现、待人工验收。** 用户明确授权本轮开发18，不代表此前验收通过或放行19。  
+> 当前进度以最新代码与 AGENTS 为准：**阶段18单文档过滤已由用户测试并确认通过；阶段16正式数据验收及阶段17等此前待验收事项仍保留。** 不自动放行19。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮范围：只增量实现既有Dense Retriever的doc_ids过滤，复用原SQL/Query编码/Node Adapter，不重做业务链路。禁止下载资源、触碰素材、执行迁移/测试/真实查询或启动服务；不进入BM25、Fusion、Rerank、RAG。  
+> 当前停在阶段18验收收尾，复用原SQL/Query编码/Node Adapter，不重做业务链路。未经用户授权，不下载资源、触碰素材、执行迁移/测试/真实查询、启动服务或进入BM25/Fusion/Rerank/RAG。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2720,11 +2720,11 @@ retrieval_score
 
 ## 当前实现与验收边界
 
-- 已实现、待人工验收，不据此宣告阶段16/17或真实单文档检索通过。
+- 已由用户测试并确认通过，Codex未代跑；不据此宣告阶段16/17其他待验收事项或完整RAG通过。
 - `DenseRetriever(kb_id, doc_ids=[...], top_k=20)` 冻结文档范围；省略/None保留全库模式，显式空列表/非法UUID拒绝，最多100个输入ID、归一化去重。
 - 文档IN谓词进入现有MATERIALIZED候选CTE，在余弦距离/Top-K前与kb_id、READY、模型及代次过滤共同执行。不存在/跨库/非READY/模型不匹配排除，不扩大范围；异常越界行全批拒绝，不事后删行。
 - Node/DTO继续使用原doc_id/chunk_id、page_start/page_end及source_spans.page；不伪造单独物理页字段，不读取原件或重编码文档。同步、异步及DTO入口共用相同范围和现有BGE-M3。
-- 复用既有日志，仅增加已允许的单文档UUID/范围数量摘要；没有新API/模型/依赖/迁移。用例只编写，用户执行命令及真实只读验收见 [Dense Retrieval](DENSE_RETRIEVAL.md#单文档范围)。本轮停止，不进入19。
+- 复用既有日志，仅增加已允许的单文档UUID/范围数量摘要；没有新API/模型/依赖/迁移。验收由用户执行并确认，命令及真实只读步骤见 [Dense Retrieval](DENSE_RETRIEVAL.md#单文档范围)。本轮停止，不进入19。
 
 ## 目标
 满足赛题单文档 RAG，并验证 LlamaIndex Retriever 的业务过滤能力。
