@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
@@ -291,7 +292,9 @@ def archive_one(item: dict, source: Path, previous: dict, budget: ByteBudget,
             with httpx.Client(follow_redirects=False, timeout=httpx.Timeout(timeout, connect=10.0),
                               headers={"User-Agent": "OCB-local-benchmark-archive/1.0"}) as client:
                 response, redirect_hosts = get_with_redirect_checks(client, url)
-                with response:
+                # Client.send(stream=True) returns a Response without __enter__/__exit__ in httpx 0.28.
+                # Ensure the streaming response is closed on every path.
+                with closing(response):
                     code = response.status_code
                     if code != 200:
                         if code in (401, 403, 404):

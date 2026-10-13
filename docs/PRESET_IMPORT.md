@@ -17,7 +17,7 @@ conda activate dkf-agent
 python scripts/smoke_stage16_17.py --dry-run
 # 确认原件官方来源及本地研究使用权限后：
 python scripts/smoke_stage16_17.py --step prepare --run run-01 --execute --confirm-local-use
-code docs/test/stage16_smoke/run-01/plan.json
+notepad docs/test/stage16_smoke/run-01/plan.json
 ```
 
 默认固定种子 42，约 **5 PDF + 3 GT 图像 + 20 官方 QA**。PDF 只读 ZIP 必要成员，检查 CRC、SHA256、真实页数、重复内容；优先五类证据和不同领域，每文件上限 20 MiB、50 页，整批 PDF 页预算 150，最多检查 64 个候选。Omni 只选已存在且完整、尺寸与 GT 相符的图像；不生成图片或把 GT 当 QA。只做真实来源候选分类，不据此填写七类正式内容标签。
@@ -87,7 +87,7 @@ python scripts/smoke_stage16_17.py --step retrieve --run run-01 --execute --kb-i
 # 报告已自动生成；可独立重新生成，不连接服务/模型：
 python scripts/smoke_stage16_17.py --step report --run run-01 --execute
 $smokeReport = Get-ChildItem docs/test/stage16_smoke/run-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
-code $smokeReport.FullName
+notepad $smokeReport.FullName
 ```
 
 原样 `questions` 调用既有 `DenseRetriever(top_k=20)`，共享既有 BGE-M3 Query Adapter，无 LLM/答案生成/文档重新向量化。逐项核对原 chunk_id、同 KB、文件身份、正文/页码/section/source_spans 和模型身份；同一题重查一次看 ID 稳定，检索前后只读快照必须不变。模型/数据库异常停止后续题，其余标记 BLOCKED，不反复重载模型；空结果、未命中不能算通过。
@@ -97,6 +97,24 @@ code $smokeReport.FullName
 自动复用 `evaluate_benchmark_parsing.py` 的纯诊断函数，不再要求 SQL 手工复制：OHR 官方页字面证据/字符来源，Omni 原 GT 与 Block/Chunk 对应。Omni 区域 CER/TEDS/公式/阅读顺序等没有人工一对一映射时为 not_applicable/manual_pending，**不为几张图自动猜区域**。OHR 未字面匹配为 review_required；表格/公式/视觉顺序和语义正确性仍待人工核对。自动结构与 Dense PASS 可以与解析质量 BLOCKED 同时存在，不能混为完整质量通过。
 
 每次生成新的时间戳 JSON/Markdown，包含每文件失败阶段、Block/Chunk/向量检查、逐题排名/指标、任务/批次和潜在费用（实际金额未知，人工查 MinerU）。退出码：dry-run/无缺口准备/单独链路通过=0，已运行验收不通过=1，缺配置/许可/输入/不确定提交=2，中断=130；只读 report 按联合结果返回，文件仍会保存。
+
+### 已有失败报告的只读复核
+
+`SMOKE_RETRIEVAL_PREREQUISITE` 表示全部目标文档的 READY/证据/向量校验未通过，**Dense 未执行、Query 模型未加载**，不是 GPU 故障诊断。报告保留 BLOCKED，未执行的 Hit/MRR 为 `null`，不能当作零命中率。Markdown 单独列每文件的失败阶段/错误码；当前代次 MinerU Job 的 `EMPTY_BLOCK` 等固定代码不再归并为 `DOCUMENT_FAILED`，无错误保持 `null`，未知代码脱敏为 `UNKNOWN_ERROR_CODE`。历史失败 Job 不用于推断新代次错误。
+
+旧快照不改写；仅重新 `report` 仍会读旧导出，不能还原当时丢失的错误码。用户用同一个运行和知识库执行只读复核，再查看新报告（无需重启 API/Worker，不会上传、解析、向量化或投递任务）：
+
+```powershell
+conda activate dkf-agent
+$smokeKbId = (Get-Content docs/test/stage16_smoke/run-01/execution.json -Raw | ConvertFrom-Json).kb_id
+python scripts/smoke_stage16_17.py --step verify --run run-01 --execute --kb-id $smokeKbId
+$smokeReport = Get-ChildItem docs/test/stage16_smoke/run-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
+notepad $smokeReport.FullName
+```
+
+已有 FAILED 不因报告修复变为 READY，仍返回 FAIL。重新执行 `retrieve` 时，前置未通过会保存 `executed=false / executed_qa_count=0`，返回明确的前置错误，并且不调用 Retriever。PowerShell 找不到 `code` 仅说明 VS Code CLI 不可用；记事本或 `Get-Content -Encoding utf8 $smokeReport.FullName` 均可查看，不需要安装新依赖。
+
+若日志为 `MinerU remote_state=done → result_downloaded → EMPTY_BLOCK`，说明云端与 ZIP 下载已完成，但 Adapter 遇到某个非 image/chart 的空文本项，**不等于整个 PDF 没有正文**。先按报告中的 doc_id/job_id/batch_id，在 MinerU 平台找到**原有批次**，下载原结果 ZIP，提取唯一 `content_list.json`（或 `*_content_list.json`），保留 ZIP 和原始 JSON，不编辑正文/表格/公式。人工放在独立诊断目录，例如 `docs/test/stage16_smoke/run-01/mineru_debug/<doc_id>/`，保持三份结果分开且不覆盖旧材料，再提供文件供只读诊断。此操作由用户执行，Codex 不代取签名链接或请求云端；没有取得旧结果前，不重传、Force Reparse 或直接跳过空正文/表格/公式。失败结果未通过 Adapter 时通常尚未发布 Parse Cache，因此不能假设 `data/parsed/` 已保存相应 ZIP；旧结果无法取得时如实报告该诊断缺口。
 
 三个层次始终分开：
 

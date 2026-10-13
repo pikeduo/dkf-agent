@@ -602,6 +602,8 @@ Swagger 仍显示 Add string item 时，重启 API、Ctrl+F5 刷新，检查 `/s
 
 MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs、平台批次与直连网络/VPN/TUN，不关闭证书校验、不改签名 URL、不盲目创建新批次。详见 [网络排查与恢复](docs/MINERU_CLOUD.md#结果下载与代理排查)。
 
+联合冒烟的 `SMOKE_RETRIEVAL_PREREQUISITE` 表示 READY/证据/向量前置校验未通过，Dense 尚未执行，不是 GPU 故障结论；先按 [只读失败复核](docs/PRESET_IMPORT.md#已有失败报告的只读复核) 查真实文档/Job 错误码，不重新上传。`code` 命令不可用时可用 Windows `notepad` 查看报告，无需安装新依赖。
+
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 
 ## 6. 开发文档

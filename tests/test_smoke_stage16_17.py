@@ -1,5 +1,6 @@
 """联合冒烟工具的元数据/HTTP/状态 Stub；仅用户执行，不生成真实 PDF/Office/图像。"""
 
+import builtins
 import copy
 import hashlib
 import io
@@ -371,6 +372,124 @@ def test_unknown_error_text_not_logged():
     assert tool.safe_code("INDEX_INCOMPLETE：安全文案") == "INDEX_INCOMPLETE"
     assert tool.safe_code("postgresql://password@host/local-path") == "DOCUMENT_FAILED"
     assert tool.safe_code(None) is None
+    assert tool.safe_code("") is None
+    assert tool.safe_code("   ") is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    (None, None), ("", None), ("   ", None),
+    ("EMPTY_BLOCK", "EMPTY_BLOCK"), ("CONTENT_LIST", "CONTENT_LIST"), ("NO_TEXT", "NO_TEXT"),
+    ("DATABASE_SCHEMA", "DATABASE_SCHEMA"), ("HTTP_403", "HTTP_403"), ("HTTP_429", "HTTP_429"),
+    ("A0202", "A0202"), ("-60018", "-60018"), ("-60001", "-60001"),
+    ("https://example.invalid/?token=secret", "UNKNOWN_ERROR_CODE"),
+    ("TOKEN_SECRET_VALUE", "UNKNOWN_ERROR_CODE"), ("EMPTY_BLOCK:secret", "UNKNOWN_ERROR_CODE"),
+    ("HTTP_999", "UNKNOWN_ERROR_CODE"), (123, "UNKNOWN_ERROR_CODE"),
+])
+def test_job_error_codes_preserved_or_redacted(value, expected):
+    """裸 Job 代码与 Document 文案分开处理；成功空值不产生 DOCUMENT_FAILED，未知输入不泄露。"""
+    assert tool.safe_job_code(value) == expected
+
+
+def test_document_error_uses_current_job_without_old_generation():
+    """从当前 Job 还原 EMPTY_BLOCK；历史失败不污染新代次，入库错误仍优先保留。"""
+    d = SimpleNamespace(processing_task_id=TASK, error_message="供应商固定安全文案")
+    old = SimpleNamespace(task_id="previous-generation", error_code="EMPTY_BLOCK")
+    current = SimpleNamespace(task_id=TASK, error_code="EMPTY_BLOCK")
+    assert tool.document_error_code(d, [old, current]) == "EMPTY_BLOCK"
+    assert tool.document_error_code(d, [old]) == "DOCUMENT_FAILED"
+    d.error_message = None
+    assert tool.document_error_code(d, [old, SimpleNamespace(task_id=TASK, error_code=None)]) is None
+    d.error_message = "INDEX_INCOMPLETE：固定安全原因"
+    assert tool.document_error_code(d, [current]) == "INDEX_INCOMPLETE"
+
+
+@pytest.mark.parametrize("status", ["FAIL", "BLOCKED"])
+def test_dense_prerequisite_block_does_not_import_model_or_compute_metrics(monkeypatch, status):
+    """前置失败冻结明确的未执行状态；框架/日志/模型不导入，未执行指标为 null 而非0。"""
+    saved = []
+    export = {"documents": [{"doc_id": DOC, "status": "FAILED"}]}
+    original_import = builtins.__import__
+
+    def verify(run, plan, kb_id):
+        """仅返回未通过的内存验收快照，不实际连接 PostgreSQL。"""
+        return export, {"status": status}
+
+    def guarded_import(name, *args, **kwargs):
+        """框架或模型相关导入即失败，防止前置阻塞仍加载资源。"""
+        if name.startswith(("app.services.rag.llama_index", "app.services.embedding", "app.core.business_logging", "torch", "sentence_transformers")):
+            pytest.fail("前置失败不应导入 Dense/模型/日志")
+        return original_import(name, *args, **kwargs)
+
+    def save(run, kind, payload):
+        """捕获阻塞摘要，不写真实报告。"""
+        saved.append((kind, payload))
+
+    monkeypatch.setattr(tool, "verify_run", verify)
+    monkeypatch.setattr(tool, "save_artifact", save)
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    with pytest.raises(tool.SmokeError, match="SMOKE_RETRIEVAL_PREREQUISITE") as error:
+        tool.dense_run(Path("virtual"), {"official_qa_count": 20}, KB)
+    assert "GPU" not in str(error.value)
+    kind, payload = saved[0]
+    assert kind == "dense" and payload["status"] == "BLOCKED"
+    assert payload["executed"] is False and payload["executed_qa_count"] == 0
+    assert payload["qa_count"] == 20 and payload["items"] == []
+    assert payload["verification_status"] == status
+    assert payload["export_sha256"] == tool.ohr.digest(export)
+    assert all(payload[key] is None for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20",
+        "page_hit_at1", "page_hit_at5", "page_hit_at10", "same_query_ids_stable", "no_data_or_task_change"))
+
+
+def test_report_handles_unexecuted_null_metrics_and_preserves_failure(monkeypatch):
+    """未执行的 Dense 不格式化 null、不展示零命中；三类正式结论不被展示修复改变。"""
+    captured, failures = {}, {}
+    d = exported_document() | {"status": "FAILED", "parse_jobs": []}
+    export = {"documents": [d]}
+    verification = {"status": "FAIL", "export_file": "reports/frozen-export.json",
+        "export_sha256": tool.ohr.digest(export), "missing_documents": [],
+        "validations": [{"file": sample()["file"], "doc_id": DOC, "document_status": "FAILED", "status": "FAIL",
+            "failure_stage": "parse", "error_code": "EMPTY_BLOCK", "issues": ["NOT_READY"],
+            "block_count": 0, "chunk_count": 0, "vector_count": 0}]}
+    dense = {"status": "BLOCKED", "executed": False, "export_sha256": tool.ohr.digest(export),
+             "hit_at1": None, "hit_at5": None, "hit_at10": None, "mrr_at20": None}
+
+    def latest(run, kind):
+        """全部输入均为内存 Stub，不读取用户原有报告。"""
+        return {"verify": verification, "dense": dense, "process": {"status": "FAIL"}}[kind]
+
+    def publish(path, payload):
+        """捕获完整输出，不覆盖任何用户文件。"""
+        captured[path.suffix] = payload
+
+    def json_file(path, *args, **kwargs):
+        """提供冻结导出与失败摘要，不进行文件 IO。"""
+        if path.name == "frozen-export.json":
+            return export
+        return failures[path.name]
+
+    def save(run, kind, payload):
+        """捕获失败的恢复类别，只有用户后续验证才可解除，不虚构检索成功。"""
+        assert kind == "failure"
+        path = run / "reports/99991231T000000-failure.json"
+        failures[path.name] = payload
+        return path
+
+    monkeypatch.setattr(tool, "latest_artifact", latest)
+    monkeypatch.setattr(tool, "publish", publish)
+    monkeypatch.setattr(tool, "save_artifact", save)
+    monkeypatch.setattr(tool.common, "json_file", json_file)
+    plan = {"documents": [sample()], "plan_sha256": "b" * 64, "preparation_gaps": {},
+            "official_qa_count": 20, "omni_gt_count": 0}
+    report = tool.generate_report(tool.TEST_ROOT / "unit-report-not-created", plan,
+                                  error="SMOKE_RETRIEVAL_PREREQUISITE", error_step="retrieve")
+    assert report["small_sample_smoke"] == "FAIL" and report["pipeline_status"] == "FAIL"
+    assert report["dense_status"] == "BLOCKED" and report["dense_block_reason"] == "VERIFICATION_NOT_PASS"
+    assert report["stage16_formal_acceptance"]["status"] == "BLOCKED"
+    assert report["official_benchmark_full_evaluation"] == "NOT_APPLICABLE"
+    assert failures["99991231T000000-failure.json"]["recovery_kind"] == "verify"
+    markdown = captured[".md"].decode("utf-8")
+    assert "EMPTY_BLOCK" in markdown and "parse" in markdown and "Dense 未执行" in markdown
+    assert "Hit@1=" not in markdown and "GPU 或 Query 模型失败" in markdown
 
 
 def test_readonly_session_sets_constraints_and_never_commits(monkeypatch):

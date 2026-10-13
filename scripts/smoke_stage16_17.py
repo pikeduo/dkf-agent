@@ -33,6 +33,19 @@ STAGES = {"CHUNKING": ("chunk", "chunk_task_id"),
           "EMBEDDING": ("embed", "embedding_task_id"),
           "INDEXING": ("index", "index_task_id")}
 TASK_FIELDS = ("processing_task_id", "chunk_task_id", "embedding_task_id", "index_task_id")
+# 只公开当前 MinerU 边界的固定代码；未知字符串不得当成错误码输出到报告。
+MINERU_ERROR_CODES = frozenset({
+    "ACTIVE_JOB", "BAD_RESPONSE", "BAD_URL", "BATCH_LIMIT", "BBOX", "CACHE_MISS",
+    "COMPLETENESS", "CONFIG", "CONTENT_LIST", "CONTENT_TYPE", "DAILY_LIMIT", "DATA_ID",
+    "DATABASE", "DATABASE_SCHEMA", "DOCUMENT_STATE", "DOWNLOAD_NETWORK", "EMPTY_BLOCK",
+    "EMPTY_FILE", "EXTERNAL_ATTACHMENT_MISSING", "FILE_CHANGED", "FILE_DAMAGED", "FILE_FORMAT",
+    "FILE_HASH", "FILE_IO", "FILE_MISSING", "FILE_SIZE", "FILE_STRUCTURE", "FILE_TYPE",
+    "GEOMETRY", "HYBRID_CHECKPOINT", "JOB_TIMEOUT", "NETWORK", "NO_TEXT", "PAGE",
+    "PAGE_LIMIT", "PREFLIGHT_LIMIT", "QUEUE", "QUOTA_UNAVAILABLE", "RATE_LIMIT",
+    "REMOTE_FAILED", "ROUTE_INVALID", "ROUTED_REMOTE_FAILED", "SUBMIT_UNCERTAIN",
+    "TOKEN_MISSING", "UNKNOWN", "UPLOAD_EXPIRED", "UPLOAD_NETWORK", "UPSTREAM_ERROR",
+    "ZIP_INVALID", "ZIP_LIMIT", "ZIP_PATH", "ZIP_SIZE",
+})
 ERRORS = {
     "PERMISSION": "需要显式执行及本地使用/独立测试库/云外传确认；默认未执行",
     "INPUT": "参数、官方参考或样本身份无效；不改写输入",
@@ -46,6 +59,7 @@ ERRORS = {
     "PRECHECK": "基础服务、Worker、本地模型文件或 MinerU 配置检查未通过",
     "LIMIT": "样本、导出数量/大小或等待预算超限",
     "RETRIEVAL": "Dense 检索未完成；请核对本地 GPU/模型身份和 Dense 安全日志",
+    "RETRIEVAL_PREREQUISITE": "READY 或证据/向量前置校验未通过；Dense 未执行，未加载 Query 模型，请先查看文档失败阶段与错误码",
     "IO": "本地步骤未完成；已发布文件保留，不覆盖原件或已有报告",
 }
 
@@ -360,10 +374,10 @@ def readonly_session():
 
 
 def read_target(kb_id, plan, *, exclusive=False):
-    """读取小测试库的状态与任务标识，不读取向量/正文，不 flush/commit 或修改业务状态。"""
+    """只读小测试库状态及当前代次错误；不用旧 Job 错误冒充新任务失败，不写业务状态。"""
     from sqlalchemy import select
     from app.db.seed import DEFAULT_KB_ID
-    from app.models import Document, KnowledgeBase
+    from app.models import Document, DocumentParseJob, KnowledgeBase
 
     with readonly_session() as session:
         kb = session.get(KnowledgeBase, kb_id)
@@ -373,6 +387,14 @@ def read_target(kb_id, plan, *, exclusive=False):
         hashes = {item["sha256"] for item in plan["documents"]}
         if len(rows) > 100 or (exclusive and any(row.file_hash not in hashes for row in rows)):
             raise SmokeError("TARGET")
+        # 一次限定库/Hash/当前解析代次查询，避免逐文档额外查询或混入历史失败。
+        current_jobs = session.execute(select(DocumentParseJob.doc_id, DocumentParseJob.task_id,
+            DocumentParseJob.error_code).join(Document, Document.doc_id == DocumentParseJob.doc_id)
+            .where(Document.kb_id == kb_id, Document.file_hash.in_(hashes),
+                   DocumentParseJob.task_id == Document.processing_task_id)).all()
+        jobs_by_doc = {}
+        for job in current_jobs:
+            jobs_by_doc.setdefault(job.doc_id, []).append(job)
         result = {}
         for row in rows:
             if row.file_hash not in hashes:
@@ -380,15 +402,47 @@ def read_target(kb_id, plan, *, exclusive=False):
             if row.file_hash in result:
                 raise SmokeError("TARGET")
             result[row.file_hash] = {"doc_id": str(row.doc_id), "kb_id": str(row.kb_id), "file_type": row.file_type,
-                "status": row.status, "error_code": safe_code(row.error_message),
+                "status": row.status, "error_code": document_error_code(row, jobs_by_doc.get(row.doc_id, [])),
                 **{field: str(getattr(row, field)) if getattr(row, field) else None for field in TASK_FIELDS}}
         return result
 
 
 def safe_code(message):
-    """仅识别应用安全代码前缀；未知错误正文/连接串/上游文本一律不写报告。"""
+    """仅从 Document 安全文案提取应用代码；空值无错误，不猜供应商中文消息的错误码。"""
+    if message is None or (isinstance(message, str) and not message.strip()):
+        return None
+    if not isinstance(message, str):
+        return "DOCUMENT_FAILED"
     match = re.match(r"^((?:CHUNK|EMBEDDING|INDEX|MINERU|PARSER|ROUTE|CACHE)_[A-Z_]{1,64})[：:]", message or "")
     return match[1] if match else ("DOCUMENT_FAILED" if message else None)
+
+
+def safe_job_code(code):
+    """校验独立 Job.error_code，不拼接冒号；保留已知 MinerU/HTTP/API 代码，未知值不透传。"""
+    if code is None or (isinstance(code, str) and not code.strip()):
+        return None
+    if not isinstance(code, str):
+        return "UNKNOWN_ERROR_CODE"
+    value = code.strip()
+    if value in MINERU_ERROR_CODES or re.fullmatch(r"HTTP_[1-5][0-9]{2}", value):
+        return value
+    # 复用供应商的纯错误映射，不导入 Provider/Parser，不发请求或加载配置/模型。
+    from app.services.mineru.errors import api_error
+
+    if api_error(value).code == value:
+        return value
+    return "UNKNOWN_ERROR_CODE"
+
+
+def document_error_code(document, jobs):
+    """优先使用 Document 的阶段代码，其次绑定当前解析代次的 Job 代码；历史失败不传播。"""
+    code = safe_code(document.error_message)
+    if code is not None and code != "DOCUMENT_FAILED":
+        return code
+    current_codes = {safe_job_code(job.error_code) for job in jobs
+                     if job.task_id == document.processing_task_id and job.error_code}
+    current_codes.discard(None)
+    return next(iter(current_codes)) if len(current_codes) == 1 else code
 
 
 def precheck(args, run, plan, client):
@@ -625,7 +679,7 @@ def export_snapshot(plan, kb_id):
             document = {"doc_id": str(d.doc_id), "kb_id": str(d.kb_id), "file_name": d.file_name,
                 "file_type": d.file_type, "file_hash": d.file_hash, "status": d.status,
                 "source_type": d.source_type, "sample_source": item["source"], "sample_identity": item["identity"],
-                "error_code": safe_code(d.error_message),
+                "error_code": document_error_code(d, jobs),
                 **{field: str(getattr(d, field)) if getattr(d, field) else None for field in TASK_FIELDS},
                 "model_identity": (d.index_config or {}).get("result", {}).get("model"),
                 "blocks": [{"block_id": str(b.block_id), "doc_id": str(b.doc_id), "block_index": b.block_index,
@@ -637,7 +691,7 @@ def export_snapshot(plan, kb_id):
                 "parse_jobs": [{"job_id": str(j.job_id), "task_id": str(j.task_id), "state": j.state,
                     "batch_id": j.batch_id, "upload_complete": j.upload_complete,
                     "is_active": j.is_active,
-                    "submission_attempted": j.submission_attempted, "error_code": safe_code((j.error_code or "") + "：")}
+                    "submission_attempted": j.submission_attempted, "error_code": safe_job_code(j.error_code)}
                     for j in jobs]}
             issues = validate_export(document, item, kb_id)
             if d.status != "READY":
@@ -673,6 +727,7 @@ def export_snapshot(plan, kb_id):
             validations.append({"file": item["file"], "doc_id": str(d.doc_id), "document_status": d.status,
                 "status": "PASS" if not issues else ("FAIL" if d.status in {"READY", "FAILED"} else "BLOCKED"),
                 "failure_stage": next((name for name, field in reversed(list(STAGES.values())) if getattr(d, field)), "parse") if d.status == "FAILED" else None,
+                "error_code": document["error_code"],
                 "issues": sorted(set(issues)), "block_count": len(blocks), "chunk_count": total,
                 "vector_count": vector_count, "invalid_vector_count": invalid_count})
     return {"documents": exported}, {"validations": validations, "missing_documents": missing,
@@ -714,10 +769,18 @@ def score_retrieval(qa, expected_doc, hits):
 
 
 def dense_run(run, plan, kb_id):
-    """用户显式运行已有 DenseRetriever；仅 Query 向量化，无 LLM，无文档重算或新任务。"""
+    """前置失败仅保存未执行报告；通过后调用既有 Dense，只有 Query 编码，无文档重算。"""
     before, verification = verify_run(run, plan, kb_id)
     if verification["status"] != "PASS":
-        raise SmokeError("RETRIEVAL")
+        # 必须在导入框架/配置日志/加载 BGE-M3 之前停止；未执行不能填零分冒充检索结果。
+        save_artifact(run, "dense", {"status": "BLOCKED", "executed": False,
+            "kb_id": str(kb_id), "qa_count": plan["official_qa_count"], "executed_qa_count": 0,
+            "error_code": "SMOKE_RETRIEVAL_PREREQUISITE", "verification_status": verification["status"],
+            "export_sha256": ohr.digest(before), "items": [],
+            "hit_at1": None, "hit_at5": None, "hit_at10": None, "mrr_at20": None,
+            "page_hit_at1": None, "page_hit_at5": None, "page_hit_at10": None,
+            "page_evaluable_count": 0, "same_query_ids_stable": None, "no_data_or_task_change": None})
+        raise SmokeError("RETRIEVAL_PREREQUISITE")
     qa_rows = references_file(run / "official_qa.jsonl")
     if not qa_rows:
         raise SmokeError("INPUT")
@@ -783,7 +846,8 @@ def dense_run(run, plan, kb_id):
     if not unchanged or not stability or any(row["status"] == "FAIL" for row in results):
         status = "FAIL"
     measured_pages = [row for row in results if row["page_status"] == "evaluable"]
-    result = {"status": status, "kb_id": str(kb_id), "qa_count": len(results), "top_k": 20,
+    result = {"status": status, "executed": True, "kb_id": str(kb_id), "qa_count": len(results), "top_k": 20,
+        "executed_qa_count": sum(row.get("error_code") != "NOT_RUN_AFTER_FAILURE" for row in results),
         "items": results, "same_query_ids_stable": stability, "no_data_or_task_change": unchanged,
         "export_sha256": ohr.digest(before), "mrr_at20": sum(row["reciprocal_rank_at20"] for row in results) / len(results),
         "page_evaluable_count": len(measured_pages),
@@ -825,7 +889,8 @@ def generate_report(run, plan, *, error=None, error_step=None):
     failures = sorted((run / "reports").glob("*-failure.json"))
     if error:
         # 失败单独冻结，后续纯 report 不能以旧的成功快照掩盖刚发生的故障。
-        failure = {"error_code": error, "recovery_kind": "dense" if error_step == "retrieve" else "verify"}
+        failure = {"error_code": error, "recovery_kind": "dense" if error_step == "retrieve"
+                   and error != "SMOKE_RETRIEVAL_PREREQUISITE" else "verify"}
         failures.append(save_artifact(run, "failure", failure))
     unresolved = None
     if failures:
@@ -853,6 +918,7 @@ def generate_report(run, plan, *, error=None, error_step=None):
         "ready_count": sum(d["status"] == "READY" for d in export["documents"]),
         "official_qa_count": plan["official_qa_count"], "omni_gt_count_not_qa": plan["omni_gt_count"],
         "pipeline_status": pipeline, "verification": verification, "dense_status": dense_status, "dense": dense,
+        "dense_block_reason": "VERIFICATION_NOT_PASS" if pipeline != "PASS" else None,
         "preparation_gaps": gaps, "process": process, "error_code": unresolved,
         "task_and_batch_summary": [{"doc_id": d["doc_id"], **{field: d[field] for field in TASK_FIELDS},
                                    "parse_jobs": d["parse_jobs"]} for d in export["documents"]],
@@ -869,10 +935,17 @@ def generate_report(run, plan, *, error=None, error_step=None):
         raise SmokeError("PLAN")
     report_name = stamp() + "-report"
     publish(run / "reports" / (report_name + ".json"), report)
+    # 兼容旧成功快照；前置失败、未执行或旧数据身份不一致时不展示旧/虚构的零分指标。
+    show_dense_metrics = (dense is not None and dense.get("executed", True)
+        and pipeline == "PASS" and dense["export_sha256"] == verification["export_sha256"]
+        and all(type(dense.get(key)) in {int, float} for key in ("hit_at1", "hit_at5", "hit_at10", "mrr_at20")))
     markdown = (f"# 阶段16/17 小样本验收\n\n小样本真实冒烟：**{status}**\n\n"
         f"文件 {report['file_count']}；本次 API 确认上传 {len(upload_confirmed)}；已有文档 {len(export['documents'])}；READY {report['ready_count']}。\n\n"
         f"链路：{pipeline}；Dense：{dense_status}；官方 QA {plan['official_qa_count']}；Omni GT 图像 {plan['omni_gt_count']}（不是 QA）。\n\n"
-        + (f"Hit@1={dense['hit_at1']:.3f}，Hit@5={dense['hit_at5']:.3f}，Hit@10={dense['hit_at10']:.3f}，MRR@20={dense['mrr_at20']:.3f}。\n\n" if dense else "Dense 尚未运行。\n\n")
+        + (f"Hit@1={dense['hit_at1']:.3f}，Hit@5={dense['hit_at5']:.3f}，Hit@10={dense['hit_at10']:.3f}，MRR@20={dense['mrr_at20']:.3f}。\n\n" if show_dense_metrics
+           else "当前无可报告的 Dense 检索指标。\n\n")
+        + ("READY/证据/向量前置校验未通过，当前阻塞来自文档链路，不能据此判断 GPU 或 Query 模型失败。\n\n" if pipeline != "PASS" else "")
+        + ("本次 Dense 未执行，未加载 Query 模型；统计项为 null，不是零命中率。\n\n" if dense and dense.get("executed") is False else "")
         + f"准备缺口：`{json.dumps(gaps, ensure_ascii=False)}`。\n\n"
         + (f"阻塞错误：`{unresolved}`。\n\n" if unresolved else "")
         + f"确认云批次 {len(batches)}；金额未知，需人工核对 MinerU 平台；同文件多个 Job 要人工排查。\n\n"
@@ -881,10 +954,10 @@ def generate_report(run, plan, *, error=None, error_step=None):
         + "Block 序号通过不代表视觉阅读顺序正确。OHR 字面证据未保留为 review_required，需对照原 PDF；表格/公式语义不自动裁判。\n\n"
         + "详见同名 JSON 的 verification.validations、parsing_diagnostics、Dense 逐题结果、任务与批次。报告/导出含原文，勿提交 Git 或公开分享。\n")
     if verification:
-        markdown += "\n| 文件 | 状态 | Block | Chunk | 向量 | 问题 |\n|---|---|---:|---:|---:|---|\n"
+        markdown += "\n| 文件 | 状态 | 失败阶段 / 错误码 | Block | Chunk | 向量 | 问题 |\n|---|---|---|---:|---:|---:|---|\n"
         for row in verification["validations"]:
             label = row["file"].replace("|", "\\|").replace("`", "")
-            markdown += (f"| {label} | {row['document_status']}/{row['status']} | {row['block_count']} | "
+            markdown += (f"| {label} | {row['document_status']}/{row['status']} | {row.get('failure_stage') or '-'} / {row.get('error_code') or '-'} | {row['block_count']} | "
                          f"{row['chunk_count']} | {row['vector_count']} | {','.join(row['issues']) or '-'} |\n")
         if verification["missing_documents"]:
             markdown += "\n尚未找到文档：" + ", ".join(verification["missing_documents"]) + "。\n"
