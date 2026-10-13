@@ -453,6 +453,8 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 ### 预置知识库导入
 
+已有 OHR-Bench/OmniDocBench 本地素材时，可先按 [少量真实文件联合冒烟](docs/PRESET_IMPORT.md#优先使用阶段-1617-小样本联合冒烟) 在独立测试库完成上传→READY→Dense 与自动报告；无需 OCB 或手工 SQL 导出。工具默认 dry-run，离线准备、真实处理和 GPU 检索都须用户显式执行，不能代替下述正式多格式验收。
+
 将已有且允许云外传的 10+ 多格式资料放入 `data/knowledge_base/preset/`，按 [素材清单说明](docs/PRESET_IMPORT.md#素材与人工清单) 手动准备 `manifest.json`；包括普通/扫描 PDF、混合内容、表格、公式、图表、Reading Order，以及 DOC/XLS/PPT 各一份。目录只带占位文件，不自动生成或下载素材。
 
 在项目根目录执行（默认只预检，无需启动服务）：

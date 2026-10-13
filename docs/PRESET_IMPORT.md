@@ -2,6 +2,114 @@
 
 阶段 16 只准备已有数据链路可消费的默认知识库，不新增检索或问答接口。导入脚本复用文件存储、自动 Router、Parse Cache、Chunk、Embedding 与 pgvector 入库；不直接解析或加载模型，不创建第二套真相表。真实素材、清单、脚本运行、测试与费用验收均由用户完成。
 
+## 优先使用：阶段 16/17 小样本联合冒烟
+
+已经下载 OHR-Bench 和 OmniDocBench 时，先用 `scripts/smoke_stage16_17.py` 跑少量真实样本，**无需 OCB、许可 Excel、正式 manifest 或 pgAdmin 手动导出**。这是独立测试库的上传/处理与 Dense 验收，不替代下文的正式预置导入标准；不进入阶段 18、LLM 或 RAG。
+
+以下命令全部由用户手动执行。所有步骤省略 `--execute` 都是 dry-run：只说明操作，不写文件、不连接 API/数据库/模型。路径固定相对脚本所在项目根目录；测试文件、原始 QA/GT、快照和报告只写到 `docs/test/stage16_smoke/<run>/`，已被现有 `.gitignore` 保护，不进入正式 preset。
+
+### 1. 离线准备真实样本
+
+先确认本地已有 `ohr_bench_preset/source/pdfs.zip`、`qas_v2.json` 和 `omnidocbench_preset/source/OmniDocBench.json`、`dataset_info.json`、`images/`（均在 `docs/test/` 下）。复用既有 PyMuPDF/Pillow 容器检查，不安装依赖、不下载新数据，不读取正文或运行 Parser/OCR。
+
+```powershell
+conda activate dkf-agent
+python scripts/smoke_stage16_17.py --dry-run
+# 确认原件官方来源及本地研究使用权限后：
+python scripts/smoke_stage16_17.py --step prepare --run run-01 --execute --confirm-local-use
+code docs/test/stage16_smoke/run-01/plan.json
+```
+
+默认固定种子 42，约 **5 PDF + 3 GT 图像 + 20 官方 QA**。PDF 只读 ZIP 必要成员，检查 CRC、SHA256、真实页数、重复内容；优先五类证据和不同领域，每文件上限 20 MiB、50 页，整批 PDF 页预算 150，最多检查 64 个候选。Omni 只选已存在且完整、尺寸与 GT 相符的图像；不生成图片或把 GT 当 QA。只做真实来源候选分类，不据此填写七类正式内容标签。
+
+OHR 原始字段完整保留在 `official_qa.jsonl`；`text` 映射 `plain_text`，`multi` 单独排除，证据页 **0-based → 1-based** 存双份对照，排除缺失/歧义 PDF 和超出真实页数的 QA。Omni 完整 GT 保存在 `omni_gt.jsonl`；项目图片页=1，不猜原 PDF 物理页。约 20 题不足、证据类别缺失或图像不足会如实报告，准备返回 2、处理拒绝继续，不补造数据。可在**新的** `--run run-02` 中显式调整 `--qa-count`、`--pdf-count`、`--image-count`、`--max-total-pages`（≤200）；QA 至少每 PDF 一题。`--image-count 0` 是用户显式不测图像，不证明图片链路通过。
+
+可选自有现代 Office：在准备命令上追加 `--extra "D:/自己的真实资料/文件.xlsx"`，可重复至多三份，仅 DOCX/XLSX/PPTX，检查真实容器与 SHA，不生成自定义问答、不改后缀；来源单列 user，内容质量待人工核对。旧准备计划、正式 manifest、已有素材/报告均不改变。已有 run 不能重新 prepare；部分磁盘故障保留已发布文件，换新 run，不自动清理。
+
+### 2. 启动现有服务，指定独立 ACTIVE 测试库
+
+按 [README](../README.md#3-初始化与启动) 确认已有 PostgreSQL/Redis、迁移 `0007_pgvector_index`、BGE-M3/CUDA、LlamaIndex core/NLP 本地缓存、共享存储及 MinerU Token。**不重复部署或执行迁移**；未就绪时先由用户按原部署说明处理。
+
+分别在三个 PowerShell 窗口激活环境并启动：
+
+```powershell
+conda activate dkf-agent
+uvicorn app.main:app --reload
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
+```
+
+在验收终端用**已有创建接口**新建空的独立库（名称须唯一）；已有独立 ACTIVE 库则直接填写 UUID，不重复创建。不要使用默认正式库或包含其他文件的业务库：
+
+```powershell
+$smokeKb = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/knowledge-bases" -ContentType "application/json; charset=utf-8" -Body '{"name":"stage16-smoke-run-01","description":"隔离的小样本真实验收"}'
+$smokeKbId = $smokeKb.kb_id
+```
+
+重新开终端时只需 `$smokeKbId = "已创建的实际UUID"`。API 使用 root_path/其他本机端口时，相应调整 URL 和工具的 `--api-url`；工具只接受本机 HTTP(S)，不向公网传管理请求。
+
+### 3. 显式执行上传 → READY
+
+**公开下载不等于取得第三方云外传权。** 人工确认全部样本（含额外 Office）允许上传 MinerU，核对账户剩余额度/费用；默认最多 8 份、PDF 页预算 150 加图片，实际路由/收费以平台为准。没有外传许可就停在离线准备，不执行本节。
+
+```powershell
+python scripts/smoke_stage16_17.py --step process --run run-01 --execute --kb-id $smokeKbId --confirm-test-kb --allow-cloud --timeout 1800 --poll-interval 5
+```
+
+提交前检查 SELECT 1、vector 扩展/HNSW/head、API、同 UUID ACTIVE 库、应用/Broker/Backend Redis PING、CPU/GPU 队列响应（GPU 并发1）、本地模型配置/Tokenizer/权重目录、CUDA 和 Token 是否配置。**不加载模型、不验证云 Token、不替用户确认版权/额度**；GPU/鉴权的实际可用性仍由真实任务证明。API/Worker 必须使用与脚本相同的 `.env`、数据库和存储，预检不能证明远端进程的所有配置一致。
+
+逐文件使用原 `POST /documents`，固定 `parse_mode=auto`、独立 doc_id；通过已有 `/chunk /embed /index` 推进，已有任务标识只等待，不调用内部任务主体。状态变化及每 30 秒等待摘要可见。FAILED、超时、队列不消费、身份不符均非成功；不自动 `/process`、Force Reparse 或重试非幂等 POST。超时/中断不取消后台任务。
+
+命令结束自动执行只读 SQL 验证/导出：按测试库+样本 Hash 找文档，Block/Chunk 稳定序号、当前解析代次、source_spans 精确字符和 Hash、冻结模型/编码身份、`chunk_count=vector_count>0`、1024 维/单位范数（误差≤1e-4），READY 和当前入库检查点。不会导出向量、私有配置、Token 或签名 URL；**正文/官方答案会进入本地受控报告/导出，不要公开**。同一解析代次出现多个 Job 要排查；重复 process 的已有 READY 文档必须保持任务/批次/Block/Chunk 不变。
+
+首次 process 返回 0 只表示自动链路校验通过，报告仍 **BLOCKED：Dense 未执行**。只需验证已有 READY 或观察超时后状态，不必重新上传：
+
+```powershell
+python scripts/smoke_stage16_17.py --step verify --run run-01 --execute --kb-id $smokeKbId
+```
+
+中断后重复同一 process 命令：按同库 SHA 复用已有文档；有意图却没有持久化记录/任务标识时 `SMOKE_UNCERTAIN` 停止，先按 doc_id、events、当天业务日志核对，不能删除意图或改 run 来强行重复收费。硬中断可能留下 `run.lock`，确认该运行的旧 CLI 进程已退出后，用户才可删除这**一个**锁；不删业务日志锁或整个数据目录。FAILED 先人工修复原因，工具不自动恢复失败代次。
+
+### 4. Dense 与报告（只读）
+
+全部 READY 后，先在 GPU Worker 窗口 **Ctrl+C 停止空闲 Worker**，避免 RTX 4060 8GB 同时加载两份模型；保留 PostgreSQL，检索本身不依赖 API/Redis/Worker。不停止还在处理中的 GPU 任务，不由工具关闭服务。
+
+```powershell
+python scripts/smoke_stage16_17.py --step retrieve --run run-01 --execute --kb-id $smokeKbId
+# 报告已自动生成；可独立重新生成，不连接服务/模型：
+python scripts/smoke_stage16_17.py --step report --run run-01 --execute
+$smokeReport = Get-ChildItem docs/test/stage16_smoke/run-01/reports/*-report.md | Sort-Object Name | Select-Object -Last 1
+code $smokeReport.FullName
+```
+
+原样 `questions` 调用既有 `DenseRetriever(top_k=20)`，共享既有 BGE-M3 Query Adapter，无 LLM/答案生成/文档重新向量化。逐项核对原 chunk_id、同 KB、文件身份、正文/页码/section/source_spans 和模型身份；同一题重查一次看 ID 稳定，检索前后只读快照必须不变。模型/数据库异常停止后续题，其余标记 BLOCKED，不反复重载模型；空结果、未命中不能算通过。
+
+报告统计 **文档 Hit@1/5/10、MRR@20**（截断排名，不是全库 MRR），以及可判定物理证据页的 Hit@1/5/10；页命中使用实际 source_spans，不能仅靠跨多页范围。无法判定为 not_applicable，列单独分母。严格小样本 PASS 要求链路全通过、全部选中官方题文档 Hit@10、可判定题证据页 Hit@10、同题稳定和查询无写入变化；这不是官方推荐准确率阈值。
+
+自动复用 `evaluate_benchmark_parsing.py` 的纯诊断函数，不再要求 SQL 手工复制：OHR 官方页字面证据/字符来源，Omni 原 GT 与 Block/Chunk 对应。Omni 区域 CER/TEDS/公式/阅读顺序等没有人工一对一映射时为 not_applicable/manual_pending，**不为几张图自动猜区域**。OHR 未字面匹配为 review_required；表格/公式/视觉顺序和语义正确性仍待人工核对。自动结构与 Dense PASS 可以与解析质量 BLOCKED 同时存在，不能混为完整质量通过。
+
+每次生成新的时间戳 JSON/Markdown，包含每文件失败阶段、Block/Chunk/向量检查、逐题排名/指标、任务/批次和潜在费用（实际金额未知，人工查 MinerU）。退出码：dry-run/无缺口准备/单独链路通过=0，已运行验收不通过=1，缺配置/许可/输入/不确定提交=2，中断=130；只读 report 按联合结果返回，文件仍会保存。
+
+三个层次始终分开：
+
+- **小样本真实冒烟：PASS / FAIL / BLOCKED**，以实际报告为准。
+- **阶段16完整正式验收：BLOCKED / 待完成**。原导入器的 ≥10 独立内容、DOC/XLS/PPT、≥3 现代格式、七类真实标签、正式默认 preset 库 READY/向量/幂等/人工质量/费用要求完全不变；报告只列本次小样本缺口，不猜正式素材是否齐全。
+- **官方基准完整质量评测：NOT_APPLICABLE**。没有执行官方全量评测或 RAG 问答，READY、GT 类别与文档命中都不等于回答准确率。
+
+Mock 用例仅用户手动执行，不运行 Parser/真实数据库/模型或云端，不生成真实 PDF/Office/图片：
+
+```powershell
+python -m pytest tests/test_smoke_stage16_17.py -q
+```
+
 ## 素材与人工清单
 
 把**已有、合法且允许云外传**的资料放入 `data/knowledge_base/preset/`，可按子目录组织。本轮只创建 `.gitkeep`，没有复制、下载或生成任何比赛/测试文档。该目录中的素材及清单默认忽略，不提交 Git；需团队共享时用受控资料包另行分发。
