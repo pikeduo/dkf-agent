@@ -11,7 +11,7 @@ from sqlalchemy.orm.attributes import NO_VALUE
 
 from app.core.business_logging import log_event
 from app.models import Document, DocumentChunk
-from app.schemas.retrieval import FusionProvenance, RetrievalResult
+from app.schemas.retrieval import FusionProvenance, RerankProvenance, RetrievalResult
 from app.services.rag.llama_index.validation import RagAdapterError, json_snapshot, vector_snapshot
 
 ADAPTER_VERSION = "chunk-node-v1"
@@ -79,26 +79,30 @@ def chunk_to_node(chunk: DocumentChunk, document: Document, *, include_embedding
 
 
 def node_to_result(value: TextNode | NodeWithScore, *, log_success: bool = True) -> RetrievalResult:
-    """还原原文/证据及可选 RRF 来源；批量校验可省略成功日志，错误仍记录。"""
+    """还原证据及RRF/重排来源；Node当前排序分与原检索分分离，批量可关闭成功日志。"""
 
     started = perf_counter()
     try:
         score = value.score if isinstance(value, NodeWithScore) else None
         node = value.node if isinstance(value, NodeWithScore) else value
         if (not isinstance(node, TextNode) or type(log_success) is not bool
-                or set(node.metadata) not in (METADATA_FIELDS, METADATA_FIELDS | {"fusion"})):
+                or not METADATA_FIELDS <= set(node.metadata)
+                or not set(node.metadata) <= METADATA_FIELDS | {"fusion", "rerank"}):
             raise RagAdapterError("RAG_ADAPTER_NODE")
         metadata = json_snapshot(node.metadata)
         if metadata["dkf_adapter_version"] != ADAPTER_VERSION:
             raise RagAdapterError("RAG_ADAPTER_NODE")
         fusion = FusionProvenance.model_validate(metadata["fusion"]) if "fusion" in metadata else None
+        rerank = RerankProvenance.model_validate(metadata["rerank"]) if "rerank" in metadata else None
         result = RetrievalResult(kb_id=metadata["kb_id"], doc_id=metadata["doc_id"], chunk_id=metadata["chunk_id"],
             file_name=metadata["file_name"], file_type=metadata["file_type"], text=node.text,
             page_start=metadata["page_start"], page_end=metadata["page_end"], section=metadata["section"],
             metadata=metadata["chunk_metadata"], embedding_identity=metadata["embedding_identity"],
-            retrieval_score=score, fusion=fusion)
-        if (fusion is not None and score is not None
-                and not math.isclose(score, fusion.fusion_score, rel_tol=1e-12, abs_tol=1e-15)):
+            retrieval_score=rerank.retrieval_score if rerank is not None else score, fusion=fusion,
+            rerank=rerank, rerank_score=rerank.rerank_score if rerank is not None else None)
+        current_score = rerank.rerank_score if rerank is not None else (fusion.fusion_score if fusion is not None else None)
+        if (current_score is not None and score is not None
+                and not math.isclose(score, current_score, rel_tol=1e-12, abs_tol=1e-15)):
             raise RagAdapterError("RAG_ADAPTER_NODE")
         if (node.node_id != str(result.chunk_id) or node.ref_doc_id != str(result.doc_id)
                 or node.source_node is None
@@ -113,3 +117,35 @@ def node_to_result(value: TextNode | NodeWithScore, *, log_success: bool = True)
         log_event("rag.result_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
                   duration_ms=(perf_counter() - started) * 1000)
     return result
+
+
+def result_to_node(value: RetrievalResult, *, log_success: bool = True) -> NodeWithScore:
+    """把内部DTO还原为无向量Node及当前排序分，完整证据深复制；不读库或补Embedding。"""
+    try:
+        if not isinstance(value, RetrievalResult) or type(log_success) is not bool:
+            raise RagAdapterError("RAG_ADAPTER_INPUT")
+        result = RetrievalResult.model_validate(value.model_dump())
+        metadata = {"dkf_adapter_version": ADAPTER_VERSION, "kb_id": str(result.kb_id),
+                    "doc_id": str(result.doc_id), "chunk_id": str(result.chunk_id),
+                    "file_name": result.file_name, "file_type": result.file_type,
+                    "page_start": result.page_start, "page_end": result.page_end, "section": result.section,
+                    "chunk_metadata": json_snapshot(result.metadata),
+                    "embedding_identity": json_snapshot(result.embedding_identity) if result.embedding_identity is not None else None}
+        if result.fusion is not None:
+            metadata["fusion"] = result.fusion.model_dump()
+        if result.rerank is not None:
+            metadata["rerank"] = result.rerank.model_dump()
+        node = TextNode(id_=str(result.chunk_id), text=result.text, metadata=metadata, embedding=None,
+            relationships={NodeRelationship.SOURCE: RelatedNodeInfo(node_id=str(result.doc_id), metadata={
+                "kb_id": str(result.kb_id), "file_name": result.file_name, "file_type": result.file_type})},
+            excluded_embed_metadata_keys=sorted(metadata), excluded_llm_metadata_keys=sorted(metadata))
+        hit = NodeWithScore(node=node, score=result.rerank_score if result.rerank is not None else result.retrieval_score)
+        node_to_result(hit, log_success=False)
+    except Exception as exc:
+        error = exc if isinstance(exc, RagAdapterError) else RagAdapterError("RAG_ADAPTER_INPUT")
+        log_event("rag.adapter_failed", level=logging.WARNING, stage="result_to_node", error_code=error.code)
+        raise error from None
+    if log_success:
+        log_event("rag.node_converted", kb_id=result.kb_id, doc_id=result.doc_id, chunk_id=result.chunk_id,
+                  artifact_reused=False)
+    return hit

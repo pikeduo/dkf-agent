@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     embedding_batch_size: int = Field(default=16, ge=1, le=128)
     embedding_max_length: int = Field(default=8192, ge=8, le=8192)
     embedding_use_fp16: bool = True
+    # 在线重排共用进程内服务；用户手动部署本地模型，不自动下载或回退设备。
+    reranker_model_dir: Path = Path("models/bge-reranker-v2-m3")
+    reranker_device: str = Field(default="cuda:0", pattern=r"^(cpu|cuda:[0-9]+)$")
+    reranker_batch_size: int = Field(default=2, ge=1, le=32)
+    reranker_max_length: int = Field(default=8192, ge=8, le=8192)
+    reranker_use_fp16: bool = True
     embeddings_dir: Path = Path("data/embeddings")
     upload_dir: Path = Path("data/uploads")
     max_upload_size_mb: int = Field(default=50, gt=0)

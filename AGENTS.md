@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**20：Hybrid Retrieval。已实现同范围Dense + BM25稳定RRF、去重及来源解释，待人工验收；阶段19仍有关键词真实验收待确认，阶段18已确认通过。阶段16/17及此前待验收事项保留，不自动进入21。**
+当前阶段：**21：BGE Reranker。已实现项目共享本地服务、同步Node Postprocessor与独立分数/完整证据互转，待人工验收；真实模型、排序收益及阶段19/20等此前待验收事项保留，不自动进入22。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -46,11 +46,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 18 | 固定单/多文档范围、参数校验、SQL Top-K前过滤与原始证据保留；用户已确认测试通过 |
 | 19 | 已实现本地BM25、kb/doc范围、当前READY快照、派生缓存重建和原始证据保留；用例未运行，待验收 |
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
-| 21 及后续 | 未开展，等待用户确认 |
+| 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
+| 22 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮只增量实现阶段20及必要用例/说明，不改解析/切片/向量化/索引、素材或已有验收结论；不执行检索/测试/部署，不进入Rerank/RAG或扩展文档Hybrid。
+- 本轮只增量实现阶段21及必要配置/用例/说明，不改解析/切片/向量化/索引、素材或已有验收结论；不执行推理/测试/部署，不进入DeepSeek/RAG或扩展文档Hybrid。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -62,6 +63,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
 - 后续按计划使用 DeepSeek、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
 - BGE-M3 Dense 使用已声明的 sentence-transformers；项目依赖可按第 0 节安装，只从用户部署的本地官方权重加载，CUDA/PyTorch CPU-CUDA 版本替换及模型准备仍由用户执行。
+- BGE Reranker使用已声明Transformers的单标签分类模型，统一由项目RerankerService管理；Adapter不另载模型，不要求FlagEmbedding或框架模型集成。本地Safetensors权重与部署仍由用户准备。
 - LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，core 依赖可按第 0 节安装，首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
 - 新增技术或依赖须先说明原因和替代方案并等待确认；不得自行引入 Elasticsearch、知识图谱、本地大型视觉模型、新 Agent、Kubernetes、微调或无关大型依赖。
 
@@ -209,6 +211,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 等权RRF按1-based排名计算，默认k=60；以稳定chunk_id去重，同分按UUID排序，不按正文hash合并或混加原分数。Node原正文/证据不变，仅增加类型化fusion来源及原排名/分数，DTO互转保留，不混入Embedding/LLM文本。
 - 两路各自继承READY/当前代次/范围约束，Dense仍核对模型身份；BM25-only证据不冒充同模型向量命中。独立短快照不保证跨支同一事务；重复Chunk证据冲突、越界/坏行或分支异常全批失败，正常空支可融合另一支，不自动扩大范围/降级/重试。
 
+### BGE Reranker
+
+- 在线默认同步，项目进程共享惰性服务及锁内批处理；离线本地Safetensors/禁止远程代码，不下载或CUDA失败回退CPU。明确CPU配置用FP32；不与Embedding服务共享不同模型权重，8GB显存双模型与长输入需人工验证。
+- 只评分原Query+完整原node.text，不加metadata/指令、不重Embedding/Parse/读库。真实成对token超限、坏输入/输出/身份变化或推理失败全批拒绝，不截断证据、不静默返回原排序；空候选不加载模型。
+- 默认Top5，原始有限logit降序、同分UUID稳定排序；Node当前score为rerank_score，DTO保留原retrieval_score及fusion_score。来源仅运行时rerank字段，原ID/正文/页/章节/source_spans不变且深复制；重复重排/重复Chunk/跨库候选拒绝。效果提升需同批候选、真实QA/证据人工对照，不以Stub排序或Top5存在宣称验收通过。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -226,6 +234,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | Dense SQL/模型隔离、Top-K、日志与人工验收 | [Dense Retrieval](docs/DENSE_RETRIEVAL.md) |
 | BM25词项、READY快照、派生缓存及人工验收 | [BM25 Retriever](docs/BM25_RETRIEVAL.md) |
 | 两路组合、RRF来源、冲突边界及人工验收 | [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md) |
+| 本地重排、分数/证据、部署及质量验收 | [BGE Reranker](docs/RERANKER.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

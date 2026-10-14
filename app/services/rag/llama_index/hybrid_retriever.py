@@ -58,7 +58,7 @@ def fusion_scope(kb_id, doc_ids, top_k: int, branch_top_k: int, rrf_k: int):
 def fuse_nodes(dense: list[NodeWithScore], bm25: list[NodeWithScore], *,
                kb_id: UUID | str, doc_ids=None, top_k: int = 20,
                branch_top_k: int = 20, rrf_k: int = 60) -> list[NodeWithScore]:
-    """以原 Chunk UUID 去重，按1-based排名等权RRF；证据冲突/坏行全批拒绝且不修改输入。"""
+    """按原Chunk UUID做RRF；冲突/坏行/已重排候选拒绝，不混用后处理分或修改输入。"""
     kb_id, doc_ids = fusion_scope(kb_id, doc_ids, top_k, branch_top_k, rrf_k)
     candidates = {}
     try:
@@ -72,7 +72,7 @@ def fuse_nodes(dense: list[NodeWithScore], bm25: list[NodeWithScore], *,
                 result = node_to_result(hit, log_success=False)
                 score = result.retrieval_score
                 if (result.kb_id != kb_id or (doc_ids is not None and result.doc_id not in doc_ids)
-                        or result.fusion is not None or hit.node.embedding is not None
+                        or result.fusion is not None or result.rerank is not None or hit.node.embedding is not None
                         or score is None or not math.isfinite(score)
                         or (name == "dense" and not -1 <= score <= 1)
                         or (name == "bm25" and score <= 0) or result.chunk_id in seen):

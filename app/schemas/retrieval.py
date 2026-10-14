@@ -40,6 +40,23 @@ class FusionProvenance(BaseModel):
         return self
 
 
+class RerankProvenance(BaseModel):
+    """本地重排身份与独立分数，原检索排名保留，不把logit解释为概率。"""
+
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+    model_name: Literal["BAAI/bge-reranker-v2-m3"]
+    model_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    version: Literal["bge-reranker-v2-m3-logit-v1"]
+    max_length: StrictInt = Field(ge=8, le=8192)
+    precision: Literal["fp16", "fp32"]
+    score_type: Literal["logit"]
+    input_rank: StrictInt = Field(ge=1, le=100)
+    retrieval_score: float = Field(allow_inf_nan=False, strict=True)
+    fusion_score: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    rerank_score: float = Field(allow_inf_nan=False, strict=True)
+
+
 class RetrievalResult(BaseModel):
     """Chunk→Page/Section→Document 的运行时表示；无分数时保留 None，不虚构相关性。"""
 
@@ -58,11 +75,29 @@ class RetrievalResult(BaseModel):
     embedding_identity: dict[str, Any] | None = None
     retrieval_score: float | None = Field(default=None, allow_inf_nan=False, strict=True)
     fusion: FusionProvenance | None = None
+    fusion_score: float | None = Field(default=None, gt=0, allow_inf_nan=False, strict=True)
+    rerank_score: float | None = Field(default=None, allow_inf_nan=False, strict=True)
+    rerank: RerankProvenance | None = None
 
     @model_validator(mode="after")
     def validate_evidence(self) -> "RetrievalResult":
-        """检查原文非空和页范围；保留原字符串与逻辑/物理页语义，不修剪或猜测内容。"""
+        """检查原文/页范围及各阶段分数的一致性，原检索分不被重排分覆盖。"""
 
         if not self.text.strip() or self.page_end < self.page_start:
             raise ValueError("证据正文或页范围无效")
+        fusion_score = self.fusion.fusion_score if self.fusion is not None else None
+        if self.fusion_score is None:
+            self.fusion_score = fusion_score
+        if self.fusion_score != fusion_score:
+            raise ValueError("融合分与来源不一致")
+        if (fusion_score is not None and self.retrieval_score is not None
+                and not math.isclose(self.retrieval_score, fusion_score, rel_tol=1e-12, abs_tol=1e-15)):
+            raise ValueError("原融合检索分与来源不一致")
+        if self.rerank is not None:
+            if (self.retrieval_score != self.rerank.retrieval_score
+                    or self.rerank_score != self.rerank.rerank_score
+                    or self.fusion_score != self.rerank.fusion_score):
+                raise ValueError("重排分数与来源不一致")
+        elif self.rerank_score is not None:
+            raise ValueError("缺少重排来源")
         return self

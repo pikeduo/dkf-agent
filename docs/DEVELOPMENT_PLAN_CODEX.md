@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段20 Hybrid稳定RRF代码已实现、待人工验收；阶段19关键词验收仍待确认，阶段18已由用户确认通过，其他待验收事项保留。** 不自动进入21。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段21 BGE Reranker代码已实现、待人工验收；真实模型/排序收益及阶段19/20等此前待验收事项保留。** 不自动进入22。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮只组合已有Dense/BM25和稳定RRF，保留原证据及排序来源，不重做业务链路；不触碰素材、执行迁移/测试/真实查询、启动服务或进入Rerank/RAG。\
+> 本轮只接入项目共享Reranker与Node Postprocessor，保留原分数/证据，不重做业务链路；不触碰素材、下载/加载模型、执行迁移/测试/真实查询、启动服务或进入DeepSeek/RAG。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2822,6 +2822,8 @@ BM25 Retriever Top 20
 ---
 
 # 27. 阶段 21：BGE Reranker（LlamaIndex Node Postprocessor）
+
+实现/部署及验收：[BGE Reranker](RERANKER.md)。代码已实现项目RerankerService、已声明Transformers离线加载、同步批处理、共享Postprocessor和默认Top5；原检索/融合分与原始重排logit分别保留，Node/内部DTO双向转换且原证据不变。配置已同步，不新增表/迁移/队列/依赖；用例只编写，未下载/运行模型或执行测试，排序收益必须人工对照，不进入22。
 
 ## 目标
 

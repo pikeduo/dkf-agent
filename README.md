@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid Python Retriever，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid Python Retriever及本地BGE重排，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -42,6 +42,12 @@ EMBEDDING_DEVICE=cuda:0
 EMBEDDING_BATCH_SIZE=16
 EMBEDDING_MAX_LENGTH=8192
 EMBEDDING_USE_FP16=true
+# 本地在线重排，独立于文档向量化参数。
+RERANKER_MODEL_DIR=models/bge-reranker-v2-m3
+RERANKER_DEVICE=cuda:0
+RERANKER_BATCH_SIZE=2
+RERANKER_MAX_LENGTH=8192
+RERANKER_USE_FP16=true
 
 # OCR / 外部服务：仅云解析需要 Token
 MINERU_API_BASE_URL=https://mineru.net/api/v4
@@ -462,6 +468,21 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 使用 `app.services.rag.llama_index.hybrid_retriever.HybridRetriever(kb_id, doc_ids=None, top_k=20, branch_top_k=20, rrf_k=60)` 组合已有Dense与BM25；`retrieve(query)`返回按原chunk_id去重的NodeWithScore，`retrieve_results(query)`返回原证据DTO及fusion来源。每路默认20项，最终默认20项（可设30），同分按UUID稳定排序；`node.metadata['fusion']`保留dense/bm25原分数、排名及融合分，不代表概率或问答准确率。
 
 沿用已有core、rank-bm25、PostgreSQL及同模型本地BGE-M3，不需升级为全量llama-index、新密钥、迁移或Worker；Query只编码一次，不重编码文档。无Query Rewrite/LLM/多查询扩展；正常空分支可由另一支返回结果，异常不静默单路降级。两路为独立只读快照，同Chunk证据冲突明确失败，不自动重试。部署条件、错误边界和人工验收见 [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md)。
+
+### 本地 BGE Reranker
+
+重排使用[官方BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3)，项目`app.services.reranking.get_reranker_service()`统一管理，`BGERerankerAdapter`只委托同一进程共享服务。复用已有Torch、Transformers和core，不需要FlagEmbedding或全量LlamaIndex集成、新密钥、迁移、Worker。缺少依赖时用户先检查`python -m pip show torch transformers huggingface_hub llama-index-core`，只补缺包；CUDA安装仍沿用上面的手动步骤。
+
+用户手动下载完整本地Safetensors权重、Tokenizer和配置（数GB，预留缓存及内存）：
+
+```powershell
+conda activate dkf-agent
+python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BAAI/bge-reranker-v2-m3', local_dir='models/bge-reranker-v2-m3', allow_patterns=['*.json','*.safetensors','sentencepiece.bpe.model'], ignore_patterns=['onnx/*']); print('reranker_download_complete')"
+```
+
+`/models/`已受Git忽略保护。只读本地模型、禁止远程代码及自动CPU回退；模型缺失明确错误，构造Adapter不加载。默认cuda:0、batch=2、max_length=8192、FP16；长度是Query+候选含特殊token的总上限，超限失败，不截断正文。RTX4060 8GB先从batch=1～2尝试，停止同卡GPU Worker；在线Query的BGE-M3和Reranker是两种不同模型，会同时占显存，不保证长输入可用。不足时由用户明确配置`RERANKER_DEVICE=cpu`使用FP32（较慢），不擅自降低正文长度或升级GPU环境。
+
+显式导入`app.services.rag.llama_index.reranker_adapter.BGERerankerAdapter`，用`BGERerankerAdapter(top_n=5).postprocess_nodes(candidates, query_str=query)`同步重排Hybrid候选。NodeWithScore.score为原始rerank logit，不是概率；Node/DTO分别保留原retrieval_score、fusion_score、rerank_score，原ID/正文/页码/章节不变。默认getter进程内共享，不跨进程共享模型；修改模型配置后重启使用它的Query进程。用例、部署核验及同批候选排序对照见[重排验收说明](docs/RERANKER.md)，尚未证明排序质量提升。
 
 ### 预置知识库导入
 
