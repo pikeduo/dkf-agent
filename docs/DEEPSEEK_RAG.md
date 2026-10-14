@@ -1,6 +1,6 @@
-# DeepSeek RAG：最终证据合成与人工验收
+# LLM RAG：独立 DeepSeek / 自定义 API 与最终证据验收
 
-阶段22代码已实现，真实DeepSeek响应、答案忠实度、数字/引用准确性、Prompt注入抗性及延迟仍待用户验收。阶段23已补齐[Citation / Evidence](CITATION_EVIDENCE.md)的显式只读来源反查；阶段24已增加[Knowledge Query API](KNOWLEDGE_QUERY_API.md)，但未执行真实HTTP问答验收。没有新增数据库表/迁移、Worker、模型或依赖。阶段16正式验收与阶段21排序收益等未完成事项保留，不自动进入阶段25。
+阶段22已支持独立LLM提供方配置；用户已确认旧Sub2API的`DeepSeek-V4.1-Flash`真实RAG成功，但本轮拆分后的HTTP参数/配置隔离尚未运行Mock或真实验收。答案忠实度、数字/引用准确性、Prompt注入抗性及延迟仍须用户核验。阶段23已补齐[Citation / Evidence](CITATION_EVIDENCE.md)，阶段24已增加[Knowledge Query API](KNOWLEDGE_QUERY_API.md)；没有新数据库表/迁移、Worker、模型或依赖。不改变既有检索、Prompt及引用白名单，不自动进入阶段25。
 
 ## 入口和边界
 
@@ -12,9 +12,9 @@ result = query_knowledge_base(kb_id, question, doc_ids=[doc_id], top_k=30, allow
 # 返回项目 RAGAnswer；如未来API需要JSON，可使用 result.model_dump(mode="json")。
 ```
 
-- 项目正式DeepSeek HTTP边界为`app.services.deepseek.DeepSeekService`。仓库此前尚无LLM服务，因此本阶段新建单一边界；没有引入OpenAI SDK或散落HTTP客户端。
+- `app.services.llm.create_llm_service()`只按`LLM_PROVIDER`选一个服务：`DeepSeekService`仅官方，`CustomLLMService`仅自定义API；共用安全HTTP实现，不共用Key/Base URL/模型/输出预算/超时。构造不联网、失败不重试或切换，不引入OpenAI SDK。
 - `DKFQueryEngine`继承LlamaIndex BaseQueryEngine，组合已有HybridRetriever（各路20/融合默认30）及BGERerankerAdapter（Top5），不重新Parse/Chunk/Embedding/Index。仅Query沿用共享BGE-M3，重排沿用共享Reranker，两者是不同模型。
-- `DKFDeepSeekAdapter`继承CustomLLM，明确包装项目服务；`DKFResponseSynthesizer`继承BaseSynthesizer，但采用Node-aware单次Chat，显式初始化状态而不用默认LLM/PromptHelper/Tokenizer。自由text_chunks、额外source nodes、动态Prompt、Completion及流式入口拒绝；没有Refine/tree/map-reduce的隐含多次收费请求。
+- `DKFLLMAdapter`继承CustomLLM，委托工厂选择的项目服务；旧`DKFDeepSeekAdapter`导入/注入调用保持兼容，未注入时也尊重全局选择器。`DKFResponseSynthesizer`仍使用原Node-aware单次Chat，不用默认LLM/PromptHelper/Tokenizer。自由text_chunks、额外source nodes、动态Prompt、Completion及流式入口拒绝；无Refine/tree/map-reduce隐含收费请求。
 - 公共Query/Synthesis/Chat不走默认含正文的callback；不修改全局Settings，不注册Tracing。第三方全局instrumentation仍需用户禁用，不宣称能净化任意外部追踪。
 - `doc_ids`与原检索相同：省略为指定库全范围，非空最多100个UUID；空列表/跨库/坏证据不扩大范围。READY/代次/模型过滤由原Retriever执行，最终再核对kb/doc、去重及重排前后证据一致。
 - 默认同步；显式`aquery/asynthesize`只是同进程线程包装，无额外GPU进程/服务。输出项目`RAGAnswer`，不向前端暴露Response/NodeWithScore。
@@ -24,21 +24,42 @@ result = query_knowledge_base(kb_id, question, doc_ids=[doc_id], top_k=30, allow
 在本地`.env`的模型与LLM组手动填写，真实密钥不得提交或打印；本轮同步结构但保留已有密钥值：
 
 ```dotenv
+LLM_PROVIDER=deepseek
+# 官方独立配置，保留原密钥和现有预算；下方为代码默认预算示例。
 DEEPSEEK_API_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_MAX_TOKENS=2048
 DEEPSEEK_TIMEOUT_SECONDS=60
+# 自定义独立配置；只有选择custom才读取本组，未选中的Key允许为空。
+CUSTOM_LLM_API_BASE_URL=http://45.129.8.116:8080/v1
+CUSTOM_LLM_API_KEY=
+CUSTOM_LLM_MODEL=DeepSeek-V4.1-Flash
+CUSTOM_LLM_MAX_TOKENS=2048
+CUSTOM_LLM_TIMEOUT_SECONDS=60
+CUSTOM_LLM_ALLOW_INSECURE_HTTP=false
 RAG_MAX_CONTEXT_CHARS=60000
-DEEPSEEK_API_KEY=
 ```
 
-复用已声明的httpx和llama-index-core，不安装全量LlamaIndex/额外LLM集成；按[README](../README.md)准备已有模型和core/NLP缓存。官方接口及模型能力以[DeepSeek文档](https://api-docs.deepseek.com/api/create-chat-completion/)和账号权限为准；默认非thinking/temperature=0/JSON/非流式。`DEEPSEEK_PROVIDER=official`仅接受官方`https://api.deepseek.com`或`https://api.deepseek.com/v1`，保持原有TLS、直连、无代理、无跳转边界。
+复用已有httpx和llama-index-core。官方仅接受`https://api.deepseek.com`或`https://api.deepseek.com/v1`，保留原`thinking={"type":"disabled"}`；自定义只发送通用Chat Completions字段，不要求其实现DeepSeek专用参数。两者均为temperature=0、JSON-mode、非流式、TLS验证开启、trust_env=False、无跳转。自定义URL支持服务根路径（如`/v1`或`/api/v1`），拒绝凭据/参数/片段/控制字符/路径遍历及完整completion地址；具体服务仍须用户确认可信与JSON-mode支持。
 
-Sub2API切换：在本地`.env`**注释保留**旧的官方`DEEPSEEK_PROVIDER`、`DEEPSEEK_API_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_API_KEY`行；另写启用的`DEEPSEEK_PROVIDER=sub2api`、`DEEPSEEK_API_BASE_URL=https://你的Sub2API域名/v1`、`DEEPSEEK_MODEL=DeepSeek-V4.1-Flash`、`DEEPSEEK_API_KEY=本地网关密钥`和`DEEPSEEK_ALLOW_INSECURE_HTTP=false`。切回官方时将两组行反向注释，保留单组活动键值并重启Query进程。部署者必须自行确认网关地址确实受信任。
+迁移规则：未指定`LLM_PROVIDER`默认deepseek，旧`DEEPSEEK_PROVIDER=official`兼容；旧`sub2api`初始化直接报迁移错误，绝不把旧网关密钥发到官方。把旧网关Base URL/Key/Model/预算/超时分别移到`CUSTOM_LLM_*`，旧HTTP授权移到`CUSTOM_LLM_ALLOW_INSECURE_HTTP`；从保留官方组恢复`DEEPSEEK_*`，不凭密钥外观猜用途。原官方预算不改写；本地旧网关预算迁入custom以保持行为，模板custom默认2048/60。
 
-此前人工已在独立PowerShell最小请求中验证自建HTTP网关的`DeepSeek-V4.1-Flash`返回`OK`，但**仅验证普通Chat**，未验证现有RAG要求的`thinking`及JSON模式、引用输出。公网HTTP会明文传输密钥、问题与原始最终证据，正式部署必须改为HTTPS；如果部署者在临时测试环境仍坚持使用上述HTTP地址，必须明确设置`DEEPSEEK_ALLOW_INSECURE_HTTP=true`，并使用可撤销、低额度的测试密钥，测试后轮换。服务不会自动把HTTP升级为HTTPS，也不会记录密钥/正文或自动重试收费请求。
+迁移工具默认不写，`--apply`只机械整理本地`.env`并注释归档原值；缺失或多份官方保留配置、重复活动变量、新旧混用均拒绝，不覆盖猜测的密钥：
 
-`allow_cloud=True`是本次调用的明确外传/费用确认，不是版权证明、鉴权或通用用户权限系统。未确认时在检索/模型前拒绝；用户必须确认问题和最终正文可发给DeepSeek。已有MinerU上传许可不自动覆盖DeepSeek。正式对外用户授权/鉴权留到后续API阶段。
+```powershell
+conda activate dkf-agent
+python scripts/migrate_llm_env.py
+python scripts/migrate_llm_env.py --apply
+```
+
+迁移完成后两组变量均保留，仅把`LLM_PROVIDER=deepseek`改为`custom`（或反向）并重启API/Query进程；`get_settings()`缓存及已有服务快照不会热切换。PowerShell的同名环境变量优先于`.env`，旧`DEEPSEEK_PROVIDER=sub2api`若仍存在须手动移除；不要把真实Key写进命令行历史。旧HTTP变量不再控制任何正式请求。
+
+用户已确认旧Sub2API真实RAG成功，不代表本轮重构已经验收。默认自定义HTTP被拒绝；仅临时测试可明确设置`CUSTOM_LLM_ALLOW_INSECURE_HTTP=true`，不能通过旧DeepSeek开关放宽。公网HTTP明文暴露Key、问题与证据，正式部署必须使用可信HTTPS；测试使用低额度可撤销密钥、结束后轮换。不会自动修改协议或关闭HTTPS证书校验。
+
+`allow_cloud=True`是向当前选中提供方的本次外传/费用确认，不是版权或鉴权证明；未确认时在检索/模型前拒绝。MinerU上传许可不覆盖LLM，提供方切换后须重新确认接收方受信任及内容可外传；不因另一提供方可用而自动回退。
+
+安全错误：官方保持既有`DEEPSEEK_*`码兼容，自定义使用`LLM_CONFIG / INPUT / AUTH / QUOTA / RATE_LIMIT / NETWORK / HTTP / RESPONSE / TRUNCATED`（各项均带`LLM_`前缀）。`LLMError`统一捕获两者；HTTP接口只返回固定code/message，不透传异常正文。鉴权401/403、配额402、限流429分别分类，其余非200（含跳转）为HTTP错误。
 
 每次有证据的合成最多一个POST；响应超时可能已经计费，鉴权/限流/网络/供应商5xx均不自动重试。手动重跑会产生新请求，先核对账户记录；本阶段无持久化回答Cache/请求Outbox/exactly-once保证。HTTP每阶段超时默认60秒（连接10秒），不是检索+推理+云调用的总耗时保证。
 
@@ -71,7 +92,7 @@ Sub2API切换：在本地`.env`**注释保留**旧的官方`DEEPSEEK_PROVIDER`�
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_deepseek_service.py tests/test_rag_synthesis.py tests/test_rag_query_engine.py -q
+python -m pytest tests/test_llm_service.py tests/test_deepseek_service.py tests/test_migrate_llm_env.py tests/test_stage22_rag_acceptance.py tests/test_rag_synthesis.py tests/test_rag_query_engine.py tests/test_knowledge_api.py tests/test_business_logging.py -q -ra
 # 相邻回归；不请求真实服务，用户自行决定执行。
 python -m pytest tests/test_reranker_adapter.py tests/test_hybrid_retriever.py tests/test_llama_index_adapter.py tests/test_business_logging.py -q
 ```
@@ -79,6 +100,17 @@ python -m pytest tests/test_reranker_adapter.py tests/test_hybrid_retriever.py t
 测试只有内存Node、项目服务Stub和httpx.MockTransport，未生成文档素材。覆盖唯一请求/TLS/直连/无重试、鉴权/额度/网络/响应预算/截断、JSON严格性、仅最终Evidence、原来源与三分数/深复制、引用去重/未知引用、空集/不足/服务异常区分、范围与最终证据一致、同步/异步、默认Prompt/回调旁路保护及日志脱敏。core未安装或缓存未准备导致跳过不是通过；Codex没有执行。
 
 ## 最小真实问题验收（用户手动执行）
+
+原正式入口保持不变；确认当前提供方配置、外传许可及一次费用后由用户执行（不重新解析或导入）：
+
+```powershell
+conda activate dkf-agent
+python -m scripts.stage22_rag_acceptance
+# 更换到真实独立验收范围时：
+python -m scripts.stage22_rag_acceptance --kb-id "真实知识库UUID" --doc-id "真实READY文档UUID"
+```
+
+脚本先只读预检选中提供方（不读取另一方Key、不发请求），输出固定provider和模型；缺配置/未经允许的HTTP即停止。原无云许可保护、一次真实问答、Citation/不足验收不变；**执行该脚本的真实问答步骤会产生费用**。分别手动切换两种提供方验收，但不要为诊断失败盲目重跑。本轮没有执行脚本、Mock或真实请求。
 
 1. 使用已有独立ACTIVE测试库及READY文档，不重传、不重新解析或消耗MinerU。确认实际匹配的本地BGE-M3、Reranker和PostgreSQL已可用；按README准备DeepSeek密钥及账号模型权限。
 2. 先停止同卡GPU Worker/其他模型测试进程；8GB显存可能同时驻留两个不同模型，不保证长候选可用。OOM/真实token超限时查安全码，不静默回退CPU/删证据，不重做文档向量。
@@ -115,8 +147,8 @@ python -c $ragCheck
 预期：要么success及1～5条真实引用，要么明确不足；错误必须有固定安全码而不是空答案。按每项`[n]`对照本地引用原Chunk/原件，核对关键数字/单位/事实、页/section及source_spans。使用同一次结果判断，不以返回success宣称质量通过。
 
 4. 用户另行明确预算后，可手动换一个文档不包含的事实问题验证不足、使用同库两份文档验证范围；不得把未知答案也当不足真值。不同运行属于新的收费调用。负向HTTP/非法引用主要由Mock验证，不为了真实测试破坏系统/余额。
-5. 日志每天仍一份，`rag-cli`显示RAG CLI；核对fusion→rerank→deepseek→rag事件及耗时/数量，无问题、Prompt、答案、证据、Token或上游原文。deepseek.finished仅表示接收完整HTTP消息，rag.synthesized才完成结构引用校验，两者都不代表忠实度通过。
-6. 检索前后已有Document/Chunk/向量、任务ID和MinerU批次不应因问答增加或改变。记录真实问题ID、原证据、回答人工结论、各段耗时与DeepSeek账户费用；解析或检索真值问题与生成错误分开记录。至少覆盖普通事实、数字/表格、公式说明、无证据和对抗指令。
+5. 日志每天仍一份，`rag-cli`显示RAG CLI；核对fusion→rerank→llm→rag事件及所选provider/耗时/数量，无URL、问题、Prompt、答案、证据、Key或上游原文。llm.finished仅表示接收完整HTTP消息，rag.synthesized才完成结构引用校验，两者都不代表忠实度通过。
+6. 检索前后已有Document/Chunk/向量、任务ID和MinerU批次不应因问答增加或改变。记录真实问题ID、原证据、回答人工结论、各段耗时与所选提供方账户费用；解析或检索真值问题与生成错误分开记录。至少覆盖普通事实、数字/表格、公式说明、无证据和对抗指令。
 
 阶段16素材/正式导入与质量、阶段21真实重排提升及旧回归仍待各自验收。未执行任何真实问题前，不能声明阶段22端到端成功或答案忠实度≥90%；用户反馈后再决定下一步。
 

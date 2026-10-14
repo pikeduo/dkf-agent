@@ -7,13 +7,13 @@
 | 接口 | 链路 | 返回 |
 |---|---|---|
 | POST /api/knowledge/search | 同范围Hybrid（各路默认20）→RRF Top-K→本地BGE Top5 | KnowledgeSearchResponse：status=success/empty，evidence列表 |
-| POST /api/knowledge/query | 已有RAG Service→LlamaIndex Query Engine/合成→项目DeepSeekService | 原RAGAnswer：status/answer/citations/insufficient_evidence |
+| POST /api/knowledge/query | 原RAG Service→LlamaIndex合成→工厂选定DeepSeekService/CustomLLMService | 原RAGAnswer：status/answer/citations/insufficient_evidence |
 
 API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型。搜索服务仅显式调用时导入原Hybrid/Node/Reranker Adapter，Query委托原`query_knowledge_base()`；框架换型仅影响服务内部。成功返回原业务ID/文件名/正文/页/章节、完整metadata/source_spans及原三类分数，不返回向量或模型对象，不把分数当概率。
 
 请求均为JSON：kb_id非零UUID、question为非空原文本（最多32768字符，拒绝非法控制符/Unicode）、doc_ids可省略/null或1～100个非零UUID（去重排序；空数组拒绝）、top_k可省略，默认30/严格整数1～100。**top_k是融合候选上限，最终最多min(5,候选数)，不是要求返回top_k条Evidence。** 不支持额外Query rewrite/解析模式/模型对象/外部Query向量。
 
-`/query`另有严格布尔`allow_cloud`，默认false，只有true才允许问答。许可必须包括当前配置的DeepSeek官方或明确网关、问题/最终正文外传及本次费用；不是鉴权或版权证明。未允许时在检索/模型/框架导入前返回403；`/search`不需要此许可，不构造LLM客户端或请求云服务。空搜索200/empty；真正证据不足200/insufficient_evidence；服务错误绝不伪装这两种正常结果。
+`/query`另有严格布尔`allow_cloud`，默认false，只有true才允许问答。许可必须包括`LLM_PROVIDER`选中的DeepSeek官方或自定义兼容服务、问题/最终正文外传及本次费用；不是鉴权或版权证明。未允许时在检索/模型/框架导入前返回403；`/search`不需要此许可，不构造LLM客户端或请求云服务。空搜索200/empty；真正证据不足200/insufficient_evidence；服务错误绝不伪装这两种正常结果。
 
 原Retriever继续在SQL限定kb/可选doc/ACTIVE/READY/有效代次，Dense核对模型身份；接口再次检查输出范围，不删掉越界行冒充成功。合法UUID但不存在/跨库/不合格的文档不会扩大范围，可能没有匹配；空结果不证明库/文档存在，本阶段不新增存在性查询，用户可通过已有管理员详情确认。接口不重Parse/Chunk/文档Embedding/Index、不落库/迁移或创建第二套真相表。
 
@@ -27,7 +27,7 @@ API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型�
 | 403 | RAG_CLOUD_PERMISSION |
 | 409 | RAG_EVIDENCE（冲突/无效来源） |
 | 413 | RAG_CONTEXT_LIMIT（完整上下文超预算） |
-| 429 | DEEPSEEK_RATE_LIMIT（不自动重试） |
+| 429 | DEEPSEEK_RATE_LIMIT / LLM_RATE_LIMIT（不自动重试或切换提供方） |
 | 502 | KNOWLEDGE_RESULT / RAG_OUTPUT / RAG_SYNTHESIS / 上游无效或截断响应 |
 | 503 | 检索/重排、部署/鉴权/配额/网络不可用；核对返回固定错误码 |
 | 500 | KNOWLEDGE_INTERNAL（未预期错误，不透传原文） |
@@ -72,10 +72,10 @@ $search | ConvertTo-Json -Depth 20
 
 ## 4. 用户明确许可后真实问答（可能收费）
 
-在同一终端保留上一步body，先按README配置现有DeepSeek提供方/Key/模型/预算并重启API。**以下命令只有用户确认后才发送一次请求，Codex不会执行。**
+在同一终端保留上一步body，先按README配置所选LLM提供方的独立Key/模型/预算并重启API。官方保留DEEPSEEK_*错误码，自定义使用LLM_*；两者都不在失败后切换提供方。**以下命令只有用户确认后才发送一次请求，Codex不会执行。**
 
 ```powershell
-if ((Read-Host '确认本次问题与最终正文允许发给当前DeepSeek提供方并接受一次费用？输入YES') -ne 'YES') { throw '未授权，不发送问答' }
+if ((Read-Host '确认本次问题与最终正文允许发给当前所选LLM提供方并接受一次费用？输入YES') -ne 'YES') { throw '未授权，不发送问答' }
 $body.allow_cloud = $true
 $answer = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/api/knowledge/query' -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 10))) -TimeoutSec 300
 $answer | ConvertTo-Json -Depth 30

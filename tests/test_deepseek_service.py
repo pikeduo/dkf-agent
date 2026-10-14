@@ -15,7 +15,8 @@ from app.services.deepseek import DeepSeekError, DeepSeekService, MAX_RESPONSE_B
 
 def settings(**values):
     """创建不读取本地 .env 的安全 Mock 配置，密钥不是用户真实值。"""
-    defaults = {"deepseek_api_key": SecretStr("mock-secret"), "deepseek_model": "deepseek-flash",
+    defaults = {"llm_provider": "deepseek", "deepseek_provider": None,
+                "deepseek_api_key": SecretStr("mock-secret"), "deepseek_model": "deepseek-flash",
                 "deepseek_api_base_url": "https://api.deepseek.com", "deepseek_max_tokens": 2048,
                 "deepseek_timeout_seconds": 60, "rag_max_context_chars": 60000}
     return Settings(_env_file=None, **(defaults | values))
@@ -27,8 +28,9 @@ def envelope(content='{"insufficient_evidence":true,"claims":[]}', reason="stop"
         "role": "assistant", "content": content, **message}}]}
 
 
-def test_sub2api_gateway_opt_in_does_not_change_official_request():
-    """模拟Sub2API模型与HTTP显式授权；保留官方请求和原JSON约束。"""
+def test_custom_gateway_has_independent_config_and_keeps_official_request():
+    """自定义网关使用独立配置与通用参数，官方请求仍保留原专属参数。"""
+    from app.services.llm import create_llm_service
     requests = []
 
     def respond(request):
@@ -37,12 +39,13 @@ def test_sub2api_gateway_opt_in_does_not_change_official_request():
         return httpx.Response(200, json=envelope())
 
     remote = settings(
-        deepseek_provider="sub2api",
-        deepseek_api_base_url="http://sub2api.example:8080/v1",
-        deepseek_allow_insecure_http=True,
-        deepseek_model="DeepSeek-V4.1-Flash",
+        llm_provider="custom",
+        custom_llm_api_base_url="http://sub2api.example:8080/v1",
+        custom_llm_api_key=SecretStr("custom-test-key"),
+        custom_llm_allow_insecure_http=True,
+        custom_llm_model="DeepSeek-V4.1-Flash",
     )
-    value = DeepSeekService(remote, transport=httpx.MockTransport(respond)).complete(
+    value = create_llm_service(remote, transport=httpx.MockTransport(respond)).complete(
         "只返回JSON", "PRIVATE_QUESTION"
     )
     assert value == envelope()["choices"][0]["message"]["content"]
@@ -51,7 +54,8 @@ def test_sub2api_gateway_opt_in_does_not_change_official_request():
     data = json.loads(requests[0].content)
     assert data["model"] == "DeepSeek-V4.1-Flash"
     assert data["response_format"] == {"type": "json_object"}
-    assert data["thinking"] == {"type": "disabled"}
+    assert "thinking" not in data
+    assert requests[0].headers["Authorization"] == "Bearer custom-test-key"
 
     requests.clear()
     official = settings()
@@ -63,20 +67,14 @@ def test_sub2api_gateway_opt_in_does_not_change_official_request():
 
 
 @pytest.mark.parametrize(
-    "provider,url,allow_http",
+    "url",
     [
-        ("official", "http://sub2api.example:8080/v1", True),
-        ("official", "https://another.example/v1", False),
-        ("sub2api", "http://sub2api.example:8080/v1", False),
-        ("sub2api", "https://username:pass@example.com/v1", False),
-        ("sub2api", "https://another.example/v1/extra", False),
-        ("sub2api", "https://another.example/v1?token=secret", False),
-        ("sub2api", "https://another.example/v1#frag", False),
-        ("sub2api", "ftp://another.example/v1", False),
+        "http://api.deepseek.com", "https://another.example/v1",
+        "https://api.deepseek.com/v1?token=secret", "https://api.deepseek.com/v1#frag",
     ],
 )
-def test_invalid_gateway_endpoint_fails_without_network(provider, url, allow_http):
-    """官方域名白名单及网关HTTP/URL校验不允许越过密钥边界。"""
+def test_invalid_official_endpoint_fails_without_network(url):
+    """官方服务不能使用网关地址，旧 HTTP 开关也不能放宽域名白名单。"""
     calls = []
 
     def respond(request):
@@ -85,9 +83,8 @@ def test_invalid_gateway_endpoint_fails_without_network(provider, url, allow_htt
         return httpx.Response(200, json=envelope())
 
     s = settings(
-        deepseek_provider=provider,
         deepseek_api_base_url=url,
-        deepseek_allow_insecure_http=allow_http,
+        deepseek_allow_insecure_http=True,
     )
     with pytest.raises(DeepSeekError, match="DEEPSEEK_CONFIG"):
         DeepSeekService(s, transport=httpx.MockTransport(respond)).complete(
@@ -221,7 +218,8 @@ def test_business_logs_never_include_llm_content_or_credentials(initially_disabl
         logger.setLevel(logging.INFO)
         DeepSeekService(settings(), transport=httpx.MockTransport(respond)).complete("PRIVATE_SYSTEM", "PRIVATE_QUERY")
         content = output.getvalue()
-        assert "deepseek.started" in content and "deepseek.finished" in content and "RAG CLI" in content
+        assert "llm.started" in content and "llm.finished" in content and "RAG CLI" in content
+        assert '提供方="deepseek"' in content
         assert "PRIVATE" not in content and "mock-secret" not in content
     finally:
         handler.close()

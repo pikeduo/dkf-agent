@@ -1,4 +1,4 @@
-"""阶段22真实RAG验收：在项目根目录执行，无PowerShell多行粘贴或YES确认。"""
+"""阶段22真实RAG验收：使用当前 LLM_PROVIDER；由用户显式执行一次收费问答。"""
 
 import argparse
 import re
@@ -12,7 +12,8 @@ DEFAULT_DOC = "f5d85573-2971-4d01-a3cb-365f4df97aaa"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="阶段22：真实 DeepSeek RAG 问答验收")
+    """预检所选提供方配置和外传保护，再执行原有单次问答及引用验收。"""
+    parser = argparse.ArgumentParser(description="阶段22：真实 LLM RAG 问答验收")
     parser.add_argument("--question", help="测试问题；不填写则在终端输入")
     parser.add_argument("--kb-id", default=DEFAULT_KB, help="知识库UUID")
     parser.add_argument("--doc-id", default=DEFAULT_DOC, help="READY文档UUID")
@@ -40,18 +41,25 @@ def main() -> int:
 
     from app.core.business_logging import configure_logging
     from app.core.config import get_settings
-    from app.services.deepseek import DeepSeekError
+    from app.services.llm import LLMError, create_llm_service
     from app.services.rag.query import query_knowledge_base
     from app.services.rag.synthesis import RAGError
 
-    settings = get_settings()
-    if not settings.deepseek_api_key.get_secret_value().strip():
-        print("ERROR: .env 中的 DEEPSEEK_API_KEY 尚未配置。")
+    try:
+        settings = get_settings()
+        service = create_llm_service(settings)
+        service.validate_config()
+    except LLMError as exc:
+        print("ERROR: 所选 LLM 提供方配置不可用；", exc.code)
+        return 2
+    except Exception:
+        print("ERROR: 应用配置无效，请检查 LLM_PROVIDER 与旧网关配置迁移。")
         return 2
 
     configure_logging(settings, role="rag-cli")
 
-    # 不会触发检索、加载GPU模型或请求DeepSeek：先验证未授权保护。
+    print("LLM_PROVIDER =", service.provider, "MODEL =", service.model_name)
+    # 不会触发检索、加载GPU模型或请求LLM：先验证未授权保护。
     try:
         query_knowledge_base(kb_id, question, doc_ids=[doc_id], allow_cloud=False)
     except RAGError as exc:
@@ -73,7 +81,7 @@ def main() -> int:
             top_k=30,
             allow_cloud=True,
         )
-    except (DeepSeekError, RAGError) as exc:
+    except (LLMError, RAGError) as exc:
         print("STAGE22_API_OR_RAG_FAILED =", exc.code)
         print("ELAPSED_SECONDS =", round(perf_counter() - start, 2))
         return 1

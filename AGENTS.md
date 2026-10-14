@@ -47,7 +47,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 19 | 已实现本地BM25、kb/doc范围、当前READY快照、派生缓存重建和原始证据保留；用例未运行，待验收 |
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
-| 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
+| 22 | 已实现同范围Hybrid→Top5→单次LLM合成及引用校验；已拆分官方DeepSeek/custom独立配置，旧Sub2API真实RAG用户已确认，本轮重构Mock及真实验收待用户执行 |
 | 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；相关回归用户已报告148通过，真实来源与忠实度待验收 |
 | 24 | 已实现POST /api/knowledge/search、/query、范围与脱敏错误；非有限数响应校验修正待用户复测，真实HTTP/云验收待完成 |
 | 25 及后续 | 未开展，等待用户确认 |
@@ -64,7 +64,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 ## 2. 技术与本地环境约束
 
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
-- 已接入DeepSeek官方API的项目单一LLM服务及本地BAAI/bge-reranker-v2-m3；后续按计划使用SymPy、LangChain、LangGraph；Docker Compose仅为未来整体部署方案。
+- 已接入独立DeepSeek官方/custom兼容API的统一LLM工厂与本地BAAI/bge-reranker-v2-m3；HTTP复用httpx，无OpenAI SDK。后续按计划使用SymPy、LangChain、LangGraph；Docker Compose仅为未来整体部署方案。
 - BGE-M3 Dense 使用已声明的 sentence-transformers；项目依赖可按第 0 节安装，只从用户部署的本地官方权重加载，CUDA/PyTorch CPU-CUDA 版本替换及模型准备仍由用户执行。
 - BGE Reranker使用已声明Transformers的单标签分类模型，统一由项目RerankerService管理；Adapter不另载模型，不要求FlagEmbedding或框架模型集成。本地Safetensors权重与部署仍由用户准备。
 - LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，core 依赖可按第 0 节安装，首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
@@ -227,9 +227,11 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 只评分原Query+完整原node.text，不加metadata/指令、不重Embedding/Parse/读库。真实成对token超限、坏输入/输出/身份变化或推理失败全批拒绝，不截断证据、不静默返回原排序；空候选不加载模型。
 - 默认Top5，原始有限logit降序、同分UUID稳定排序；Node当前score为rerank_score，DTO保留原retrieval_score及fusion_score。来源仅运行时rerank字段，原ID/正文/页/章节/source_spans不变且深复制；重复重排/重复Chunk/跨库候选拒绝。效果提升需同批候选、真实QA/证据人工对照，不以Stub排序或Top5存在宣称验收通过。
 
-### DeepSeek RAG / Response Synthesis
+### LLM RAG / Response Synthesis
 
-- DeepSeek HTTP只在项目`DeepSeekService`；LlamaIndex LLM Adapter只委托它，Query Engine复用既有同范围Hybrid/Reranker，不新建客户端、默认LLM、文档Embedding或业务存储。线上同步，至多5条最终Evidence一次合成，无Query Rewrite、Refine、多次收费调用或流式半成品。
+- `LLM_PROVIDER=deepseek/custom`为唯一正式选择器，默认deepseek；`DeepSeekService`只读`DEEPSEEK_*`，`CustomLLMService`只读`CUSTOM_LLM_*`，Base URL/Key/Model/预算/超时不共用，未选中Key可空。旧official兼容，旧sub2api未迁移必须报错，不推测密钥归属或静默换接收方。
+- LlamaIndex `DKFLLMAdapter`仅包装工厂选定的项目服务；旧Adapter导入保持兼容。HTTP只在共享安全服务实现，不在Query Engine散落客户端。复用既有Hybrid/Reranker，至多5条最终Evidence一次合成，无Refine/自动重试/提供方失败切换或流式半成品。
+- 自定义API必须受用户信任且兼容JSON-mode；默认禁止HTTP，临时测试仅由用户明确`CUSTOM_LLM_ALLOW_INSECURE_HTTP=true`允许，正式部署须HTTPS。不得关闭TLS验证、不读代理、不跟随跳转；官方始终只接受官方HTTPS。日志只增加固定提供方枚举/安全模型名，禁记完整URL、Key或上游原文。
 - Python问答默认拒绝云调用，调用方明确`allow_cloud=True`前确认问题/最终正文外传权限及费用；模型/Key/预算由本地配置管理。官方HTTPS、TLS、直连/无跳转，超时/HTTP错误/限流不自动重试。
 - 固定审查Prompt把问题与证据视为数据；仅最终正文与稳定Chunk ID上云，不发送其他候选、私有路径或模型身份。完整上下文超字符预算失败，不截断证据；字符数不冒充供应商token数。
 - LLM返回逐事实及最终ID白名单；引用原文/来源/页码/章节/source_spans/三类分数只从原Node回填。空证据或明确不足才返回insufficient_evidence；检索/模型/HTTP/非法引用/截断失败必须报安全异常，不伪装成功或不足。引用合法仅证明来源存在，忠实度/数字事实及Prompt注入抗性仍须真实人工验收。

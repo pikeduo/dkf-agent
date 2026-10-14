@@ -65,6 +65,7 @@ FIELDS = {
     "dimension",
     "top_k",
     "model_name",
+    "provider",
     "device",
     "batch_size",
     "batch_index",
@@ -234,9 +235,12 @@ EVENT_LABELS = {
     "rerank.finished": "Top Evidence 重排完成，原检索与融合分已保留",
     "rerank.skipped": "重排候选为空，未加载 Reranker 模型",
     "rerank.failed": "重排安全失败，未静默返回未经重排的候选",
-    "deepseek.started": "开始单次官方 DeepSeek 回答请求，不自动重试",
-    "deepseek.finished": "DeepSeek 完整响应已接收，尚需验证回答引用",
-    "deepseek.failed": "DeepSeek 请求安全失败，未返回部分回答或追加请求",
+    "llm.started": "开始单次 LLM 回答请求，不自动重试或切换提供方",
+    "llm.finished": "LLM 完整响应已接收，尚需验证回答引用",
+    "llm.failed": "LLM 请求安全失败，未返回部分回答或追加请求",
+    "deepseek.started": "开始单次 LLM 回答请求，不自动重试",
+    "deepseek.finished": "LLM 完整响应已接收，尚需验证回答引用",
+    "deepseek.failed": "LLM 请求安全失败，未返回部分回答或追加请求",
     "rag.started": "开始同范围检索、重排与证据问答",
     "rag.retrieved": "已取得融合候选，尚未生成回答",
     "rag.synthesis_started": "最终证据已校验，开始单次回答合成",
@@ -293,6 +297,7 @@ FIELD_LABELS = {
     "dimension": "向量维度",
     "top_k": "检索上限",
     "model_name": "模型",
+    "provider": "提供方",
     "device": "计算设备",
     "batch_size": "批大小",
     "batch_index": "批序号",
@@ -382,6 +387,9 @@ def safe_fields(fields: dict) -> dict:
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        # 提供方只允许固定枚举，不能把外部地址/任意字符串伪装成角色摘要。
+        if key == "provider" and (not isinstance(value, str) or value not in {"deepseek", "custom"}):
             continue
         if key in LOCAL_IDS:
             try:

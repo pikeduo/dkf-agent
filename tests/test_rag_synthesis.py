@@ -8,6 +8,7 @@ import logging
 from uuid import uuid4
 
 import pytest
+import httpx
 
 pytest.importorskip("llama_index.core.schema", reason="用户先准备 core/NLP；跳过不等于通过")
 
@@ -18,6 +19,9 @@ from llama_index.core.schema import QueryBundle
 from app.core import business_logging as logs
 from app.schemas.retrieval import RetrievalResult
 from app.services.rag.llama_index.deepseek_adapter import DKFDeepSeekAdapter
+from app.services.rag.llama_index.llm_adapter import DKFLLMAdapter
+from app.services.llm import LLMError, create_llm_service
+from app.core.config import Settings
 from app.services.rag.llama_index.node_adapter import node_to_result, result_to_node
 from app.services.rag.llama_index.response_synthesizer import DKFResponseSynthesizer
 from app.services.rag.synthesis import RAGError, RAG_SYSTEM_PROMPT, bind_answer, insufficient_answer
@@ -73,6 +77,51 @@ def test_only_final_evidence_is_sent_and_citations_are_local_originals():
     assert result.citations[0].metadata["source_spans"] == original.metadata["source_spans"]
     assert [node.model_dump() for node in nodes] == before
     result.citations[0].metadata["source_spans"][0]["page"] = 999
+    assert [node.model_dump() for node in nodes] == before
+
+
+@pytest.mark.parametrize("provider", ["deepseek", "custom"])
+@pytest.mark.parametrize("result_kind", ["success", "insufficient", "unknown_id", "http_error"])
+def test_both_providers_preserve_single_synthesis_and_original_citation_boundary(provider, result_kind):
+    """两种真实服务仅经Mock请求一次，保留JSON白名单、原始来源与拒答/异常区分。"""
+    nodes, requests = final_nodes(), []
+    before = copy.deepcopy([node.model_dump() for node in nodes])
+    config = Settings(_env_file=None, llm_provider=provider, deepseek_provider=None,
+        deepseek_api_key="official-test-key", deepseek_api_base_url="https://api.deepseek.com",
+        custom_llm_api_key="custom-test-key", custom_llm_api_base_url="https://custom.example/v1")
+
+    def respond(request):
+        """不访问网络，只返回与当前最终证据对应的合法或故障输出。"""
+        requests.append(request)
+        raw = answer_for(nodes)
+        if result_kind == "insufficient":
+            raw = '{"insufficient_evidence":true,"claims":[]}'
+        elif result_kind == "unknown_id":
+            value = json.loads(raw)
+            value["claims"][0]["evidence_ids"] = [str(uuid4())]
+            raw = json.dumps(value)
+        return httpx.Response(401 if result_kind == "http_error" else 200, json={"choices": [
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": raw}}]})
+
+    service = create_llm_service(config, transport=httpx.MockTransport(respond))
+    synthesizer = DKFResponseSynthesizer(DKFLLMAdapter(service))
+    if result_kind in {"http_error", "unknown_id"}:
+        with pytest.raises(LLMError if result_kind == "http_error" else RAGError):
+            synthesizer.synthesize("PRIVATE_QUERY", nodes, allow_cloud=True)
+    else:
+        result = synthesizer.synthesize("PRIVATE_QUERY", nodes, allow_cloud=True)
+        if result_kind == "insufficient":
+            assert result == insufficient_answer()
+        else:
+            original = node_to_result(nodes[0], log_success=False)
+            assert result.citations[0].model_dump(exclude={"citation_id"}) == original.model_dump()
+            assert result.answer.endswith("[1]") and result.status == "success"
+    assert len(requests) == 1
+    assert requests[0].url.host == ("api.deepseek.com" if provider == "deepseek" else "custom.example")
+    assert requests[0].headers["Authorization"] == "Bearer " + ("official-test-key" if provider == "deepseek" else "custom-test-key")
+    payload = json.loads(requests[0].content)
+    sent = json.loads(payload["messages"][1]["content"])
+    assert sent["evidence"] == [{"evidence_id": node.node.node_id, "text": node.node.text} for node in nodes]
     assert [node.model_dump() for node in nodes] == before
 
 

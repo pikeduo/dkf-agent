@@ -17,6 +17,7 @@ from app.schemas.rag import RAGAnswer
 from app.schemas.retrieval import FusionProvenance, RerankProvenance, RetrievalResult
 from app.services import knowledge_query as gateway
 from app.services.deepseek import DeepSeekError
+from app.services.llm import LLMError
 from app.services.rag.evidence import make_citation
 from app.services.rag.synthesis import RAGError, insufficient_answer
 
@@ -196,6 +197,9 @@ def test_query_cross_document_citation_is_rejected_as_invalid_response(context):
     (RAGError("RAG_RETRIEVAL"), 503), (RAGError("RAG_RERANK"), 503), (RAGError("RAG_OUTPUT"), 502),
     (RAGError("RAG_CONTEXT_LIMIT"), 413), (DeepSeekError("DEEPSEEK_AUTH"), 503),
     (DeepSeekError("DEEPSEEK_RATE_LIMIT"), 429), (DeepSeekError("DEEPSEEK_NETWORK"), 503),
+    (LLMError("LLM_AUTH", provider="custom"), 503), (LLMError("LLM_QUOTA", provider="custom"), 503),
+    (LLMError("LLM_RATE_LIMIT", provider="custom"), 429), (LLMError("LLM_NETWORK", provider="custom"), 503),
+    (LLMError("LLM_RESPONSE", provider="custom"), 502), (LLMError("LLM_TRUNCATED", provider="custom"), 502),
     (RuntimeError("PRIVATE_TOKEN PRIVATE_PATH PRIVATE_QUERY"), 500),
 ])
 def test_failures_do_not_become_insufficiency_or_retry(context, error, code):

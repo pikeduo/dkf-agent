@@ -12,6 +12,7 @@ pytest.importorskip("llama_index.core.schema", reason="用户准备 core/NLP；�
 from llama_index.core.base.base_query_engine import BaseQueryEngine
 
 from app.services.deepseek import DeepSeekError
+from app.services.llm import LLMError
 from app.services.rag.llama_index.deepseek_adapter import DKFDeepSeekAdapter
 from app.services.rag.llama_index.hybrid_retriever import fuse_nodes
 from app.services.rag.llama_index.query_engine import DKFQueryEngine
@@ -89,7 +90,7 @@ def test_empty_result_skips_reranker_model_and_cloud():
 
 
 @pytest.mark.parametrize("stage,code", [("retrieval", "RAG_RETRIEVAL"), ("rerank", "RAG_RERANK"),
-    ("cloud", "DEEPSEEK_RATE_LIMIT")])
+    ("cloud", "DEEPSEEK_RATE_LIMIT"), ("cloud", "LLM_RATE_LIMIT")])
 def test_upstream_failure_is_not_insufficiency_or_silent_fallback(stage, code):
     """异常不同于证据不足，不重检索/回退原候选/重试收费请求，固定错误可追踪。"""
     engine, retriever, reranker, backend = setup_engine()
@@ -98,7 +99,7 @@ def test_upstream_failure_is_not_insufficiency_or_silent_fallback(stage, code):
     elif stage == "rerank":
         reranker.scores = RuntimeError("PRIVATE_MODEL_PATH")
     else:
-        backend.output = DeepSeekError("DEEPSEEK_RATE_LIMIT")
+        backend.output = DeepSeekError(code) if code.startswith("DEEPSEEK_") else LLMError(code, provider="custom")
     with pytest.raises(Exception, match=code) as failure:
         engine.query("question", allow_cloud=True)
     assert "PRIVATE" not in str(failure.value) and len(retriever.calls) == 1

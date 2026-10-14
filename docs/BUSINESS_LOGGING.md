@@ -86,7 +86,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `bm25.started / index_built / index_reused / finished / empty / failed` | 当前READY快照的关键词检索、派生索引构建/复用及结果摘要；仅UUID/范围数量/Chunk数/复用/耗时/安全码，不记录Query/词项/正文/索引摘要或SQL，批量Node转换不刷逐项成功日志 |
 | `fusion.started / branch_finished / finished / empty / failed` | 同范围两路检索及稳定RRF摘要；stage区分dense/bm25/rrf，记录UUID/范围数量/结果数/耗时及安全分支错误码，不记录Query/Node/原分数/异常原文，不新增日志文件 |
 | `rerank.model_loaded / scored / score_failed / started / finished / skipped / failed` | 项目共享模型加载、完整原文对批量评分、Top Evidence选择及错误/空候选摘要；仅模型名/设备/数量/批次/知识库/耗时/固定安全码，加载及评分不是质量验收，不记录Query/正文/分数/路径/指纹 |
-| `deepseek.started / finished / failed` | 单次官方LLM请求/完整响应接收/安全失败；模型名、HTTP状态、耗时/错误码，不记录问题、Prompt、响应、Token；finished不是回答引用/忠实度验收 |
+| `llm.started / finished / failed` | 单次所选LLM请求/完整响应接收/安全失败；provider只允许deepseek/custom，模型名、HTTP状态、耗时/错误码；不记录URL/问题/Prompt/响应/Key，finished不是引用或忠实度验收。旧deepseek事件标签保留兼容，不重复发两套事件 |
 | `rag.started / retrieved / synthesis_started / synthesized / insufficient / finished / failed` | 同范围问答、融合候选、最终证据校验/单次合成、引用校验/不足及完成/失败；仅kb_id、数量、阶段、状态、耗时/错误码，不记录答案/正文，不追加日志文件 |
 | `citation.created` | 已从原DTO复制运行时引用；不代表答案已发布、当前数据库已核对或事实语义正确，不记录引用正文/分数/metadata |
 | `evidence.started / finished / skipped / failed` | 显式只读来源核对；仅UUID/引用及唯一Block数量/耗时/固定错误码。finished表示同快照字符/Hash/页语义一致，不代表回答忠实；不足答案无引用时skipped不查库 |

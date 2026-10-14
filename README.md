@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY表示所有Chunk向量已入库；提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY表示所有Chunk向量已入库；提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -48,13 +48,21 @@ RERANKER_DEVICE=cuda:0
 RERANKER_BATCH_SIZE=2
 RERANKER_MAX_LENGTH=8192
 RERANKER_USE_FP16=true
-# 仅问答需要；真实 Key 只填本地 .env。
+# 仅问答需要：独立配置两组，LLM_PROVIDER 默认 deepseek；真实 Key 只填本地 .env。
+LLM_PROVIDER=deepseek
 DEEPSEEK_API_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-flash
 DEEPSEEK_MAX_TOKENS=2048
 DEEPSEEK_TIMEOUT_SECONDS=60
+CUSTOM_LLM_API_BASE_URL=http://45.129.8.116:8080/v1
+CUSTOM_LLM_API_KEY=
+CUSTOM_LLM_MODEL=DeepSeek-V4.1-Flash
+CUSTOM_LLM_MAX_TOKENS=2048
+CUSTOM_LLM_TIMEOUT_SECONDS=60
+# 默认拒绝明文HTTP；正式部署应使用可信HTTPS。
+CUSTOM_LLM_ALLOW_INSECURE_HTTP=false
 RAG_MAX_CONTEXT_CHARS=60000
-DEEPSEEK_API_KEY=
 
 # OCR / 外部服务：仅云解析需要 Token
 MINERU_API_BASE_URL=https://mineru.net/api/v4
@@ -493,13 +501,23 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 显式导入`app.services.rag.llama_index.reranker_adapter.BGERerankerAdapter`，用`BGERerankerAdapter(top_n=5).postprocess_nodes(candidates, query_str=query)`同步重排Hybrid候选。NodeWithScore.score为原始rerank logit，不是概率；Node/DTO分别保留原retrieval_score、fusion_score、rerank_score，原ID/正文/页码/章节不变。默认getter进程内共享，不跨进程共享模型；修改模型配置后重启使用它的Query进程。用例、部署核验及同批候选排序对照见[重排验收说明](docs/RERANKER.md)，尚未证明排序质量提升。
 
-### DeepSeek Python 问答
+### LLM Python 问答（DeepSeek / 自定义 API）
 
 `app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)`复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。HTTP `/api/knowledge/query`委托同一入口；引用来源/页码由原Chunk回填，不采用模型生成的来源，无证据明确返回不足，不新增迁移或Worker。
 
-用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`DEEPSEEK_PROVIDER=official`、`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。官方模式仅允许官方HTTPS端点（含`/v1`）；选择`DEEPSEEK_PROVIDER=sub2api`后可配置明确的HTTPS`/v1`网关和其真实模型ID，公网HTTP仅在`DEEPSEEK_ALLOW_INSECURE_HTTP=true`显式开启，**会明文传输密钥和最终证据，禁止正式部署使用**。均不读环境代理、不跟随重定向。切换配置需要重启问答进程；Sub2API需另行真实确认thinking/JSON模式兼容性。
+两套配置互不共用：`LLM_PROVIDER=deepseek`只使用`DEEPSEEK_*`，默认官方HTTPS、`deepseek-flash`，保留关闭thinking的官方参数；`LLM_PROVIDER=custom`只使用`CUSTOM_LLM_*`，适用于Sub2API或其他兼容Chat Completions的服务，仅发送通用JSON-mode参数。未选中提供方可以没有Key。复用httpx/core，不需OpenAI SDK或新依赖；官方服务仅接受`https://api.deepseek.com`及其`/v1`端点。自定义Base URL为可信服务根地址（如`https://your-gateway.example/v1`），不是完整`/chat/completions`地址，不得包含URL凭据、参数或片段。
 
-**显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传且接受DeepSeek费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
+首次从旧Sub2API配置迁移，可由用户执行以下**仅改本地配置、不联网**的命令；来源有歧义时停止，不能猜测密钥所属提供方：
+
+```powershell
+conda activate dkf-agent
+python scripts/migrate_llm_env.py
+python scripts/migrate_llm_env.py --apply
+```
+
+旧`DEEPSEEK_PROVIDER=official`仍兼容；旧`sub2api`必须迁入独立自定义组，否则配置初始化明确拒绝。迁移后只改`LLM_PROVIDER`切换，保留另一组配置及Key，并重启API/问答进程；检查PowerShell同名环境变量是否覆盖`.env`。默认`CUSTOM_LLM_ALLOW_INSECURE_HTTP=false`，当前HTTP地址只有用户显式改为true才能临时测试，**会明文传输密钥、问题与最终证据，禁止正式部署使用**。TLS证书始终校验；均不读环境代理、不跟随跳转，不在失败后切换提供方。新服务的JSON-mode兼容性仍须用户验收。
+
+**显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传给当前选中LLM且接受费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
 
 最小使用、Mock/真实问题验收及错误说明见[DeepSeek RAG](docs/DEEPSEEK_RAG.md)。结构合法和引用存在不证明答案忠实或问答准确率已通过，必须对照真实证据人工核验。
 
@@ -517,7 +535,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 `doc_ids`省略/null表示该库全部合格文档；限定文档时填写1～100个真实UUID，空数组拒绝。`top_k`默认30、严格整数1～100，表示融合候选上限，最终重排最多5条。仅检索ACTIVE库/READY及原检索器要求的有效代次/向量身份，不匹配不扩大范围；空集不证明指定文档存在。
 
-`/search`不调用LLM，返回`{"status":"success或empty","evidence":[...]}`，每条为项目Evidence及原来源/分数；`/query`返回原`RAGAnswer`（status/answer/citations/insufficient_evidence），须**额外传`"allow_cloud":true`**确认本次问题/最终正文可发给当前配置的DeepSeek提供方并接受费用，否则403。搜索也会运行本地模型，问答不会自动重试收费或把异常伪装成不足。
+`/search`不调用LLM，返回`{"status":"success或empty","evidence":[...]}`，每条为项目Evidence及原来源/分数；`/query`返回原`RAGAnswer`（status/answer/citations/insufficient_evidence），须**额外传`"allow_cloud":true`**确认本次问题/最终正文可发给当前选中LLM提供方并接受费用，否则403。搜索也会运行本地模型，问答不会自动重试收费或把异常伪装成不足。
 
 错误统一为`{"detail":{"code":"固定错误码","message":"安全中文说明"}}`：422输入无效、403未确认云外传、409证据冲突、413上下文超限、429供应商限流、502上游响应/输出不合法、503部署/数据库/供应商不可用、500未预期错误。详情不回显问题/正文；暂无鉴权、API限流或请求幂等，仅本机/可信内网使用，不暴露公网。客户端超时不保证取消推理/收费，勿盲目重复发送。具体契约及手动步骤见[Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md)。
 

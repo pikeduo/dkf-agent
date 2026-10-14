@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from app.core.business_logging import log_event
 from app.schemas.knowledge_query import KnowledgeQueryRequest, KnowledgeSearchRequest, KnowledgeSearchResponse
 from app.schemas.rag import RAGAnswer
-from app.services.deepseek import DeepSeekError, ERRORS as DEEPSEEK_ERRORS
+from app.services.deepseek import ERRORS as DEEPSEEK_ERRORS
+from app.services.llm import LLMError, ERRORS as LLM_ERRORS
 from app.services.rag.query import query_knowledge_base
 from app.services.rag.search import search_knowledge_base
 from app.services.rag.synthesis import RAGError, ERRORS as RAG_ERRORS
@@ -23,7 +24,9 @@ LOCAL_ERRORS = {
 HTTP_CODES = {"RAG_INPUT": 422, "RAG_CLOUD_PERMISSION": 403, "RAG_CONTEXT_LIMIT": 413,
               "RAG_EVIDENCE": 409, "RAG_OUTPUT": 502, "RAG_SYNTHESIS": 502,
               "DEEPSEEK_RATE_LIMIT": 429, "DEEPSEEK_RESPONSE": 502, "DEEPSEEK_TRUNCATED": 502,
-              "DEEPSEEK_HTTP": 502, "DEEPSEEK_NETWORK": 503}
+              "DEEPSEEK_HTTP": 502, "DEEPSEEK_NETWORK": 503,
+              "LLM_RATE_LIMIT": 429, "LLM_RESPONSE": 502, "LLM_TRUNCATED": 502,
+              "LLM_HTTP": 502, "LLM_NETWORK": 503}
 
 
 class KnowledgeServiceError(Exception):
@@ -37,6 +40,8 @@ class KnowledgeServiceError(Exception):
             self.status_code, self.message = HTTP_CODES.get(code, 503), RAG_ERRORS[code]
         elif code in DEEPSEEK_ERRORS:
             self.status_code, self.message = HTTP_CODES.get(code, 503), DEEPSEEK_ERRORS[code]
+        elif code in LLM_ERRORS:
+            self.status_code, self.message = HTTP_CODES.get(code, 503), LLM_ERRORS[code]
         else:
             code = code if code in LOCAL_ERRORS else "KNOWLEDGE_INTERNAL"
             self.status_code, self.message = LOCAL_ERRORS[code]
@@ -121,7 +126,7 @@ class KnowledgeService:
         except Exception as exc:
             if isinstance(exc, KnowledgeServiceError):
                 error = exc
-            elif isinstance(exc, (RAGError, DeepSeekError)):
+            elif isinstance(exc, (RAGError, LLMError)):
                 error = KnowledgeServiceError(exc.code)
             elif isinstance(exc, ValidationError):
                 error = KnowledgeServiceError("KNOWLEDGE_INPUT" if stage == "input" else "KNOWLEDGE_RESULT")

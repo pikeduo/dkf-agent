@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 配置文件固定从项目根目录加载，避免因启动目录不同导致本地 .env 未生效。
@@ -35,15 +35,24 @@ class Settings(BaseSettings):
     reranker_batch_size: int = Field(default=2, ge=1, le=32)
     reranker_max_length: int = Field(default=8192, ge=8, le=8192)
     reranker_use_fp16: bool = True
-    # RAG 仅显式调用时发送问题与最终证据；保持官方与Sub2API两种模式的显式边界。
+    # RAG 仅通过全局选择器选提供方；未选中提供方的空密钥不影响服务启动。
+    llm_provider: Literal["deepseek", "custom"] = "deepseek"
     deepseek_api_key: SecretStr = SecretStr("")
-    deepseek_provider: Literal["official", "sub2api"] = "official"
+    # 旧 official 配置可继续使用；旧 sub2api 必须显式迁移，不能误发旧网关密钥。
+    deepseek_provider: Literal["official", "sub2api"] | None = None
     deepseek_api_base_url: str = "https://api.deepseek.com"
-    # 仅Sub2API临时测试可显式允许HTTP；公网HTTP会明文传输密钥及证据。
+    # 仅保留旧字段供兼容读取，官方服务绝不允许 HTTP，也不使用该开关。
     deepseek_allow_insecure_http: bool = False
     deepseek_model: str = Field(default="deepseek-flash", pattern=r"^[a-zA-Z0-9._-]{1,64}$")
     deepseek_max_tokens: int = Field(default=2048, ge=128, le=8192)
     deepseek_timeout_seconds: int = Field(default=60, ge=1, le=180)
+    custom_llm_api_base_url: str = "http://45.129.8.116:8080/v1"
+    custom_llm_api_key: SecretStr = SecretStr("")
+    # 通用兼容模型允许组织前缀及版本分隔符，不接收控制字符或任意日志字符串。
+    custom_llm_model: str = Field(default="DeepSeek-V4.1-Flash", pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$")
+    custom_llm_max_tokens: int = Field(default=2048, ge=128, le=8192)
+    custom_llm_timeout_seconds: int = Field(default=60, ge=1, le=180)
+    custom_llm_allow_insecure_http: bool = False
     rag_max_context_chars: int = Field(default=60000, ge=1024, le=100000)
     embeddings_dir: Path = Path("data/embeddings")
     upload_dir: Path = Path("data/uploads")
@@ -99,7 +108,15 @@ class Settings(BaseSettings):
         env_file=PROJECT_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        hide_input_in_errors=True,
     )
+
+    @model_validator(mode="after")
+    def reject_unmigrated_gateway(self) -> "Settings":
+        """旧网关共享字段可能持有另一把密钥，必须拒绝而不是推测新提供方。"""
+        if self.deepseek_provider == "sub2api":
+            raise ValueError("旧 DEEPSEEK_PROVIDER=sub2api 必须迁移到独立 CUSTOM_LLM_* 和 LLM_PROVIDER=custom")
+        return self
 
 
 @lru_cache

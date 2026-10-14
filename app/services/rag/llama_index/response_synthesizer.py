@@ -11,9 +11,9 @@ from llama_index.core.schema import NodeWithScore, QueryBundle
 
 from app.core.business_logging import log_event
 from app.schemas.rag import RAGAnswer
-from app.services.deepseek import DeepSeekError
+from app.services.llm import LLMError
 from app.services.rag.dense import validate_query
-from app.services.rag.llama_index.deepseek_adapter import DKFDeepSeekAdapter
+from app.services.rag.llama_index.llm_adapter import DKFLLMAdapter
 from app.services.rag.llama_index.node_adapter import node_to_result
 from app.services.rag.llama_index.validation import RagAdapterError
 from app.services.rag.synthesis import RAGError, RAG_SYSTEM_PROMPT, bind_answer, evidence_payload, insufficient_answer
@@ -34,13 +34,13 @@ def query_text(query: str | QueryBundle) -> str:
 class DKFResponseSynthesizer(BaseSynthesizer):
     """Node-aware 合成边界；只输出项目 RAGAnswer，不返回框架 Response 对象。"""
 
-    def __init__(self, llm: DKFDeepSeekAdapter | None = None):
+    def __init__(self, llm: DKFLLMAdapter | None = None):
         """显式初始化必要状态，避免 BaseSynthesizer 隐式默认 LLM/Tokenizer/PromptHelper。
 
         不调用默认构造与 synthesize/get_response 实现：它们会处理自由文本、裁剪及发送正文回调。
         本类只接受最终业务 Node，完整校验和一次 Chat；不提供框架文本切分/Refine 能力。
         """
-        self._llm = llm if llm is not None else DKFDeepSeekAdapter()
+        self._llm = llm if llm is not None else DKFLLMAdapter()
         self._callback_manager = CallbackManager([])
         self._llm.callback_manager = self._callback_manager
         self._streaming, self._output_cls = False, RAGAnswer
@@ -101,7 +101,7 @@ class DKFResponseSynthesizer(BaseSynthesizer):
                       duration_ms=(perf_counter() - started) * 1000)
             return result
         except Exception as exc:
-            error = exc if isinstance(exc, (RAGError, DeepSeekError)) else RAGError(
+            error = exc if isinstance(exc, (RAGError, LLMError)) else RAGError(
                 "RAG_EVIDENCE" if isinstance(exc, RagAdapterError) else "RAG_SYNTHESIS")
             log_event("rag.failed", level=logging.WARNING, stage="synthesis", error_code=error.code,
                       duration_ms=(perf_counter() - started) * 1000)

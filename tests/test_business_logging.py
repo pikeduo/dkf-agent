@@ -53,6 +53,18 @@ def records(stream):
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
+@pytest.mark.parametrize("provider", ["deepseek", "custom"])
+def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
+    """提供方只记录固定枚举，保留每日中文格式、真实PID及原有脱敏白名单。"""
+    logs.log_event("llm.started", provider=provider, model_name="compatible-model",
+                   api_key="PRIVATE_KEY", url="http://PRIVATE", prompt="PRIVATE_PROMPT")
+    item = records(events)[0]
+    assert item["event"] == "llm.started" and item["pid"] == os.getpid()
+    assert item["provider"] == provider and item["model_name"] == "compatible-model"
+    assert "开始单次 LLM" in events.getvalue() and "PRIVATE" not in events.getvalue()
+    assert logs.safe_fields({"provider": "PRIVATE"}) == {}
+
+
 @pytest.mark.parametrize("role,label", [
     ("api", "API"), ("worker", "Worker"), ("dense-cli", "Dense CLI"),
     ("bm25-cli", "BM25 CLI"), ("hybrid-cli", "Hybrid CLI"),

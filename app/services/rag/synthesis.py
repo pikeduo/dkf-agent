@@ -5,7 +5,7 @@ import re
 
 from app.schemas.rag import INSUFFICIENT_ANSWER, RAGAnswer, SynthesisOutput
 from app.schemas.retrieval import RetrievalResult
-from app.services.deepseek import strict_json
+from app.services.llm import strict_json
 from app.services.rag.evidence import make_citation
 
 # 不使用框架默认 Prompt；逐事实判断语义支持，允许有证据的部分回答而不降低引用约束。

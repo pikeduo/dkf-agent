@@ -1,4 +1,4 @@
-"""LlamaIndex Query Engine 组合已有 Hybrid/Reranker 与项目唯一 DeepSeek 合成边界。"""
+"""LlamaIndex Query Engine 组合已有 Hybrid/Reranker 与项目统一 LLM 合成边界。"""
 
 import asyncio
 import logging
@@ -11,7 +11,7 @@ from llama_index.core.schema import NodeWithScore
 
 from app.core.business_logging import log_event
 from app.schemas.rag import RAGAnswer
-from app.services.deepseek import DeepSeekError
+from app.services.llm import LLMError
 from app.services.rag.dense import validate_doc_ids, validate_scope
 from app.services.rag.llama_index.hybrid_retriever import HybridRetriever, HybridRetrievalError
 from app.services.rag.llama_index.node_adapter import node_to_result
@@ -40,7 +40,7 @@ class DKFQueryEngine(BaseQueryEngine):
             if self._reranker.top_n != 5:
                 raise ValueError
             self._synthesizer = synthesizer if synthesizer is not None else DKFResponseSynthesizer()
-        except (RAGError, DeepSeekError):
+        except (RAGError, LLMError):
             # 配置错误不是问题格式错误，保留唯一LLM边界的安全分类供人工排障。
             raise
         except Exception:
@@ -103,9 +103,9 @@ class DKFQueryEngine(BaseQueryEngine):
                       item_count=len(answer.citations), duration_ms=(perf_counter() - started) * 1000)
             return answer
         except Exception as exc:
-            error = exc if isinstance(exc, (RAGError, DeepSeekError)) else RAGError({
+            error = exc if isinstance(exc, (RAGError, LLMError)) else RAGError({
                 "retrieval": "RAG_RETRIEVAL", "rerank": "RAG_RERANK"}.get(stage, "RAG_SYNTHESIS"))
-            # 上游原文不透传，已知 DeepSeek/RAG 分类可追踪；异常不作为证据不足返回。
+            # 上游原文不透传，已知 LLM/RAG 分类可追踪；异常不作为证据不足返回。
             log_event("rag.failed", level=logging.WARNING, kb_id=self._kb_id,
                       stage=stage, error_code=error.code,
                       error_type=exc.code if isinstance(exc, (HybridRetrievalError, RerankError)) else None,
