@@ -189,7 +189,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期 head 为 `0007_pgvector_index`，默认知识库 ID 为 `7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed 可重复执行；应用启动不会自动迁移、启用扩展或创建默认库。升级前备份并停止 API/Worker，迁移后重启；历史文档不会自动切片、向量化或入库。
+预期 head 为 `0008_document_management`（含原pgvector索引及新增管理员编排检查点），默认知识库ID为`7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed可重复执行；应用启动不自动迁移或启用扩展。升级前备份并停止API/Worker，迁移后重启；历史文档不会自动处理。
 
 该迁移新增入库检查点和 HNSW cosine 部分索引，要求 pgvector 支持 HNSW（0.5.0 起）。普通事务建索引可能阻塞写入，已有大量向量时需安排维护窗口及磁盘/内存预算；应用不自动升级扩展或改系统服务。部署核对见 [pgvector 入库说明](docs/PGVECTOR_INDEX.md)。
 
@@ -319,7 +319,7 @@ python -c $embeddingDeployCheck
 
 #### 6. 数据库与 GPU Worker
 
-用户先按本章数据库初始化命令确认当前 head `0007_pgvector_index`（包含 0006 的 GPU 检查点；已是 head 则跳过升级），再在独立终端启动 GPU Worker，每张 GPU 只运行一个消费进程：
+用户先按本章数据库初始化命令确认当前head `0008_document_management`（包含原GPU/入库检查点；已是head则跳过升级），再在独立终端启动GPU Worker，每张GPU只运行一个消费进程：
 
 ```powershell
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
@@ -352,6 +352,12 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | GET | `/api/admin/knowledge-bases/{kb_id}` | 知识库详情 |
 | GET / POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档列表 / 单选、多选上传 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、错误、任务标识 |
+| GET | `/api/admin/documents/{doc_id}`、`/{doc_id}/status` | 文档详情、各阶段任务、安全云任务及Block/Chunk/向量统计 |
+| GET | `/api/admin/documents/{doc_id}/blocks`、`/{doc_id}/chunks` | 按原序分页查询解析/切片证据，limit=1～100、offset≥0 |
+| POST | `/api/admin/documents/{doc_id}/retry` | 恢复失败阶段/同一活动云批次或丢失的编排消息，无请求体 |
+| POST | `/api/admin/documents/{doc_id}/reindex` | 仅复用成功解析缓存，自动重建Chunk→Embedding→Index→READY |
+| POST | `/api/admin/documents/{doc_id}/reparse?force=true` | 明确重解析并继续到READY，可选parse_mode，可能再次云收费 |
+| DELETE | `/api/admin/documents/{doc_id}` | 202异步删除自有原件、证据、向量及文档缓存，活动任务409 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunk` | 已完成解析的 Block 异步切片 / 恢复切片检查点，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/chunks` | 分页查询 Chunk 正文、原 Block 字符跨度和页码 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed` | GPU 批量向量化已有 Chunk / 恢复同一检查点，无请求体 |
@@ -415,7 +421,7 @@ MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
 - 仅 UPLOADED/FAILED 可通过 /process 重投，默认 auto；管理员可覆盖。活动云任务用 /mineru 恢复同一任务；收费失败且无可用缓存时，普通重投不再申请批次，返回 CACHE_REPARSE_REQUIRED。相同内容已有活动云任务时为 CACHE_IN_PROGRESS，完成后再重投可复用结果。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
-- `/reindex` 将缓存恢复为 Block 并停在 CHUNKING，再调用 `/chunk`；不执行 Embedding/Index，不重新调用 MinerU。缓存缺失、损坏或参数变化明确 FAILED，旧 Block/Chunk 保留。成功替换 Block 时同事务清除旧 Chunk，避免证据悬空。升级前已完成结果不会自动回填缓存。当前无 Delete/后台自动补投。
+- 旧知识库嵌套`/reindex`保留仅回放到CHUNKING的兼容语义；新文档级`/api/admin/documents/{doc_id}/reindex`自动接续切片、GPU向量化及入库。两者均不重新调用MinerU，缓存缺失/损坏/参数变化明确失败，旧结果保留供诊断，不自动Force。成功回放替换Block时同事务失效旧Chunk。
 - `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
 
 维护已有文档（无请求体，替换 UUID）：
@@ -443,6 +449,16 @@ curl.exe "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/document
 POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查切片任务，文档原 `task_id` 仍对应解析代次。完成为 EMBEDDING、任务结果 awaiting_embedding；不是 READY。GET 返回 items/total/limit/offset，每项包含 chunk_id/kb_id/doc_id/text/page_start/page_end/section/metadata，metadata 中 source_spans 可反查 Block 和字符区间；页范围含重复标题上下文的来源页，Office/文本仍为逻辑页。
 
 重复 `/chunk` 沿用同一冻结参数和任务编号，已完成时不再投递；切片失败后再次 `/chunk` 恢复该检查点，不通过 `/process` 重新解析。503 投递确认失败可能已被 Worker 消费，先查询状态。历史 Block 缺少可信 block_index 时安全失败 CHUNK_SOURCE_ORDER，不按 UUID/bbox 猜顺序。长度/完整性及人工验收详见 [Chunk](docs/CHUNK.md)。
+
+### 文档观察与维护
+
+推荐使用`/api/admin/documents/{doc_id}`及其`/status /blocks /chunks`观察完整链路；状态返回各阶段任务和Block/Chunk/向量数量，不返回私有配置、磁盘路径或向量数组。需要用户先迁移到`0008_document_management`并重启API及全部Worker，CPU注册`app.tasks.management.manage_document`，GPU沿用原部署，不新增依赖或模型。
+
+新文档级`POST /reindex`保留原件，复用成功Parse Cache后自动重建Chunk→Embedding→Index→READY，无MinerU请求；`POST /retry`恢复已有失败阶段/同一活动云批次。`POST /reparse?force=true`才允许绕过缓存，可能再次外传/收费。202只表示已接收，用详情/status及management_task_id查询，不盲目重复收费请求。旧知识库嵌套接口保留逐阶段兼容语义。
+
+`DELETE`返回202，先令文档退出检索，CPU再清理自有上传副本、Block/Chunk/向量、文档解析/Hybrid/GPU目录和Job指针；活动任务409。无其他文档引用的整份缓存会清理，跨文档共享及无法确认独占的视觉缓存保留，不删除正式preset、模型、日志或全局索引。清理失败保留删除检查点供Retry，成功后详情404；文件/数据库非原子，删除前备份并仅用可丢弃文档验证。此接口无鉴权，仅可信内网使用。
+
+具体响应、恢复边界和人工验收见[Admin文档管理](docs/DOCUMENT_MANAGEMENT.md)。缓存固定锁运行中不可删除；新阶段仅由显式管理请求开启，不自动推进普通上传流程。
 
 ### 已有 Chunk 向量化
 

@@ -16,6 +16,7 @@ from app.core.business_logging import log_event
 from app.core.config import PROJECT_ROOT, Settings
 from app.parsers.common import ParserError
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
+from app.services.cache_files import cache_guard
 
 VERSION = "parse-cache-v1"
 # 合并占位恢复改变页/坐标归属，新解析与旧成功缓存必须隔离；不删除或自动重算旧代次。
@@ -209,6 +210,14 @@ class ParseCache:
             raise CacheError("CACHE_IO") from None
 
     def load(self, value: dict, record: ReadyRecord | None = None) -> tuple[ReadyRecord, dict[str, bytes]] | None:
+        """与删除互斥后有界读取不可变代次；锁失败不当成缓存miss。"""
+        try:
+            with cache_guard(self.root):
+                return self._load_locked(value, record)
+        except OSError:
+            raise CacheError("CACHE_IO") from None
+
+    def _load_locked(self, value: dict, record: ReadyRecord | None = None) -> tuple[ReadyRecord, dict[str, bytes]] | None:
         """不存在时返回 miss；存在指针则全量验证，不忽略残缺、篡改或超量文件。"""
 
         key = key_for(value)
@@ -234,6 +243,14 @@ class ParseCache:
             raise CacheError() from None
 
     def save(self, value: dict, files: dict[str, bytes]) -> ReadyRecord:
+        """与清理互斥发布完整缓存，不允许删除与读取/写入交错。"""
+        try:
+            with cache_guard(self.root):
+                return self._save_locked(value, files)
+        except OSError:
+            raise CacheError("CACHE_IO") from None
+
+    def _save_locked(self, value: dict, files: dict[str, bytes]) -> ReadyRecord:
         """保存已经通过业务 Guard 的全量结果；只有所有文件落盘才发布 READY。"""
 
         if (not files or set(files) - ARTIFACTS

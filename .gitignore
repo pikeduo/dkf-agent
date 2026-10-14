@@ -3,6 +3,7 @@
 !.env.example
 
 __pycache__/
+.cache-cleanup.lock
 *.pyc
 .pytest_cache/
 .ruff_cache/
@@ -45,6 +46,7 @@ docs/*
 !docs/DEEPSEEK_RAG.md
 !docs/CITATION_EVIDENCE.md
 !docs/KNOWLEDGE_QUERY_API.md
+!docs/DOCUMENT_MANAGEMENT.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*

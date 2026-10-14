@@ -13,7 +13,7 @@ celery_app = Celery(
     "knowledge-service",
     broker=settings.celery_broker_url or settings.redis_url,
     backend=settings.celery_result_backend or settings.redis_url,
-    include=["app.tasks.demo", "app.tasks.documents", "app.tasks.mineru", "app.tasks.chunks", "app.tasks.embeddings", "app.tasks.indexing"],
+    include=["app.tasks.demo", "app.tasks.documents", "app.tasks.mineru", "app.tasks.chunks", "app.tasks.embeddings", "app.tasks.indexing", "app.tasks.management"],
 )
 
 celery_app.conf.update(
@@ -25,6 +25,7 @@ celery_app.conf.update(
         "app.tasks.chunks.chunk_document": {"queue": "default_queue"},
         "app.tasks.embeddings.embed_document": {"queue": "gpu_queue"},
         "app.tasks.indexing.index_document": {"queue": "default_queue"},
+        "app.tasks.management.manage_document": {"queue": "default_queue"},
         "app.tasks.mineru.submit_mineru_parse": {"queue": "default_queue"},
         "app.tasks.mineru.check_mineru_result": {"queue": "default_queue"},
     },

@@ -3003,6 +3003,8 @@ API 层不得依赖或返回 LlamaIndex 内部类型；未来替换框架时不�
 
 # 31. 阶段 25：Admin 文档管理完善
 
+实现进度：统一文档级接口、独立管理检查点及缓存Reindex至READY已编写；迁移`0008_document_management`、Mock、DB和真实Worker/文件清理待用户验收，不进入阶段26。详细契约见[Admin文档管理](DOCUMENT_MANAGEMENT.md)。此前阶段待验收状态不自动改变。
+
 ## 接口
 
 ```http

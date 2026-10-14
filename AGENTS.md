@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**24：Knowledge Query API。已实现同范围/search本地Hybrid/Top5与/query显式云问答、自有Schema和安全错误/日志；响应非有限数校验修正待用户复测，真实HTTP/云验收待完成。阶段23相关回归用户已报告148通过，真实来源及阶段22/16等此前待验收事项保留，不自动进入25。**
+当前阶段：**25：Admin文档管理。已补统一文档观察/Retry/Reindex/Reparse/Delete及可恢复编排，代码与用例已编写，迁移/测试/真实验收待用户执行。阶段24非有限数响应修正、阶段22双提供方与16等此前待验收事项保留；阶段23回归用户已报告148通过，不自动进入26。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -50,16 +50,17 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 22 | 已实现同范围Hybrid→Top5→单次LLM合成及引用校验；已拆分官方DeepSeek/custom独立配置，旧Sub2API真实RAG用户已确认，本轮重构Mock及真实验收待用户执行 |
 | 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；相关回归用户已报告148通过，真实来源与忠实度待验收 |
 | 24 | 已实现POST /api/knowledge/search、/query、范围与脱敏错误；非有限数响应校验修正待用户复测，真实HTTP/云验收待完成 |
-| 25 及后续 | 未开展，等待用户确认 |
+| 25 | 已补八个文档级管理接口、逐阶段恢复、缓存Reindex至READY、异步自有文件/DB级联删除及共享缓存保护；新迁移/Mock/DB/Worker待验收 |
+| 26 及后续 | 未开展，等待用户确认 |
 
-- 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
+- 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
-- 用户已指定推进阶段24，但此前验收不自动通过；本轮不改阶段22Prompt/引用白名单及不足判断，阶段23当前来源反查仍需显式调用。不执行请求/模型/测试，不推进阶段25。
+- 用户已指定推进阶段25，但此前验收不自动通过；复用各阶段服务，不改检索/Prompt/引用或默认上传流程，不执行请求/模型/迁移/测试，不推进26。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
 
-最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、DeepSeek RAG、Evidence 和独立 Demo。提交至少 10 份多格式文档、10 个单文档 RAG 用例，答案忠实度目标 ≥90%，分别记录检索、重排、生成耗时并评估性能瓶颈。后续 Delete/Reindex、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
+最终目标：预置多格式知识库为主、动态上传增量为辅；完成单文档及全库检索、Dense + BM25、Reranker、LLM RAG、Evidence和独立Demo。提交至少10份多格式文档、10个单文档RAG用例，忠实度目标≥90%，分别记录检索/重排/生成耗时。后续动态增量、公式参数识别、结构化与安全计算按计划开发，不提前宣称可用。
 
 ## 2. 技术与本地环境约束
 
@@ -127,7 +128,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 原件与 Document 提交后再投递 `default_queue`。耗时入库走 Celery，晚确认、文档行锁、当前 `processing_task_id` 和稳定 ID 保证幂等；旧消息/回调不能覆盖新代次或重复写块。
 - Native 临时数据库/文件错误最多重试 3 次（总共 4 次），退避 5/10/20 秒；原件缺失/空文件立即失败，记录安全原因，成功重试清旧错误。
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
-- `/process` 仅重投 UPLOADED/FAILED；活动云任务通过 `/mineru` 恢复。`/reindex` 仅缓存回放到等待切片；`/reparse?force=true` 明确建立跳过缓存的新代次，活动任务不可覆盖。数据库/文件/消息/云端非原子，无 Outbox、后台补投；不盲目重传或宣称 exactly-once。
+- `/process`及旧嵌套维护接口保留历史逐阶段语义；新`/api/admin/documents`提供统一管理，Reindex仅缓存回放后自动Chunk/Embedding/Index至READY，Reparse仍须force=true。活动任务不能覆盖，数据库/文件/消息/云端非原子，无Outbox，不宣称exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
 - Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
@@ -251,6 +252,14 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - /query的allow_cloud默认false，请求明确true才允许已有单次云合成；/search不调用LLM。异常不是空集/证据不足；输入/响应验证错误只返固定安全code/message，不回显input/ctx/正文或上游原文，不自动重试收费。
 - API同步工作在线程池执行，模型由项目共享服务惰性加载；模型/API部署与验收由用户执行。现阶段无鉴权/RBAC/请求幂等或取消保证，仅本机/可信内网使用；云许可标记不是用户权限，HTTP请求重跑可能再次收费。
 
+### Admin文档管理
+
+- 管理编排只由显式Retry/Reindex/Reparse/Delete开启，独立management检查点绑定解析代次；复用原任务/队列和冻结参数，不让默认上传提前变成阶段26。每次短任务只推进一阶段，等待只读本地状态/countdown，有截止时间，无阻塞循环/供应商额外轮询。
+- 阶段投递意图先提交，完成状态以Document为准；确认丢失/崩溃缺口由显式Retry恢复，同一阶段不盲目重复补投。Retry恢复最下游检查点/同一活动云Job，不继承Force；只有明确Reparse才允许绕过缓存及收费历史。
+- Delete为202异步请求，文档先退出可检索状态并阻断旧入口；活动云/GPU/入库或被锁行拒绝。只删除UUID命名的服务自有原件、文档缓存/Hybrid/GPU目录/Job指针及无其他文档引用的整份缓存；DB级联移除Block/Chunk/向量/Job，不删用户preset、模型、日志或全局HNSW。
+- 清理前验证绝对边界和符号链接/junction，全树预检后逐项重验；文件/SQL非原子，部分失败保留删除检查点供Retry，不假装删除完成。跨文档共享及无法证明独占的视觉缓存保留并报告，不清空缓存根；缓存访问/发布/清理共用固定OS锁，运行中不删锁，不保证共享盘安全。
+- 详情/状态不返回私有配置/路径/密钥/签名URL；Block/Chunk原证据按稳定序号分页，向量只返统计。所有维护复用每日中文白名单日志；202、文件存在或READY不证明质量验收，无RBAC，仅可信内网。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -272,6 +281,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 问答编排、LLM边界、最终引用与人工验收 | [DeepSeek RAG](docs/DEEPSEEK_RAG.md) |
 | 引用契约、Block字符反查、页语义与失效边界 | [Citation / Evidence](docs/CITATION_EVIDENCE.md) |
 | 搜索/问答HTTP契约、云许可及安全错误 | [Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md) |
+| 管理接口、恢复编排、删除所有权及人工验收 | [Admin文档管理](docs/DOCUMENT_MANAGEMENT.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

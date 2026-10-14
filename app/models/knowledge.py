@@ -81,6 +81,11 @@ class Document(Timestamps, Base):
             name="index_checkpoint",
         ),
         CheckConstraint(
+            "(management_task_id IS NULL AND management_config IS NULL) OR "
+            "(management_task_id IS NOT NULL AND management_config IS NOT NULL AND jsonb_typeof(management_config) = 'object')",
+            name="management_checkpoint",
+        ),
+        CheckConstraint(
             "status IN ('UPLOADED', 'PARSING', 'OCR_PROCESSING', 'CHUNKING', "
             "'EMBEDDING', 'INDEXING', 'READY', 'FAILED')",
             name="status",
@@ -113,6 +118,9 @@ class Document(Timestamps, Base):
     embedding_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     index_task_id: Mapped[UUID | None] = mapped_column(unique=True)
     index_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    # 管理编排独立于解析/切片/GPU/入库代次；只有显式管理入口才自动推进整个链路。
+    management_task_id: Mapped[UUID | None] = mapped_column(unique=True)
+    management_config: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class DocumentBlock(Base):

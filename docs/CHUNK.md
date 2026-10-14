@@ -2,6 +2,8 @@
 
 阶段 13 仅把已有完整 DocumentBlock 转为 DocumentChunk；不读原件、不调用 MinerU、不下载 tokenizer、不生成向量或索引。解析流程保持在 CHUNKING，管理员显式 POST `/chunk` 启动 CPU 任务，成功停在 EMBEDDING。历史结果不会自动重建。
 
+阶段25新增[文档级管理](DOCUMENT_MANAGEMENT.md)可显式自动接续各阶段，仍调用本节原切片接口/任务语义；旧嵌套入口保持单阶段，默认上传不变。
+
 ## 策略与计量边界
 
 - 按从 1 开始的连续 block_index 阅读；未知历史顺序安全失败，不按页码/bbox/UUID 排序。
@@ -37,7 +39,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-当前 head=0007_pgvector_index（包含原 0005 切片与 0006 GPU 检查点迁移），Worker 注册 app.tasks.chunks.chunk_document 到 default_queue。
+当前head=0008_document_management（包含原切片/GPU/pgvector与新管理检查点），Worker仍注册app.tasks.chunks.chunk_document到default_queue。
 
 由用户执行自动用例（隔离数据库 schema 需要项目用户 CREATE 权限和已启用 vector；不操作 public 数据）：
 

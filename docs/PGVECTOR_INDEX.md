@@ -2,6 +2,8 @@
 
 阶段 15 只消费阶段 14 的完整本地向量，写入已有 document_chunks.embedding（vector(1024)），全部成功后 Document=READY。不实现 Query 检索、BM25、LlamaIndex Adapter、Reranker 或 RAG。不重新解析、下载/加载模型、调用 MinerU/Embedding 云 API；无新增依赖/环境变量。
 
+本节保留入库独立验收；阶段25的[文档级管理](DOCUMENT_MANAGEMENT.md)仅自动投递本节既有任务，索引/向量真相与READY事务语义不变。
+
 ## 入口与事务
 
 - POST `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index`，无请求体；INDEXING 才能首次提交，FAILED 仅恢复已有入库检查点。未完成 Embedding/普通解析失败返回 409，跨知识库返回 404。
@@ -64,7 +66,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-预期 head=0007_pgvector_index。启动方式继续用 README 的 API/CPU Worker 命令，CPU 注册 app.tasks.indexing.index_document 并消费 default_queue；只验收已有 INDEXING 文档时不需要 GPU Worker。确认 CPU 与此前 GPU 使用的 EMBEDDINGS_DIR 可互相访问；实际读取冻结目录，不用新默认目录替换原任务。
+当前head预期为0008_document_management，包含原0007索引。启动方式继续用README，CPU仍注册app.tasks.indexing.index_document到default_queue；只验收已有INDEXING文档无需GPU Worker。确认实际冻结EMBEDDINGS_DIR可访问，不用新默认目录替换原结果。
 
 3. 选择已有完整本地结果且 Document=INDEXING 的文档，替换两个 UUID，只提交一次：
 

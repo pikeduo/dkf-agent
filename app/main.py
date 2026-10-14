@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.admin_knowledge_bases import router as admin_knowledge_bases_router
+from app.api.admin_documents import router as admin_documents_router
 from app.api.docs import router as docs_router
 from app.api.health import router as health_router
 from app.api.knowledge import router as knowledge_router
@@ -28,6 +29,7 @@ app.include_router(health_router)
 app.include_router(knowledge_router)
 app.include_router(tasks_router)
 app.include_router(admin_knowledge_bases_router)
+app.include_router(admin_documents_router)
 app.include_router(mineru_router)
 app.include_router(docs_router)
 app.mount(

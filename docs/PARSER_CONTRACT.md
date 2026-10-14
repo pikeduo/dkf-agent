@@ -142,7 +142,7 @@ data/parsed/
 
 Hybrid 先查精确视觉缓存，只有未命中图片进入一份 Bundle。缓存视觉丢弃旧页/bbox/Sheet，按当前 Anchor 回插；冻结命中集合和结果 Hash，新缓存不得改变本代次页映射。零缺失页不建云 Job。Native/Chart 来自当前原件，保留公式原式，缺页/失败/空 OCR 不缓存，不做相似文本复用。
 
-Reindex 无成功缓存、原件/配置/模型/参数/版本变更或缓存损坏应 FAILED，旧块保留，不运行 Parser/云；目前只停在 CHUNKING。升级前完成记录不自动回填，旧活动 Job 按原检查点完成，不猜新缓存身份。云端 `vlm/pipeline` 同名模型升级不可自动检测，需要管理员 Reparse。
+Reindex无成功缓存、原件/配置/参数/版本变更或缓存损坏应FAILED，旧块保留，不运行Parser/云；旧嵌套入口只停CHUNKING，阶段25[文档级管理](DOCUMENT_MANAGEMENT.md)接续原切片/GPU/入库至READY。升级前完成记录不自动回填，旧活动Job按原检查点完成，不猜新缓存身份；同名云模型升级仍需管理员明确Reparse。
 
 ### 用户执行的测试与真实验收
 

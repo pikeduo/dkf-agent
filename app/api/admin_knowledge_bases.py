@@ -263,6 +263,10 @@ def require_document(
     document = session.scalar(query)
     if document is None:
         raise HTTPException(status_code=404, detail="知识库文档不存在")
+    if lock and document.management_config is not None:
+        config = document.management_config
+        if config.get("operation") == "delete" or config.get("state") == "running":
+            raise HTTPException(status_code=409, detail="文档已有管理任务，请查询新文档/status或用/retry恢复")
     return document
 
 
@@ -306,6 +310,7 @@ def resubmit_document(
         )
     transition_document(document, "UPLOADED")
     document.processing_task_id = uuid4()
+    document.management_task_id, document.management_config = None, None
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
     document.index_task_id, document.index_config = None, None
@@ -334,6 +339,7 @@ def submit_maintenance(session: Session, document: Document, operation: str,
     # 显式维护才可从等待切片/向量化换代次；旧 Chunk 保留到成功解析/回放时事务失效。
     document.status, document.error_message = "UPLOADED", None
     document.processing_task_id = uuid4()
+    document.management_task_id, document.management_config = None, None
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
     document.index_task_id, document.index_config = None, None

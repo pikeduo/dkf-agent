@@ -2,6 +2,8 @@
 
 阶段 14 仅本地 Dense 向量化文档 Chunk 和 Query；/embed 不写 pgvector、不建索引、不实现检索/RAG。文档结果完整发布后进入 INDEXING / awaiting_index，Chunk.embedding 仍为 NULL。随后显式 [阶段 15 /index](PGVECTOR_INDEX.md) 才把完整结果事务入库并推进 READY；本文件仍保留 /embed 的独立验收。
 
+阶段25的[文档级Reindex/Retry](DOCUMENT_MANAGEMENT.md)自动投递既有GPU/入库任务，不改本节冻结参数或推理语义；旧/嵌套单阶段入口及默认上传不变。
+
 ## 统一 Service
 
 ```python
@@ -72,7 +74,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-当前预期 head=0007_pgvector_index（包含阶段 14 的 0006）。在 GPU Worker 尚未占用显存时，由用户运行以下最小真实 Service 验证（只显示数量/维度/范数差异，不打印向量）：
+当前预期head=0008_document_management（包含原GPU/入库及新管理检查点）。在GPU Worker尚未占用显存时，由用户运行以下最小真实Service验证（只显示数量/维度/范数差异，不打印向量）：
 
 ```powershell
 python -c "from app.services.embedding import embed_documents, embed_query; import math; text='知识库文档解析'; docs=embed_documents([text,'本地向量化服务']); query=embed_query(text); print('docs=',len(docs),'dims=',[len(v) for v in docs],'query_dim=',len(query),'norm=',math.sqrt(sum(x*x for x in query)),'same_input_diff=',max(abs(a-b) for a,b in zip(docs[0],query)))"

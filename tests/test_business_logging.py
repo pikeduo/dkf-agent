@@ -53,6 +53,21 @@ def records(stream):
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
+def test_management_task_uses_worker_doc_context_and_safe_registered_event(events):
+    """管理任务保留doc/request关联和原Worker角色，不输出私有返回值或另建日志文件。"""
+    doc_id, task_id = str(uuid4()), str(uuid4())
+    task = SimpleNamespace(name="app.tasks.management.manage_document", request=SimpleNamespace(headers={}))
+    task_logs.begin_task_log(task=task, task_id=task_id, args=[doc_id])
+    try:
+        logs.log_event("management.advanced", stage="chunk", file_path="PRIVATE_PATH", body="PRIVATE_BODY")
+    finally:
+        task_logs.end_task_log(task=task, state="RETRY", retval={"PRIVATE": "PRIVATE_BODY"})
+    output = records(events)
+    assert all(item["doc_id"] == doc_id and item["task_id"] == task_id for item in output)
+    assert any(item["event"] == "management.advanced" for item in output)
+    assert "PRIVATE" not in events.getvalue() and logs.CONTEXT.get() is None
+
+
 @pytest.mark.parametrize("provider", ["deepseek", "custom"])
 def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
     """提供方只记录固定枚举，保留每日中文格式、真实PID及原有脱敏白名单。"""
