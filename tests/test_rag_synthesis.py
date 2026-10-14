@@ -2,7 +2,9 @@
 
 import asyncio
 import copy
+import io
 import json
+import logging
 from uuid import uuid4
 
 import pytest
@@ -13,8 +15,10 @@ from llama_index.core.base.llms.types import ChatMessage, MessageRole
 from llama_index.core.response_synthesizers.base import BaseSynthesizer
 from llama_index.core.schema import QueryBundle
 
+from app.core import business_logging as logs
+from app.schemas.retrieval import RetrievalResult
 from app.services.rag.llama_index.deepseek_adapter import DKFDeepSeekAdapter
-from app.services.rag.llama_index.node_adapter import node_to_result
+from app.services.rag.llama_index.node_adapter import node_to_result, result_to_node
 from app.services.rag.llama_index.response_synthesizer import DKFResponseSynthesizer
 from app.services.rag.synthesis import RAGError, RAG_SYSTEM_PROMPT, bind_answer, insufficient_answer
 from test_reranker_adapter import ServiceStub, candidates
@@ -177,3 +181,112 @@ def test_framework_default_callback_and_prompt_overrides_are_not_used(monkeypatc
         with pytest.raises(RAGError):
             method("PRIVATE_PROMPT")
     assert len(backend.calls) == 1
+
+
+def quality_candidate(hit, text, *, page=95):
+    """将内存候选设为用户报告场景的摘要Stub；非官方GT，不生成或解析真实文档。"""
+    values = node_to_result(hit, log_success=False).model_dump()
+    values.update(text=text, file_type="pptx", file_name="内存来源.pptx", page_start=page, page_end=page,
+                  section="指标说明")
+    values["metadata"]["page_semantics"] = "logical"
+    for span in values["metadata"]["source_spans"]:
+        span.update(page=page, start_char=0, end_char=len(text), chunk_start_char=0, chunk_end_char=len(text))
+    return result_to_node(RetrievalResult(**values), log_success=False)
+
+
+def test_supported_meaning_and_usage_with_noise_and_negative_logits_can_be_answered():
+    """实质性名称/权衡信息不进入空分支；保留无关候选和负logit，不以分数代替语义支持。"""
+    incoming = candidates(3)
+    incoming[0] = quality_candidate(incoming[0],
+        "An Information Criterion；Akaike's Information Criterion。它在拟合优度与模型灵活性（参数数量）之间做权衡。")
+    incoming[1] = quality_candidate(incoming[1], "本节是无关内容的目录。", page=12)
+    incoming[2] = quality_candidate(incoming[2], "AIC使用对未来数据的预期预测评估模型适切性。", page=97)
+    original = copy.deepcopy([hit.model_dump() for hit in incoming])
+    question = "文档中提到的 An Information Criterion 是什么？请根据文档说明其含义和用途"
+    final = BGERerankerAdapter(service=ServiceStub([-1.0, -3.0, -2.0])).postprocess_nodes(
+        incoming, query_str=question)
+    ids = [incoming[index].node.node_id for index in (0, 2)]
+    backend = LLMServiceStub(json.dumps({"insufficient_evidence": False, "claims": [
+        {"text": "该准则权衡拟合优度与参数数量。", "evidence_ids": [ids[0]]},
+        {"text": "模型适切性可按未来数据的预期预测评估。", "evidence_ids": [ids[1]]}]}))
+    answer = DKFResponseSynthesizer(DKFDeepSeekAdapter(backend)).synthesize(question, final, allow_cloud=True)
+    assert answer.status == "success" and not answer.insufficient_evidence
+    assert len(backend.calls) == 1 and backend.calls[0][0] == RAG_SYSTEM_PROMPT
+    assert "至少一个实质性部分" in RAG_SYSTEM_PROMPT and "忠实翻译、概括" in RAG_SYSTEM_PROMPT
+    sent = json.loads(backend.calls[0][1])
+    assert sent["question"] == question and len(sent["evidence"]) == 3
+    assert {str(item.chunk_id) for item in answer.citations} == set(ids)
+    assert [item.page_start for item in answer.citations] == [95, 97]
+    assert all(item.metadata["page_semantics"] == "logical" and item.rerank_score < 0 for item in answer.citations)
+    assert [hit.model_dump() for hit in incoming] == original
+
+
+def test_partially_supported_question_keeps_grounded_claim_and_explicit_scope_limit():
+    """额外子问题无证据不阻止有支持事实，局限附在对应回答内，不补数字或新增输出字段。"""
+    incoming = [quality_candidate(candidates(1)[0], "指标权衡拟合优度与参数数量。")]
+    final = BGERerankerAdapter(service=ServiceStub([0.0])).postprocess_nodes(incoming, query_str="question")
+    backend = LLMServiceStub(json.dumps({"insufficient_evidence": False, "claims": [
+        {"text": "指标权衡拟合优度与参数数量；当前证据未提供训练数据的具体行数。",
+         "evidence_ids": [final[0].node.node_id]}]}))
+    result = DKFResponseSynthesizer(DKFDeepSeekAdapter(backend)).synthesize(
+        "说明指标含义，并提供训练数据的具体行数。", final, allow_cloud=True)
+    assert result.status == "success" and result.answer.endswith("[1]")
+    assert "未提供" in result.answer and len(result.citations) == 1 and len(backend.calls) == 1
+
+
+@pytest.mark.parametrize("passage", ["AIC", "无关文档的目录。", "两段相关证据的数值相互冲突，无法判定。"])
+def test_nonempty_or_keyword_hit_never_forces_model_refusal_into_success(passage):
+    """非空、关键词命中或模型明确相关冲突仍能安全拒答，不强制覆盖模型true或重试。"""
+    incoming = [quality_candidate(candidates(1)[0], passage)]
+    final = BGERerankerAdapter(service=ServiceStub([20.0])).postprocess_nodes(incoming, query_str="question")
+    backend = LLMServiceStub('{"insufficient_evidence":true,"claims":[]}')
+    result = DKFResponseSynthesizer(DKFDeepSeekAdapter(backend)).synthesize(
+        "解释指标的含义和用途。", final, allow_cloud=True)
+    assert result == insufficient_answer() and len(backend.calls) == 1
+
+
+def test_local_conflict_does_not_block_independent_supported_claim():
+    """局部数值冲突不强制否定独立名称事实；只接受模型已合法引用的受支持部分。"""
+    incoming = candidates(3)
+    passages = ["指标名称为示例信息准则。", "文段甲说参数值为2。", "文段乙说相同参数值为3。"]
+    incoming = [quality_candidate(hit, passage) for hit, passage in zip(incoming, passages)]
+    final = BGERerankerAdapter(service=ServiceStub([3.0, 2.0, 1.0])).postprocess_nodes(incoming, query_str="question")
+    backend = LLMServiceStub(json.dumps({"insufficient_evidence": False, "claims": [
+        {"text": "名称为示例信息准则；当前证据的参数值存在冲突，不能判定。",
+         "evidence_ids": [item.node.node_id for item in final]}]}))
+    result = DKFResponseSynthesizer(DKFDeepSeekAdapter(backend)).synthesize(
+        "说明指标名称及参数值。", final, allow_cloud=True)
+    assert result.status == "success" and "不能判定" in result.answer and len(backend.calls) == 1
+    assert {str(cite.chunk_id) for cite in result.citations} == {hit.node.node_id for hit in final}
+
+
+def test_refusal_diagnostics_distinguish_empty_from_model_judgment_without_payload():
+    """日志可分辨空证据/非空模型拒答，记录原数量但不泄露问题、正文或响应。"""
+    logger, stream = logs.LOGGER, io.StringIO()
+    previous = logger.handlers[:], logger.level, logger.propagate, logger.disabled
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logs.ReadableFormatter("rag-cli"))
+    token = logs.CONTEXT.set(None)
+    try:
+        logger.handlers, logger.propagate, logger.disabled = [handler], False, False
+        logger.setLevel(logging.INFO)
+        backend = LLMServiceStub('{"insufficient_evidence":true,"claims":[]}')
+        synthesizer = DKFResponseSynthesizer(DKFDeepSeekAdapter(backend))
+        assert synthesizer.synthesize("PRIVATE_QUERY", [], allow_cloud=True) == insufficient_answer()
+        empty = stream.getvalue()
+        assert '阶段="empty_final_evidence"' in empty and "Chunk数=0" in empty
+        assert "rag.synthesis_started" not in empty and backend.calls == []
+        stream.seek(0)
+        stream.truncate(0)
+        incoming = [quality_candidate(candidates(1)[0], "PRIVATE_BODY")]
+        final = BGERerankerAdapter(service=ServiceStub([1.0])).postprocess_nodes(incoming, query_str="PRIVATE_QUERY")
+        assert synthesizer.synthesize("PRIVATE_QUERY", final, allow_cloud=True) == insufficient_answer()
+        refused = stream.getvalue()
+        assert "rag.synthesis_started" in refused and '阶段="model_judged_insufficient"' in refused
+        assert "Chunk数=1" in refused and len(backend.calls) == 1
+        assert "PRIVATE" not in empty + refused and "claims" not in refused
+    finally:
+        handler.close()
+        logger.handlers, logger.propagate, logger.disabled = previous[0], previous[2], previous[3]
+        logger.setLevel(previous[1])
+        logs.CONTEXT.reset(token)

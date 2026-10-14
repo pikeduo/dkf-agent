@@ -86,12 +86,14 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `fusion.started / branch_finished / finished / empty / failed` | 同范围两路检索及稳定RRF摘要；stage区分dense/bm25/rrf，记录UUID/范围数量/结果数/耗时及安全分支错误码，不记录Query/Node/原分数/异常原文，不新增日志文件 |
 | `rerank.model_loaded / scored / score_failed / started / finished / skipped / failed` | 项目共享模型加载、完整原文对批量评分、Top Evidence选择及错误/空候选摘要；仅模型名/设备/数量/批次/知识库/耗时/固定安全码，加载及评分不是质量验收，不记录Query/正文/分数/路径/指纹 |
 | `deepseek.started / finished / failed` | 单次官方LLM请求/完整响应接收/安全失败；模型名、HTTP状态、耗时/错误码，不记录问题、Prompt、响应、Token；finished不是回答引用/忠实度验收 |
-| `rag.started / retrieved / synthesized / insufficient / finished / failed` | 同范围问答开始、融合候选、最终引用校验、不足与完成/安全失败；仅kb_id、数量、阶段、状态、耗时/错误码，不记录答案/正文，不追加日志文件 |
+| `rag.started / retrieved / synthesis_started / synthesized / insufficient / finished / failed` | 同范围问答、融合候选、最终证据校验/单次合成、引用校验/不足及完成/失败；仅kb_id、数量、阶段、状态、耗时/错误码，不记录答案/正文，不追加日志文件 |
 | `preset.started / imported / reused` | 用户执行 CLI 后开始批量导入 / 原件已提交并投递 auto / 同内容沿用已有 doc_id，不代表 READY |
 | `preset.advanced / state` | 下一阶段检查点提交后投递 / 业务状态变化，复用原队列与每日日志 |
 | `preset.failed / timeout / finished` | 单项安全错误 / 有界等待超时但不取消任务 / 全批 READY 或未完成数量，不输出清单、路径或正文 |
 
 `parse.persisted / mineru.blocks_persisted` 只表示代码校验与事务成功，不保证 OCR 全量识别、公式语义或任意复杂布局顺序正确，不代表 READY。真实正文、页码与 bbox 仍需查询 `document_blocks` 并对照原件。
+
+RAG拒答诊断：`rag.insufficient`的stage为`empty_final_evidence`时chunk_count=0，未调用DeepSeek；为`model_judged_insufficient`时记录本次非空最终证据数量，表示模型返回了有效的不足JSON。`rag.synthesis_started`在最终Node/上下文预算通过后、单次Chat前记录；`supported_claims`表示引用绑定通过而非事实准确率通过。只有数量/阶段，不能从日志推断哪段原文支持答案，也不得为排障放开Prompt/模型响应正文记录。
 
 ## 自动测试
 

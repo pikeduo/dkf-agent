@@ -238,6 +238,7 @@ EVENT_LABELS = {
     "deepseek.failed": "DeepSeek 请求安全失败，未返回部分回答或追加请求",
     "rag.started": "开始同范围检索、重排与证据问答",
     "rag.retrieved": "已取得融合候选，尚未生成回答",
+    "rag.synthesis_started": "最终证据已校验，开始单次回答合成",
     "rag.synthesized": "回答结构与最终证据引用已校验，忠实度仍需人工验收",
     "rag.insufficient": "最终证据不足，未猜测答案或捏造引用",
     "rag.finished": "本次问答完成，仅返回项目回答与原始引用契约",

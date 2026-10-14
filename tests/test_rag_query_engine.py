@@ -13,11 +13,13 @@ from llama_index.core.base.base_query_engine import BaseQueryEngine
 
 from app.services.deepseek import DeepSeekError
 from app.services.rag.llama_index.deepseek_adapter import DKFDeepSeekAdapter
+from app.services.rag.llama_index.hybrid_retriever import fuse_nodes
 from app.services.rag.llama_index.query_engine import DKFQueryEngine
 from app.services.rag.llama_index.reranker_adapter import BGERerankerAdapter
 from app.services.rag.llama_index.response_synthesizer import DKFResponseSynthesizer
 from app.services.rag.synthesis import RAGError
-from test_rag_synthesis import LLMServiceStub, answer_for
+from test_hybrid_retriever import scored, source_nodes
+from test_rag_synthesis import LLMServiceStub, answer_for, quality_candidate
 from test_reranker_adapter import ServiceStub, candidates
 
 
@@ -146,3 +148,27 @@ def test_invalid_doc_scope_is_not_expanded(value):
     """无效/空doc_ids在构造时拒绝，不自动改为全知识库。"""
     with pytest.raises(RAGError, match="RAG_INPUT"):
         DKFQueryEngine(uuid4(), doc_ids=value)
+
+
+def test_25_candidates_top5_with_supported_excerpt_do_not_take_empty_evidence_branch():
+    """复现25融合候选/Top5场景：有支持的摘要完整上云一次，不因标题/噪音触发空拒答。"""
+    kb_id, nodes = source_nodes(25)
+    dense = [scored(node, 0.9 - index * 0.01) for index, node in enumerate(nodes[:20])]
+    bm25 = [scored(node, float(30 - index)) for index, node in enumerate(nodes[5:])]
+    incoming = fuse_nodes(dense, bm25, kb_id=kb_id, top_k=30)
+    assert len(incoming) == 25
+    incoming[-1] = quality_candidate(incoming[-1],
+        "An Information Criterion；Akaike's Information Criterion。该指标权衡拟合优度与参数数量。")
+    engine, retriever, reranker, backend = setup_engine(incoming)
+    backend.output = json.dumps({"insufficient_evidence": False, "claims": [
+        {"text": "该指标权衡拟合优度与参数数量。", "evidence_ids": [incoming[-1].node.node_id]}]})
+    question = "文档中提到的 An Information Criterion 是什么？请根据文档说明其含义和用途"
+    result = engine.query(question, allow_cloud=True)
+    assert result.status == "success" and not result.insufficient_evidence
+    assert retriever.calls == [question] and len(reranker.calls) == len(backend.calls) == 1
+    payload = json.loads(backend.calls[0][1])
+    assert len(payload["evidence"]) == 5 and payload["question"] == question
+    cited = result.citations[0]
+    assert str(cited.chunk_id) == incoming[-1].node.node_id
+    assert cited.page_start == cited.page_end == 95 and cited.metadata["page_semantics"] == "logical"
+    assert cited.text == incoming[-1].node.text and result.answer.endswith("[1]")

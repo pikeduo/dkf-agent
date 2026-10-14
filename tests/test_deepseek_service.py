@@ -128,21 +128,35 @@ def test_strict_json_rejects_ambiguous_nonfinite_and_invalid_unicode(raw):
         strict_json(raw)
 
 
-def test_business_logs_never_include_llm_content_or_credentials():
-    """独立日志包含过程/错误摘要，不记录问题、回答、Token、私有路径。"""
-    output, previous, level, propagate = io.StringIO(), list(logs.LOGGER.handlers), logs.LOGGER.level, logs.LOGGER.propagate
+@pytest.mark.parametrize("initially_disabled", [False, True])
+def test_business_logs_never_include_llm_content_or_credentials(initially_disabled):
+    """隔离并恢复日志状态，验证已有INFO禁用缓存/Logger禁用不影响摘要及脱敏断言。"""
+    logger = logs.LOGGER
+    output = io.StringIO()
+    previous, level, propagate, disabled = list(logger.handlers), logger.level, logger.propagate, logger.disabled
     handler = logging.StreamHandler(output)
     handler.setFormatter(logs.ReadableFormatter("rag-cli"))
+    token = logs.CONTEXT.set(None)
 
     def respond(request):
         """模拟私有输出，不发真实请求。"""
         return httpx.Response(200, json=envelope(content="PRIVATE_ANSWER"))
 
     try:
-        logs.LOGGER.handlers, logs.LOGGER.level, logs.LOGGER.propagate = [handler], logging.INFO, False
+        # 明确复现前序测试留下的INFO禁用缓存，不能只给level属性赋值来开启日志。
+        logger.disabled = False
+        logger.setLevel(logging.WARNING)
+        assert not logger.isEnabledFor(logging.INFO)
+        logger.disabled = initially_disabled
+        logger.handlers, logger.propagate, logger.disabled = [handler], False, False
+        logger.setLevel(logging.INFO)
         DeepSeekService(settings(), transport=httpx.MockTransport(respond)).complete("PRIVATE_SYSTEM", "PRIVATE_QUERY")
         content = output.getvalue()
         assert "deepseek.started" in content and "deepseek.finished" in content and "RAG CLI" in content
         assert "PRIVATE" not in content and "mock-secret" not in content
     finally:
-        logs.LOGGER.handlers, logs.LOGGER.level, logs.LOGGER.propagate = previous, level, propagate
+        handler.close()
+        logger.handlers, logger.propagate, logger.disabled = previous, propagate, disabled
+        # 恢复同样使用setLevel清理缓存，避免污染后续日志测试。
+        logger.setLevel(level)
+        logs.CONTEXT.reset(token)

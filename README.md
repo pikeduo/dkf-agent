@@ -501,6 +501,8 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 最小使用、Mock/真实问题验收及错误说明见[DeepSeek RAG](docs/DEEPSEEK_RAG.md)。结构合法和引用存在不证明答案忠实或问答准确率已通过，必须对照真实证据人工核验。
 
+若最终证据只支持问题的一部分，允许仅回答有依据部分并明确缺口，不因无关候选或局部缺失整体拒答；`insufficient_evidence=true`表示没有可靠可答内容，`false`不保证全部子问题已回答。代码不会根据非空候选或高分强制改写模型拒答，也不会为此自动追加收费请求。
+
 ### 预置知识库导入
 
 已有 OHR-Bench、OmniDocBench 和 OCB 原件时，可按 [三数据集联合冒烟](docs/PRESET_IMPORT.md#三数据集最短操作新运行) 在独立测试库抽取约14份（5 PDF、3图像、三类Office各2份），完成上传→READY→Dense及分数据集报告。直接使用已下载 OCB，不要求补齐缺失43份、许可Excel或手工SQL导出；默认dry-run，真实处理前须用户确认全部所选文件云外传及费用。OCB断言人工核验、Omni GT不当QA，不能代替正式多格式验收或宣称问答准确率。

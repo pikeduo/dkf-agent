@@ -66,7 +66,7 @@ class DKFResponseSynthesizer(BaseSynthesizer):
 
     def synthesize(self, query: str | QueryBundle, nodes: list[NodeWithScore], *,
                    allow_cloud: bool = False, **kwargs) -> RAGAnswer:
-        """只用最终至多五个已重排原 Node；整体失败不追加请求或输出半份引用。"""
+        """只用最终至多五个已重排原Node；区分空集与模型拒答，不强制改写模型判断或追加请求。"""
         started = perf_counter()
         try:
             if allow_cloud is not True:
@@ -85,15 +85,19 @@ class DKFResponseSynthesizer(BaseSynthesizer):
                     raise RAGError("RAG_EVIDENCE")
                 evidence.append(item)
             if not evidence:
-                log_event("rag.insufficient", item_count=0)
+                log_event("rag.insufficient", stage="empty_final_evidence", chunk_count=0, item_count=0)
                 return insufficient_answer()
             payload = evidence_payload(question, evidence, self._llm.context_chars)
+            # 只记录最终证据数量；正文和模型原始拒答内容仍不得进入业务日志。
+            log_event("rag.synthesis_started", kb_id=evidence[0].kb_id, chunk_count=len(evidence))
             response = self._llm.chat([
                 ChatMessage(role=MessageRole.SYSTEM, content=RAG_SYSTEM_PROMPT),
                 ChatMessage(role=MessageRole.USER, content=payload)])
             result = bind_answer(response.message.content, evidence)
             log_event("rag.insufficient" if result.insufficient_evidence else "rag.synthesized",
                       kb_id=evidence[0].kb_id, item_count=len(result.citations),
+                      stage="model_judged_insufficient" if result.insufficient_evidence else "supported_claims",
+                      chunk_count=len(evidence),
                       duration_ms=(perf_counter() - started) * 1000)
             return result
         except Exception as exc:
