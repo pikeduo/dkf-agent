@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**22：DeepSeek RAG。已实现项目唯一LLM服务、LlamaIndex Query Engine/合成Adapter及项目回答/最小引用契约；用例仅编写，真实问答待人工验收。阶段21模型/排序收益及阶段16等此前待验收事项保留，不自动进入23/24。**
+当前阶段：**23：Citation / Evidence。已实现框架无关引用契约、Node互转及当前Chunk→Block→Document只读来源反查；用例仅编写，待人工验收。阶段22误拒答修正的真实效果、阶段21排序收益及阶段16等此前待验收事项保留，不自动进入24。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -48,11 +48,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
 | 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
-| 23 及后续 | 未开展，等待用户确认 |
+| 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；用例未运行，真实来源与答案忠实度待验收 |
+| 24 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮排查阶段22误拒答：明确逐事实/部分回答Prompt，补空证据与模型判断的脱敏日志、Mock和真实质量验收说明；不重写模型true、不放宽引用白名单、不自动重试收费请求。阶段23暂停，真实效果待用户验证；不调用API、运行模型/测试或进入后续阶段。
+- 本轮只补齐阶段23来源边界；阶段22Prompt/引用白名单及不足判断保持不变。反查仅由调用方显式执行，不隐式加入问答收费链路；不执行查询/测试，不推进阶段24。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -234,6 +235,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 逐事实判断支持：允许忠实翻译/概括及有证据的部分回答，明确其余缺口；无关片段或局部冲突不否定独立受支持事实。没有可靠可答内容仍拒答；不得因候选非空/关键词/高分把模型true强制改成false。诊断区分empty_final_evidence与model_judged_insufficient，不保留模型拒答原文或为误拒答自动重试。
 - 不走框架默认含正文的Query/LLM/Synthesis callback；不启用全局Tracing，日志只记阶段/范围/数量/状态/耗时/固定错误码。CLI使用集中注册`rag-cli`；不记录问题、Prompt、答案、证据正文、Key或上游原文。
 
+### Citation / Evidence
+
+- 项目Citation与来源Trace不依赖LlamaIndex类型；原Node/DTO深复制、稳定Chunk身份、完整来源及三类分数不丢失，未知值保留None，不采用LLM生成的文件名/页码。回答数字标记与本地Citation编号一致，每条claim仍受最终ID白名单约束。
+- 显式EvidenceService仅在独立REPEATABLE READ只读快照核对指定kb/doc/Chunk、ACTIVE/READY、当前解析/切片检查点、整Block Hash及Unicode字符区间。缺字段、过期引用、越界或正文不一致全批失败；不读原件、不修复来源、不重Parse/Embedding、无flush/commit或自动重试。
+- 沿用PDF物理页、图片像素页及Office逻辑页/空bbox；保留context/overlap与结构块原文，不去重来源片段或重排。来源核对不是答案语义验真，也不是用户鉴权；现有RAG返回引用快照，调用方显式核对当前来源，不伪称每次生成都已查库验真。
+- 来源日志复用每日合并文件和集中注册evidence-cli，仅ID/数量/耗时/安全错误；新专题用例只编写，真实DB来源及回答忠实度由用户验收。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -253,6 +261,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 两路组合、RRF来源、冲突边界及人工验收 | [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md) |
 | 本地重排、分数/证据、部署及质量验收 | [BGE Reranker](docs/RERANKER.md) |
 | 问答编排、LLM边界、最终引用与人工验收 | [DeepSeek RAG](docs/DEEPSEEK_RAG.md) |
+| 引用契约、Block字符反查、页语义与失效边界 | [Citation / Evidence](docs/CITATION_EVIDENCE.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

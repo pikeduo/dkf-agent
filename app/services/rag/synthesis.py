@@ -3,9 +3,10 @@
 import json
 import re
 
-from app.schemas.rag import Citation, INSUFFICIENT_ANSWER, RAGAnswer, SynthesisOutput
+from app.schemas.rag import INSUFFICIENT_ANSWER, RAGAnswer, SynthesisOutput
 from app.schemas.retrieval import RetrievalResult
 from app.services.deepseek import strict_json
+from app.services.rag.evidence import make_citation
 
 # 不使用框架默认 Prompt；逐事实判断语义支持，允许有证据的部分回答而不降低引用约束。
 RAG_SYSTEM_PROMPT = """你是只基于最终证据回答问题的知识库助手。
@@ -68,7 +69,7 @@ def evidence_payload(question: str, evidence: list[RetrievalResult], limit: int)
 
 
 def bind_answer(raw: str, evidence: list[RetrievalResult]) -> RAGAnswer:
-    """严格验证模型逐项引用；引用正文、页码与分数全部从本地最终 Node 回填。"""
+    """严格验证逐项引用并委托项目工厂；不读库、不采用模型来源或更改不足判断。"""
     try:
         if not isinstance(raw, str) or len(raw) > 60000:
             raise ValueError
@@ -88,7 +89,7 @@ def bind_answer(raw: str, evidence: list[RetrievalResult]) -> RAGAnswer:
             for identity in claim.evidence_ids:
                 if identity not in numbers:
                     numbers[identity] = len(citations) + 1
-                    citations.append(Citation(**allowed[identity].model_dump(), citation_id=numbers[identity]))
+                    citations.append(make_citation(allowed[identity], numbers[identity]))
                 markers.append(f"[{numbers[identity]}]")
             paragraphs.append(claim.text + " " + "".join(markers))
         return RAGAnswer(status="success", answer="\n\n".join(paragraphs), citations=citations,

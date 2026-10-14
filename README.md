@@ -503,6 +503,14 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 若最终证据只支持问题的一部分，允许仅回答有依据部分并明确缺口，不因无关候选或局部缺失整体拒答；`insufficient_evidence=true`表示没有可靠可答内容，`false`不保证全部子问题已回答。代码不会根据非空候选或高分强制改写模型拒答，也不会为此自动追加收费请求。
 
+### Citation 与来源反查
+
+回答中的`[1]`等标记对应项目Citation，保留原`chunk_id / doc_id / kb_id / file_name / page_start / page_end / section / text`及检索、融合、重排分数；来源只由原Node元数据回填，不使用模型生成的文件名或页码。
+
+`app.services.rag.evidence.EvidenceService`提供Python只读入口：`resolve(kb_id, chunk_id, doc_id=...)`核对当前Chunk与Block；`resolve_citation(citation)`或`resolve_answer(result)`进一步核对已有引用快照。需要已有PostgreSQL及ACTIVE库/READY文档，不需要模型、云密钥、Redis或Worker；不新增HTTP接口/迁移/配置。问答不会隐式调用反查，旧引用已失效或来源不完整会报安全错误，不自动重建或重新收费。
+
+PDF沿用物理页与点数bbox，图片为第1页/像素bbox，Office沿用逻辑页且bbox为空；来源一致不证明答案忠实度。详细契约、反查用法及人工核验见[Citation / Evidence](docs/CITATION_EVIDENCE.md)。
+
 ### 预置知识库导入
 
 已有 OHR-Bench、OmniDocBench 和 OCB 原件时，可按 [三数据集联合冒烟](docs/PRESET_IMPORT.md#三数据集最短操作新运行) 在独立测试库抽取约14份（5 PDF、3图像、三类Office各2份），完成上传→READY→Dense及分数据集报告。直接使用已下载 OCB，不要求补齐缺失43份、许可Excel或手工SQL导出；默认dry-run，真实处理前须用户确认全部所选文件云外传及费用。OCB断言人工核验、Omni GT不当QA，不能代替正式多格式验收或宣称问答准确率。

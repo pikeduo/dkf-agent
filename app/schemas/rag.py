@@ -1,18 +1,14 @@
-"""项目自有回答与最小引用契约，不向调用方泄漏 LlamaIndex 类型。"""
+"""项目自有回答与本地引用契约，不向调用方泄漏 LlamaIndex 类型。"""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, model_validator
 
-from app.schemas.retrieval import RetrievalResult
+# 保留原导入路径兼容性；正式Citation契约与LlamaIndex、LLM输出独立。
+from app.schemas.evidence import Citation
 
 INSUFFICIENT_ANSWER = "当前检索到的证据不足以回答该问题。"
-
-
-class Citation(RetrievalResult):
-    """引用继承完整业务证据及分数；页码/章节只取原 Node，不由 LLM 生成。"""
-
-    citation_id: int = Field(ge=1, le=5, strict=True)
 
 
 class RAGAnswer(BaseModel):
@@ -26,14 +22,16 @@ class RAGAnswer(BaseModel):
 
     @model_validator(mode="after")
     def consistent_answer(self):
-        """约束状态、引用序号与唯一身份；不足回答使用固定安全文本且不捏造引用。"""
+        """约束状态/唯一身份及正文引用标记；不足用固定文本，未知或未使用引用拒绝。"""
         if self.insufficient_evidence:
             if self.status != "insufficient_evidence" or self.citations or self.answer != INSUFFICIENT_ANSWER:
                 raise ValueError("证据不足状态无效")
         elif (self.status != "success" or not self.answer.strip() or not self.citations
               or [item.citation_id for item in self.citations] != list(range(1, len(self.citations) + 1))
               or len({item.chunk_id for item in self.citations}) != len(self.citations)
-              or len({item.kb_id for item in self.citations}) != 1):
+              or len({item.kb_id for item in self.citations}) != 1
+              or set(re.findall(r"\[\s*\d+(?:\s*[,\-]\s*\d+)*\s*\]", self.answer))
+              != {f"[{item.citation_id}]" for item in self.citations}):
             raise ValueError("回答引用状态无效")
         return self
 

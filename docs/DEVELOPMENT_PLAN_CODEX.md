@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段22 DeepSeek RAG代码已实现、待人工验收；阶段21模型/排序收益及阶段16等此前待验收事项保留。** 不自动进入23/24。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段23 Citation / Evidence代码已实现、待人工验收；阶段22真实问答/误拒答效果、阶段21排序收益及阶段16等此前待验收事项保留。** 不自动进入24。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮只组合已有检索/重排并接入唯一DeepSeekService、LlamaIndex合成与项目回答Schema；不重做业务链路，不触碰素材、加载模型、执行测试/迁移/真实查询或启动服务。\
+> 本轮只完善框架无关引用与显式只读来源反查，不改阶段22Prompt/不足判断、不自动查询数据库或调用云端，不开发阶段24接口。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2917,6 +2917,8 @@ Prompt 原则：
 ---
 
 # 29. 阶段 23：Citation / Evidence
+
+当前实现：项目Citation保持阶段22字段与旧导入路径兼容；原Node/项目DTO可互转，编号由本地绑定。EvidenceService显式反查ACTIVE/READY范围内当前Chunk→Block→Document，核对解析检查点、原文Hash、Unicode字符区间、页码/坐标及旧引用快照；整批只读快照、失败不补源/重解析。来源校验不等于语义忠实度或权限校验，不隐式改变现有问答流程。用例仅编写，真实反查与忠实度待用户验收；操作见[Citation / Evidence](CITATION_EVIDENCE.md)。
 
 ## 目标
 实现可解释来源链。
