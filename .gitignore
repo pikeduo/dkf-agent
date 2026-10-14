@@ -42,6 +42,7 @@ docs/*
 !docs/BM25_RETRIEVAL.md
 !docs/HYBRID_RETRIEVAL.md
 !docs/RERANKER.md
+!docs/DEEPSEEK_RAG.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*

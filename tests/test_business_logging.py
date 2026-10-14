@@ -57,6 +57,7 @@ def records(stream):
     ("api", "API"), ("worker", "Worker"), ("dense-cli", "Dense CLI"),
     ("bm25-cli", "BM25 CLI"), ("hybrid-cli", "Hybrid CLI"),
     ("rerank-cli", "Reranker CLI"), ("retrieval-acceptance", "检索验收"),
+    ("rag-cli", "RAG CLI"),
     ("preset-cli", "Preset CLI"),
 ])
 def test_registered_process_roles_keep_exact_labels_and_real_pid(role, label):

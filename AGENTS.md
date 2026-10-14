@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**21：BGE Reranker。已实现项目共享本地服务、同步Node Postprocessor与独立分数/完整证据互转，待人工验收；真实模型、排序收益及阶段19/20等此前待验收事项保留，不自动进入22。**
+当前阶段：**22：DeepSeek RAG。已实现项目唯一LLM服务、LlamaIndex Query Engine/合成Adapter及项目回答/最小引用契约；用例仅编写，真实问答待人工验收。阶段21模型/排序收益及阶段16等此前待验收事项保留，不自动进入23/24。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -47,11 +47,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 19 | 已实现本地BM25、kb/doc范围、当前READY快照、派生缓存重建和原始证据保留；用例未运行，待验收 |
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
-| 22 及后续 | 未开展，等待用户确认 |
+| 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
+| 23 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮仅维护业务日志角色、入口及规范，执行用户明确授权的日志单测/必要相邻回归；不运行模型或真实业务验收，不改变阶段21及此前待验收结论，不进入22。
+- 本轮只实现阶段22及必要配置、测试用例/说明；不调用真实API、运行模型或执行测试，不改HTTP协议/数据库/已有处理语义，不自动进入23/24。上一轮日志测试授权仅限当轮，不延续。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -61,7 +62,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 ## 2. 技术与本地环境约束
 
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
-- 后续按计划使用 DeepSeek、BAAI/bge-reranker-v2-m3、SymPy、LangChain、LangGraph；Docker Compose 仅为未来整体部署方案。
+- 已接入DeepSeek官方API的项目单一LLM服务及本地BAAI/bge-reranker-v2-m3；后续按计划使用SymPy、LangChain、LangGraph；Docker Compose仅为未来整体部署方案。
 - BGE-M3 Dense 使用已声明的 sentence-transformers；项目依赖可按第 0 节安装，只从用户部署的本地官方权重加载，CUDA/PyTorch CPU-CUDA 版本替换及模型准备仍由用户执行。
 - BGE Reranker使用已声明Transformers的单标签分类模型，统一由项目RerankerService管理；Adapter不另载模型，不要求FlagEmbedding或框架模型集成。本地Safetensors权重与部署仍由用户准备。
 - LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，core 依赖可按第 0 节安装，首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
@@ -224,6 +225,14 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 只评分原Query+完整原node.text，不加metadata/指令、不重Embedding/Parse/读库。真实成对token超限、坏输入/输出/身份变化或推理失败全批拒绝，不截断证据、不静默返回原排序；空候选不加载模型。
 - 默认Top5，原始有限logit降序、同分UUID稳定排序；Node当前score为rerank_score，DTO保留原retrieval_score及fusion_score。来源仅运行时rerank字段，原ID/正文/页/章节/source_spans不变且深复制；重复重排/重复Chunk/跨库候选拒绝。效果提升需同批候选、真实QA/证据人工对照，不以Stub排序或Top5存在宣称验收通过。
 
+### DeepSeek RAG / Response Synthesis
+
+- DeepSeek HTTP只在项目`DeepSeekService`；LlamaIndex LLM Adapter只委托它，Query Engine复用既有同范围Hybrid/Reranker，不新建客户端、默认LLM、文档Embedding或业务存储。线上同步，至多5条最终Evidence一次合成，无Query Rewrite、Refine、多次收费调用或流式半成品。
+- Python问答默认拒绝云调用，调用方明确`allow_cloud=True`前确认问题/最终正文外传权限及费用；模型/Key/预算由本地配置管理。官方HTTPS、TLS、直连/无跳转，超时/HTTP错误/限流不自动重试。
+- 固定审查Prompt把问题与证据视为数据；仅最终正文与稳定Chunk ID上云，不发送其他候选、私有路径或模型身份。完整上下文超字符预算失败，不截断证据；字符数不冒充供应商token数。
+- LLM返回逐事实及最终ID白名单；引用原文/来源/页码/章节/source_spans/三类分数只从原Node回填。空证据或明确不足才返回insufficient_evidence；检索/模型/HTTP/非法引用/截断失败必须报安全异常，不伪装成功或不足。引用合法仅证明来源存在，忠实度/数字事实及Prompt注入抗性仍须真实人工验收。
+- 不走框架默认含正文的Query/LLM/Synthesis callback；不启用全局Tracing，日志只记阶段/范围/数量/状态/耗时/固定错误码。CLI使用集中注册`rag-cli`；不记录问题、Prompt、答案、证据正文、Key或上游原文。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -242,6 +251,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | BM25词项、READY快照、派生缓存及人工验收 | [BM25 Retriever](docs/BM25_RETRIEVAL.md) |
 | 两路组合、RRF来源、冲突边界及人工验收 | [Hybrid Retrieval](docs/HYBRID_RETRIEVAL.md) |
 | 本地重排、分数/证据、部署及质量验收 | [BGE Reranker](docs/RERANKER.md) |
+| 问答编排、LLM边界、最终引用与人工验收 | [DeepSeek RAG](docs/DEEPSEEK_RAG.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid Python Retriever及本地BGE重排，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid、本地BGE重排及DeepSeek Python问答入口，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -48,6 +48,13 @@ RERANKER_DEVICE=cuda:0
 RERANKER_BATCH_SIZE=2
 RERANKER_MAX_LENGTH=8192
 RERANKER_USE_FP16=true
+# 仅问答需要；真实 Key 只填本地 .env。
+DEEPSEEK_API_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_MAX_TOKENS=2048
+DEEPSEEK_TIMEOUT_SECONDS=60
+RAG_MAX_CONTEXT_CHARS=60000
+DEEPSEEK_API_KEY=
 
 # OCR / 外部服务：仅云解析需要 Token
 MINERU_API_BASE_URL=https://mineru.net/api/v4
@@ -483,6 +490,16 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 `/models/`已受Git忽略保护。只读本地模型、禁止远程代码及自动CPU回退；模型缺失明确错误，构造Adapter不加载。默认cuda:0、batch=2、max_length=8192、FP16；长度是Query+候选含特殊token的总上限，超限失败，不截断正文。RTX4060 8GB先从batch=1～2尝试，停止同卡GPU Worker；在线Query的BGE-M3和Reranker是两种不同模型，会同时占显存，不保证长输入可用。不足时由用户明确配置`RERANKER_DEVICE=cpu`使用FP32（较慢），不擅自降低正文长度或升级GPU环境。
 
 显式导入`app.services.rag.llama_index.reranker_adapter.BGERerankerAdapter`，用`BGERerankerAdapter(top_n=5).postprocess_nodes(candidates, query_str=query)`同步重排Hybrid候选。NodeWithScore.score为原始rerank logit，不是概率；Node/DTO分别保留原retrieval_score、fusion_score、rerank_score，原ID/正文/页码/章节不变。默认getter进程内共享，不跨进程共享模型；修改模型配置后重启使用它的Query进程。用例、部署核验及同批候选排序对照见[重排验收说明](docs/RERANKER.md)，尚未证明排序质量提升。
+
+### DeepSeek Python 问答
+
+`app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)` 复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。引用来源/页码由原Chunk回填，不采用模型生成的来源；无证据明确返回不足。尚无HTTP问答接口，不新增迁移或Worker。
+
+用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。仅允许官方HTTPS端点（也允许`https://api.deepseek.com/v1`），直连、不读环境代理、不跟随重定向。
+
+**显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传且接受DeepSeek费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
+
+最小使用、Mock/真实问题验收及错误说明见[DeepSeek RAG](docs/DEEPSEEK_RAG.md)。结构合法和引用存在不证明答案忠实或问答准确率已通过，必须对照真实证据人工核验。
 
 ### 预置知识库导入
 

@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     reranker_batch_size: int = Field(default=2, ge=1, le=32)
     reranker_max_length: int = Field(default=8192, ge=8, le=8192)
     reranker_use_fp16: bool = True
+    # RAG 仅显式调用时发送问题与最终证据；密钥遮盖，不影响旧接口启动。
+    deepseek_api_key: SecretStr = SecretStr("")
+    deepseek_api_base_url: Literal["https://api.deepseek.com", "https://api.deepseek.com/v1"] = "https://api.deepseek.com"
+    deepseek_model: str = Field(default="deepseek-flash", pattern=r"^[a-zA-Z0-9._-]{1,64}$")
+    deepseek_max_tokens: int = Field(default=2048, ge=128, le=8192)
+    deepseek_timeout_seconds: int = Field(default=60, ge=1, le=180)
+    rag_max_context_chars: int = Field(default=60000, ge=1024, le=100000)
     embeddings_dir: Path = Path("data/embeddings")
     upload_dir: Path = Path("data/uploads")
     max_upload_size_mb: int = Field(default=50, gt=0)
