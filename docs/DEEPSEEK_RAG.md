@@ -32,7 +32,11 @@ RAG_MAX_CONTEXT_CHARS=60000
 DEEPSEEK_API_KEY=
 ```
 
-复用已声明的httpx和llama-index-core，不安装全量LlamaIndex/额外LLM集成；按[README](../README.md)准备已有模型和core/NLP缓存。官方接口及模型能力以[DeepSeek文档](https://api-docs.deepseek.com/api/create-chat-completion/)和账号权限为准；默认非thinking/temperature=0/JSON/非流式。可配置官方`/v1`兼容端点，不允许任意主机拿到密钥；直连、TLS校验、不读代理、不跟随跳转。
+复用已声明的httpx和llama-index-core，不安装全量LlamaIndex/额外LLM集成；按[README](../README.md)准备已有模型和core/NLP缓存。官方接口及模型能力以[DeepSeek文档](https://api-docs.deepseek.com/api/create-chat-completion/)和账号权限为准；默认非thinking/temperature=0/JSON/非流式。`DEEPSEEK_PROVIDER=official`仅接受官方`https://api.deepseek.com`或`https://api.deepseek.com/v1`，保持原有TLS、直连、无代理、无跳转边界。
+
+Sub2API切换：在本地`.env`**注释保留**旧的官方`DEEPSEEK_PROVIDER`、`DEEPSEEK_API_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_API_KEY`行；另写启用的`DEEPSEEK_PROVIDER=sub2api`、`DEEPSEEK_API_BASE_URL=https://你的Sub2API域名/v1`、`DEEPSEEK_MODEL=DeepSeek-V4.1-Flash`、`DEEPSEEK_API_KEY=本地网关密钥`和`DEEPSEEK_ALLOW_INSECURE_HTTP=false`。切回官方时将两组行反向注释，保留单组活动键值并重启Query进程。部署者必须自行确认网关地址确实受信任。
+
+此前人工已在独立PowerShell最小请求中验证自建HTTP网关的`DeepSeek-V4.1-Flash`返回`OK`，但**仅验证普通Chat**，未验证现有RAG要求的`thinking`及JSON模式、引用输出。公网HTTP会明文传输密钥、问题与原始最终证据，正式部署必须改为HTTPS；如果部署者在临时测试环境仍坚持使用上述HTTP地址，必须明确设置`DEEPSEEK_ALLOW_INSECURE_HTTP=true`，并使用可撤销、低额度的测试密钥，测试后轮换。服务不会自动把HTTP升级为HTTPS，也不会记录密钥/正文或自动重试收费请求。
 
 `allow_cloud=True`是本次调用的明确外传/费用确认，不是版权证明、鉴权或通用用户权限系统。未确认时在检索/模型前拒绝；用户必须确认问题和最终正文可发给DeepSeek。已有MinerU上传许可不自动覆盖DeepSeek。正式对外用户授权/鉴权留到后续API阶段。
 

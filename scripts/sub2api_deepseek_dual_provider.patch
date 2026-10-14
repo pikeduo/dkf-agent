@@ -1,0 +1,164 @@
+--- a/app/core/config.py
++++ b/app/core/config.py
+@@ -38,5 +38,8 @@
+-    # RAG 仅显式调用时发送问题与最终证据；密钥遮盖，不影响旧接口启动。
++    # RAG 仅显式调用时发送问题与最终证据；保持官方与Sub2API两种模式的显式边界。
+     deepseek_api_key: SecretStr = SecretStr("")
+-    deepseek_api_base_url: Literal["https://api.deepseek.com", "https://api.deepseek.com/v1"] = "https://api.deepseek.com"
++    deepseek_provider: Literal["official", "sub2api"] = "official"
++    deepseek_api_base_url: str = "https://api.deepseek.com"
++    # 仅Sub2API临时测试可显式允许HTTP；公网HTTP会明文传输密钥及证据。
++    deepseek_allow_insecure_http: bool = False
+     deepseek_model: str = Field(default="deepseek-flash", pattern=r"^[a-zA-Z0-9._-]{1,64}$")
+     deepseek_max_tokens: int = Field(default=2048, ge=128, le=8192)
+--- a/app/services/deepseek.py
++++ b/app/services/deepseek.py
+@@ -89,5 +89,32 @@
+-            # 即使注入 model_construct 的配置，也不能向任意地址发送密钥。
++            # 按显式Provider验证可信网关；官方模式继续严格限制官方HTTPS域名。
+             base = self._settings.deepseek_api_base_url
+-            if base not in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
++            provider = self._settings.deepseek_provider
++            if provider == "official":
++                if base not in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
++                    raise DeepSeekError("DEEPSEEK_CONFIG")
++            elif provider == "sub2api":
++                from urllib.parse import urlsplit
++
++                try:
++                    endpoint = urlsplit(base)
++                    # 仅接受明确的/v1根路径；禁止URL凭据、参数及可变路径。
++                    valid = (
++                        endpoint.scheme in {"http", "https"}
++                        and endpoint.hostname is not None
++                        and endpoint.username is None
++                        and endpoint.password is None
++                        and endpoint.query == ""
++                        and endpoint.fragment == ""
++                        and endpoint.path == "/v1"
++                        and base == f"{endpoint.scheme}://{endpoint.netloc}/v1"
++                        and endpoint.port != 0
++                    )
++                except (TypeError, ValueError, AttributeError):
++                    valid = False
++                if not valid or (
++                    endpoint.scheme == "http" and not self._settings.deepseek_allow_insecure_http
++                ):
++                    raise DeepSeekError("DEEPSEEK_CONFIG")
++            else:
+                 raise DeepSeekError("DEEPSEEK_CONFIG")
+             if (not isinstance(system_prompt, str) or not isinstance(user_content, str)
+--- a/.env.example
++++ b/.env.example
+@@ -36,5 +36,13 @@
+-# DeepSeek 问答：仅向官方 HTTPS 端点发送最终证据；不自动重试收费请求。
++# DeepSeek 问答：默认官方HTTPS；可切换到用户明确配置的Sub2API。
++DEEPSEEK_PROVIDER=official
+ DEEPSEEK_API_BASE_URL=https://api.deepseek.com
++DEEPSEEK_ALLOW_INSECURE_HTTP=false
+ DEEPSEEK_MODEL=deepseek-flash
++# 自建Sub2API示例（启用时注释上方对应行，绝不提交真实密钥）：
++# DEEPSEEK_PROVIDER=sub2api
++# DEEPSEEK_API_BASE_URL=https://your-sub2api.example/v1
++# DEEPSEEK_ALLOW_INSECURE_HTTP=false
++# DEEPSEEK_MODEL=DeepSeek-V4.1-Flash
++# 若仅有公网HTTP，必须由部署者明确设置ALLOW_INSECURE_HTTP=true，且密钥/证据会明文传输。
+ DEEPSEEK_MAX_TOKENS=8192
+ DEEPSEEK_TIMEOUT_SECONDS=180
+--- a/tests/test_deepseek_service.py
++++ b/tests/test_deepseek_service.py
+@@ -30,3 +30,72 @@
++def test_sub2api_gateway_opt_in_does_not_change_official_request():
++    """模拟Sub2API模型与HTTP显式授权；保留官方请求和原JSON约束。"""
++    requests = []
++
++    def respond(request):
++        """在内存中返回合法Chat响应，不访问真实网关。"""
++        requests.append(request)
++        return httpx.Response(200, json=envelope())
++
++    remote = settings(
++        deepseek_provider="sub2api",
++        deepseek_api_base_url="http://sub2api.example:8080/v1",
++        deepseek_allow_insecure_http=True,
++        deepseek_model="DeepSeek-V4.1-Flash",
++    )
++    value = DeepSeekService(remote, transport=httpx.MockTransport(respond)).complete(
++        "只返回JSON", "PRIVATE_QUESTION"
++    )
++    assert value == envelope()["choices"][0]["message"]["content"]
++    assert len(requests) == 1
++    assert str(requests[0].url) == "http://sub2api.example:8080/v1/chat/completions"
++    data = json.loads(requests[0].content)
++    assert data["model"] == "DeepSeek-V4.1-Flash"
++    assert data["response_format"] == {"type": "json_object"}
++    assert data["thinking"] == {"type": "disabled"}
++
++    requests.clear()
++    official = settings()
++    DeepSeekService(official, transport=httpx.MockTransport(respond)).complete(
++        "只返回JSON", "PRIVATE_QUESTION"
++    )
++    assert len(requests) == 1
++    assert str(requests[0].url) == "https://api.deepseek.com/chat/completions"
++
++
++@pytest.mark.parametrize(
++    "provider,url,allow_http",
++    [
++        ("official", "http://sub2api.example:8080/v1", True),
++        ("official", "https://another.example/v1", False),
++        ("sub2api", "http://sub2api.example:8080/v1", False),
++        ("sub2api", "https://username:pass@example.com/v1", False),
++        ("sub2api", "https://another.example/v1/extra", False),
++        ("sub2api", "https://another.example/v1?token=secret", False),
++        ("sub2api", "https://another.example/v1#frag", False),
++        ("sub2api", "ftp://another.example/v1", False),
++    ],
++)
++def test_invalid_gateway_endpoint_fails_without_network(provider, url, allow_http):
++    """官方域名白名单及网关HTTP/URL校验不允许越过密钥边界。"""
++    calls = []
++
++    def respond(request):
++        """若校验失效则记录意外请求，禁止实际联网。"""
++        calls.append(request)
++        return httpx.Response(200, json=envelope())
++
++    s = settings(
++        deepseek_provider=provider,
++        deepseek_api_base_url=url,
++        deepseek_allow_insecure_http=allow_http,
++    )
++    with pytest.raises(DeepSeekError, match="DEEPSEEK_CONFIG"):
++        DeepSeekService(s, transport=httpx.MockTransport(respond)).complete(
++            "只返回JSON", "PRIVATE_QUESTION"
++        )
++    assert calls == []
++
++
+ def test_single_official_request_and_bounded_non_thinking_json_mode(monkeypatch):
+     """一个调用只发一个官方 POST，显式关闭思考/流式，TLS/直连/跳转限制不放宽。"""
+     requests, clients = [], []
+--- a/README.md
++++ b/README.md
+@@ -496,5 +496,5 @@
+ `app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)` 复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。引用来源/页码由原Chunk回填，不采用模型生成的来源；无证据明确返回不足。尚无HTTP问答接口，不新增迁移或Worker。
+ 
+-用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。仅允许官方HTTPS端点（也允许`https://api.deepseek.com/v1`），直连、不读环境代理、不跟随重定向。
++用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`DEEPSEEK_PROVIDER=official`、`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。官方模式仅允许官方HTTPS端点（含`/v1`）；选择`DEEPSEEK_PROVIDER=sub2api`后可配置明确的HTTPS`/v1`网关和其真实模型ID，公网HTTP仅在`DEEPSEEK_ALLOW_INSECURE_HTTP=true`显式开启，**会明文传输密钥和最终证据，禁止正式部署使用**。均不读环境代理、不跟随重定向。切换配置需要重启问答进程；Sub2API需另行真实确认thinking/JSON模式兼容性。
+ 
+ **显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传且接受DeepSeek费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
+--- a/docs/DEEPSEEK_RAG.md
++++ b/docs/DEEPSEEK_RAG.md
+@@ -33,5 +33,9 @@
+ ```
+ 
+-复用已声明的httpx和llama-index-core，不安装全量LlamaIndex/额外LLM集成；按[README](../README.md)准备已有模型和core/NLP缓存。官方接口及模型能力以[DeepSeek文档](https://api-docs.deepseek.com/api/create-chat-completion/)和账号权限为准；默认非thinking/temperature=0/JSON/非流式。可配置官方`/v1`兼容端点，不允许任意主机拿到密钥；直连、TLS校验、不读代理、不跟随跳转。
++复用已声明的httpx和llama-index-core，不安装全量LlamaIndex/额外LLM集成；按[README](../README.md)准备已有模型和core/NLP缓存。官方接口及模型能力以[DeepSeek文档](https://api-docs.deepseek.com/api/create-chat-completion/)和账号权限为准；默认非thinking/temperature=0/JSON/非流式。`DEEPSEEK_PROVIDER=official`仅接受官方`https://api.deepseek.com`或`https://api.deepseek.com/v1`，保持原有TLS、直连、无代理、无跳转边界。
++
++Sub2API切换：在本地`.env`**注释保留**旧的官方`DEEPSEEK_PROVIDER`、`DEEPSEEK_API_BASE_URL`、`DEEPSEEK_MODEL`、`DEEPSEEK_API_KEY`行；另写启用的`DEEPSEEK_PROVIDER=sub2api`、`DEEPSEEK_API_BASE_URL=https://你的Sub2API域名/v1`、`DEEPSEEK_MODEL=DeepSeek-V4.1-Flash`、`DEEPSEEK_API_KEY=本地网关密钥`和`DEEPSEEK_ALLOW_INSECURE_HTTP=false`。切回官方时将两组行反向注释，保留单组活动键值并重启Query进程。部署者必须自行确认网关地址确实受信任。
++
++此前人工已在独立PowerShell最小请求中验证自建HTTP网关的`DeepSeek-V4.1-Flash`返回`OK`，但**仅验证普通Chat**，未验证现有RAG要求的`thinking`及JSON模式、引用输出。公网HTTP会明文传输密钥、问题与原始最终证据，正式部署必须改为HTTPS；如果部署者在临时测试环境仍坚持使用上述HTTP地址，必须明确设置`DEEPSEEK_ALLOW_INSECURE_HTTP=true`，并使用可撤销、低额度的测试密钥，测试后轮换。服务不会自动把HTTP升级为HTTPS，也不会记录密钥/正文或自动重试收费请求。
+ 
+ `allow_cloud=True`是本次调用的明确外传/费用确认，不是版权证明、鉴权或通用用户权限系统。未确认时在检索/模型前拒绝；用户必须确认问题和最终正文可发给DeepSeek。已有MinerU上传许可不自动覆盖DeepSeek。正式对外用户授权/鉴权留到后续API阶段。

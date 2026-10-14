@@ -35,9 +35,12 @@ class Settings(BaseSettings):
     reranker_batch_size: int = Field(default=2, ge=1, le=32)
     reranker_max_length: int = Field(default=8192, ge=8, le=8192)
     reranker_use_fp16: bool = True
-    # RAG 仅显式调用时发送问题与最终证据；密钥遮盖，不影响旧接口启动。
+    # RAG 仅显式调用时发送问题与最终证据；保持官方与Sub2API两种模式的显式边界。
     deepseek_api_key: SecretStr = SecretStr("")
-    deepseek_api_base_url: Literal["https://api.deepseek.com", "https://api.deepseek.com/v1"] = "https://api.deepseek.com"
+    deepseek_provider: Literal["official", "sub2api"] = "official"
+    deepseek_api_base_url: str = "https://api.deepseek.com"
+    # 仅Sub2API临时测试可显式允许HTTP；公网HTTP会明文传输密钥及证据。
+    deepseek_allow_insecure_http: bool = False
     deepseek_model: str = Field(default="deepseek-flash", pattern=r"^[a-zA-Z0-9._-]{1,64}$")
     deepseek_max_tokens: int = Field(default=2048, ge=128, le=8192)
     deepseek_timeout_seconds: int = Field(default=60, ge=1, le=180)

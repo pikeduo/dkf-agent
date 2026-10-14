@@ -86,9 +86,36 @@ class DeepSeekService:
             key = self._settings.deepseek_api_key.get_secret_value()
             if not key.strip() or any(ord(char) < 33 or ord(char) > 126 for char in key):
                 raise DeepSeekError("DEEPSEEK_CONFIG")
-            # 即使注入 model_construct 的配置，也不能向任意地址发送密钥。
+            # 按显式Provider验证可信网关；官方模式继续严格限制官方HTTPS域名。
             base = self._settings.deepseek_api_base_url
-            if base not in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
+            provider = self._settings.deepseek_provider
+            if provider == "official":
+                if base not in {"https://api.deepseek.com", "https://api.deepseek.com/v1"}:
+                    raise DeepSeekError("DEEPSEEK_CONFIG")
+            elif provider == "sub2api":
+                from urllib.parse import urlsplit
+
+                try:
+                    endpoint = urlsplit(base)
+                    # 仅接受明确的/v1根路径；禁止URL凭据、参数及可变路径。
+                    valid = (
+                        endpoint.scheme in {"http", "https"}
+                        and endpoint.hostname is not None
+                        and endpoint.username is None
+                        and endpoint.password is None
+                        and endpoint.query == ""
+                        and endpoint.fragment == ""
+                        and endpoint.path == "/v1"
+                        and base == f"{endpoint.scheme}://{endpoint.netloc}/v1"
+                        and endpoint.port != 0
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    valid = False
+                if not valid or (
+                    endpoint.scheme == "http" and not self._settings.deepseek_allow_insecure_http
+                ):
+                    raise DeepSeekError("DEEPSEEK_CONFIG")
+            else:
                 raise DeepSeekError("DEEPSEEK_CONFIG")
             if (not isinstance(system_prompt, str) or not isinstance(user_content, str)
                     or not system_prompt.strip() or not user_content.strip()

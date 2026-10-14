@@ -27,6 +27,75 @@ def envelope(content='{"insufficient_evidence":true,"claims":[]}', reason="stop"
         "role": "assistant", "content": content, **message}}]}
 
 
+def test_sub2api_gateway_opt_in_does_not_change_official_request():
+    """模拟Sub2API模型与HTTP显式授权；保留官方请求和原JSON约束。"""
+    requests = []
+
+    def respond(request):
+        """在内存中返回合法Chat响应，不访问真实网关。"""
+        requests.append(request)
+        return httpx.Response(200, json=envelope())
+
+    remote = settings(
+        deepseek_provider="sub2api",
+        deepseek_api_base_url="http://sub2api.example:8080/v1",
+        deepseek_allow_insecure_http=True,
+        deepseek_model="DeepSeek-V4.1-Flash",
+    )
+    value = DeepSeekService(remote, transport=httpx.MockTransport(respond)).complete(
+        "只返回JSON", "PRIVATE_QUESTION"
+    )
+    assert value == envelope()["choices"][0]["message"]["content"]
+    assert len(requests) == 1
+    assert str(requests[0].url) == "http://sub2api.example:8080/v1/chat/completions"
+    data = json.loads(requests[0].content)
+    assert data["model"] == "DeepSeek-V4.1-Flash"
+    assert data["response_format"] == {"type": "json_object"}
+    assert data["thinking"] == {"type": "disabled"}
+
+    requests.clear()
+    official = settings()
+    DeepSeekService(official, transport=httpx.MockTransport(respond)).complete(
+        "只返回JSON", "PRIVATE_QUESTION"
+    )
+    assert len(requests) == 1
+    assert str(requests[0].url) == "https://api.deepseek.com/chat/completions"
+
+
+@pytest.mark.parametrize(
+    "provider,url,allow_http",
+    [
+        ("official", "http://sub2api.example:8080/v1", True),
+        ("official", "https://another.example/v1", False),
+        ("sub2api", "http://sub2api.example:8080/v1", False),
+        ("sub2api", "https://username:pass@example.com/v1", False),
+        ("sub2api", "https://another.example/v1/extra", False),
+        ("sub2api", "https://another.example/v1?token=secret", False),
+        ("sub2api", "https://another.example/v1#frag", False),
+        ("sub2api", "ftp://another.example/v1", False),
+    ],
+)
+def test_invalid_gateway_endpoint_fails_without_network(provider, url, allow_http):
+    """官方域名白名单及网关HTTP/URL校验不允许越过密钥边界。"""
+    calls = []
+
+    def respond(request):
+        """若校验失效则记录意外请求，禁止实际联网。"""
+        calls.append(request)
+        return httpx.Response(200, json=envelope())
+
+    s = settings(
+        deepseek_provider=provider,
+        deepseek_api_base_url=url,
+        deepseek_allow_insecure_http=allow_http,
+    )
+    with pytest.raises(DeepSeekError, match="DEEPSEEK_CONFIG"):
+        DeepSeekService(s, transport=httpx.MockTransport(respond)).complete(
+            "只返回JSON", "PRIVATE_QUESTION"
+        )
+    assert calls == []
+
+
 def test_single_official_request_and_bounded_non_thinking_json_mode(monkeypatch):
     """一个调用只发一个官方 POST，显式关闭思考/流式，TLS/直连/跳转限制不放宽。"""
     requests, clients = [], []

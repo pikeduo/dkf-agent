@@ -9,11 +9,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import operators, visitors
+from sqlalchemy.sql.elements import BinaryExpression, BindParameter
 
 from app.core import business_logging as logs
-from app.models import Document, DocumentBlock, DocumentChunk
+from app.models import Document, DocumentBlock, DocumentChunk, KnowledgeBase
 from app.schemas.evidence import Citation, SourceSpan
 from app.schemas.rag import Citation as CompatibleCitation, RAGAnswer
 from app.schemas.retrieval import RetrievalResult
@@ -50,6 +53,19 @@ def result_for(chunk, document):
         page_end=chunk.page_end, section=chunk.section, metadata=copy.deepcopy(chunk.chunk_metadata), retrieval_score=0.5)
 
 
+def bound_filter_value(statement, column, *, operation=operators.eq, required=True):
+    """按真实字段/运算符读取绑定值，不依赖联表列别名影响的自动参数编号。"""
+    target = column.__clause_element__()
+    values = [expression.right.value for expression in visitors.iterate(statement)
+              if isinstance(expression, BinaryExpression) and expression.operator is operation
+              and isinstance(expression.right, BindParameter) and expression.left.shares_lineage(target)]
+    if not values and not required:
+        return None
+    # 缺失或重复过滤应让Mock报错，不能返回全范围数据来掩盖生产查询缺陷。
+    assert len(values) == 1, "Mock查询缺失或重复指定字段的绑定过滤"
+    return values[0]
+
+
 class SessionStub:
     """模拟独立Session，仅记录只读SQL设置与SELECT，不执行数据库操作。"""
 
@@ -78,7 +94,7 @@ class SessionStub:
         self.options = execution_options
 
     def execute(self, statement):
-        """按范围参数返回内存行；异常/越界用例可故意返回不合格记录。"""
+        """按绑定字段返回内存行并检查范围/状态，故障用例可注入越界行，不猜参数名。"""
         self.statements.append(statement)
         if not statement.is_select:
             self.rows = []
@@ -86,16 +102,24 @@ class SessionStub:
         if self.failure is not None:
             raise self.failure
         if statement.column_descriptions[0]["entity"] is DocumentChunk:
-            params = statement.compile().params
+            chunk_id = bound_filter_value(statement, DocumentChunk.chunk_id)
+            kb_id = bound_filter_value(statement, DocumentChunk.kb_id)
+            doc_id = bound_filter_value(statement, Document.doc_id, required=False)
+            assert bound_filter_value(statement, Document.kb_id) == kb_id
+            assert bound_filter_value(statement, KnowledgeBase.kb_id) == kb_id
+            assert bound_filter_value(statement, KnowledgeBase.status) == "ACTIVE"
+            status = bound_filter_value(statement, Document.status)
+            assert status == "READY"
             self.rows = (self.forced_rows if self.forced_rows is not None else [
                 (chunk, doc) for chunk, doc, _ in self.sources
-                if chunk.chunk_id == params["chunk_id_1"] and chunk.kb_id == params["kb_id_1"]
-                and doc.status == "READY" and ("doc_id_1" not in params or doc.doc_id == params["doc_id_1"])])
+                if chunk.chunk_id == chunk_id and chunk.kb_id == kb_id and doc.kb_id == kb_id
+                and doc.status == status and (doc_id is None or doc.doc_id == doc_id)])
         else:
-            params = statement.compile().params
-            ids = set(params["block_id_1"])
+            assert statement.column_descriptions[0]["entity"] is DocumentBlock, "Mock不接受未知SELECT"
+            doc_id = bound_filter_value(statement, DocumentBlock.doc_id)
+            ids = set(bound_filter_value(statement, DocumentBlock.block_id, operation=operators.in_op))
             self.rows = [block for _, _, blocks in self.sources for block in blocks
-                         if block.block_id in ids and block.doc_id == params["doc_id_1"]]
+                         if block.block_id in ids and block.doc_id == doc_id]
         return self
 
     def scalars(self):
@@ -170,9 +194,27 @@ def test_scope_status_and_minimal_columns_are_pushed_into_sql():
     assert all(word not in sql for word in ("UPDATE", "INSERT", "DELETE", "FOR UPDATE"))
 
 
+@pytest.mark.parametrize("use_table_labels", [False, True])
+def test_session_stub_reads_scope_independently_of_compiler_parameter_names(use_table_labels):
+    """直接检查Mock路由，列标签变更不影响绑定范围；异常不被业务安全包装掩盖。"""
+    source = source_fixture()
+    chunk, document, _ = source
+    session = SessionStub([source])
+    statement = tool.evidence_statement(chunk.kb_id, chunk.chunk_id, document.doc_id)
+    if use_table_labels:
+        statement = statement.set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+    assert session.execute(statement).all() == [(chunk, document)]
+    for kb_id, chunk_id, doc_id in ((uuid4(), chunk.chunk_id, document.doc_id),
+                                  (chunk.kb_id, uuid4(), document.doc_id),
+                                  (chunk.kb_id, chunk.chunk_id, uuid4())):
+        assert session.execute(tool.evidence_statement(kb_id, chunk_id, doc_id)).all() == []
+    document.status = "FAILED"
+    assert session.execute(statement).all() == []
+
+
 @pytest.mark.parametrize("change", ["page", "bbox", "hash", "text", "offset", "unknown_semantic", "missing_spans", "missing_block", "file_hash", "generation"])
 def test_corrupt_or_stale_sources_are_rejected_without_repair(change):
-    """错误来源/Hash/偏移/语义/代次必须失败，不能跳过问题来源或重新解析修复。"""
+    """按故障类型断言准确错误码，防止Mock内部错误冒充来源校验而意外通过。"""
     chunk, document, blocks = source_fixture()
     span = chunk.chunk_metadata["source_spans"][0]
     if change == "page":
@@ -199,7 +241,9 @@ def test_corrupt_or_stale_sources_are_rejected_without_repair(change):
     service, session = service_for((chunk, document, blocks))
     with pytest.raises(tool.EvidenceError) as error:
         service.resolve(chunk.kb_id, chunk.chunk_id)
-    assert error.value.code in {"EVIDENCE_SOURCE", "EVIDENCE_METADATA", "EVIDENCE_STALE"}
+    expected_code = ("EVIDENCE_METADATA" if change in {"unknown_semantic", "missing_spans"}
+                     else "EVIDENCE_STALE" if change in {"file_hash", "generation"} else "EVIDENCE_SOURCE")
+    assert error.value.code == expected_code
     assert "PRIVATE" not in str(error.value) and session.closed
 
 

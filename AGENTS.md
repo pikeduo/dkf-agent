@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**23：Citation / Evidence。已实现框架无关引用契约、Node互转及当前Chunk→Block→Document只读来源反查；用例仅编写，待人工验收。阶段22误拒答修正的真实效果、阶段21排序收益及阶段16等此前待验收事项保留，不自动进入24。**
+当前阶段：**23：Citation / Evidence。已实现框架无关引用契约、Node互转及当前Chunk→Block→Document只读来源反查；来源Mock兼容修正待用户复测，真实来源与忠实度待验收。阶段22误拒答修正的真实效果、阶段21排序收益及阶段16等此前待验收事项保留，不自动进入24。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -48,7 +48,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
 | 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
-| 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；用例未运行，真实来源与答案忠实度待验收 |
+| 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；Mock兼容修正待复测，真实来源与答案忠实度待验收 |
 | 24 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。

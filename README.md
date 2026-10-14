@@ -495,7 +495,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 `app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)` 复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。引用来源/页码由原Chunk回填，不采用模型生成的来源；无证据明确返回不足。尚无HTTP问答接口，不新增迁移或Worker。
 
-用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。仅允许官方HTTPS端点（也允许`https://api.deepseek.com/v1`），直连、不读环境代理、不跟随重定向。
+用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`DEEPSEEK_PROVIDER=official`、`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。官方模式仅允许官方HTTPS端点（含`/v1`）；选择`DEEPSEEK_PROVIDER=sub2api`后可配置明确的HTTPS`/v1`网关和其真实模型ID，公网HTTP仅在`DEEPSEEK_ALLOW_INSECURE_HTTP=true`显式开启，**会明文传输密钥和最终证据，禁止正式部署使用**。均不读环境代理、不跟随重定向。切换配置需要重启问答进程；Sub2API需另行真实确认thinking/JSON模式兼容性。
 
 **显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传且接受DeepSeek费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
 
