@@ -210,7 +210,7 @@ def test_failures_do_not_become_insufficiency_or_retry(context, error, code):
 
 @pytest.mark.parametrize("corruption", ["cross_kb", "duplicate", "nan", "framework"])
 def test_invalid_backend_evidence_is_rejected_not_partially_published(context, corruption):
-    """越界/重复/非有限metadata/非DKF对象全批拒绝，不泄露原始坏响应。"""
+    """坏证据全批拒绝并记录失败；非有限数不能转为空值后发布200或完成事件。"""
     if corruption == "cross_kb":
         context["items"][0].kb_id = uuid4()
     elif corruption == "duplicate":
@@ -222,6 +222,45 @@ def test_invalid_backend_evidence_is_rejected_not_partially_published(context, c
     response = request(context["app"], "/api/knowledge/search", payload=context["body"])
     assert response.status_code == 502 and response.json()["detail"]["code"] == "KNOWLEDGE_RESULT"
     assert "PRIVATE" not in response.text
+    output = context["logs"].getvalue()
+    assert "knowledge.failed" in output and "knowledge.finished" not in output and "PRIVATE" not in output
+
+
+@pytest.mark.parametrize("endpoint", ["search", "query"])
+@pytest.mark.parametrize("field", ["metadata", "embedding_identity"])
+@pytest.mark.parametrize("invalid_number", [float("nan"), float("inf"), float("-inf")], ids=["nan", "inf", "negative_inf"])
+def test_nested_nonfinite_values_fail_before_json_conversion(context, endpoint, field, invalid_number):
+    """两条路径的嵌套来源/身份数值须转换前拒绝，不伪装None、不重试或修改原证据。"""
+    item = context["items"][0] if endpoint == "search" else context["answer"].citations[0]
+    value = {"nested": [{"PRIVATE_KEY": invalid_number}]}
+    if field == "metadata":
+        item.metadata["invalid"] = value
+    else:
+        item.embedding_identity = value
+    response = request(context["app"], f"/api/knowledge/{endpoint}",
+                       payload=context["body"] | ({"allow_cloud": True} if endpoint == "query" else {}))
+    assert response.status_code == 502 and response.json()["detail"]["code"] == "KNOWLEDGE_RESULT"
+    calls = context["search_calls"] if endpoint == "search" else context["query_calls"]
+    assert len(calls) == 1
+    original = item.metadata["invalid"] if field == "metadata" else item.embedding_identity
+    assert original["nested"][0]["PRIVATE_KEY"] is invalid_number
+    output = context["logs"].getvalue()
+    assert "knowledge.failed" in output and "knowledge.finished" not in output
+    assert "PRIVATE" not in response.text and "PRIVATE" not in output
+
+
+@pytest.mark.parametrize("endpoint", ["search", "query"])
+def test_valid_unknown_values_and_non_numeric_nan_text_remain_unchanged(context, endpoint):
+    """合法None、有限数与字面文本NaN/Infinity保持原样，不做字符串乱码或数值猜测。"""
+    item = context["items"][0] if endpoint == "search" else context["answer"].citations[0]
+    values = {"nested": [None, 0.0, -1.25, 100, "NaN", "Infinity"]}
+    item.metadata["valid_values"] = copy.deepcopy(values)
+    response = request(context["app"], f"/api/knowledge/{endpoint}",
+                       payload=context["body"] | ({"allow_cloud": True} if endpoint == "query" else {}))
+    assert response.status_code == 200
+    items = response.json()["evidence"] if endpoint == "search" else response.json()["citations"]
+    assert items[0]["metadata"]["valid_values"] == values
+    assert item.metadata["valid_values"] == values
 
 
 def test_unknown_query_response_cannot_leak_framework_or_raw_content(context):

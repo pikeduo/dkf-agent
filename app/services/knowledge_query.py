@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 from time import perf_counter
 
 from pydantic import ValidationError
@@ -43,11 +44,26 @@ class KnowledgeServiceError(Exception):
         super().__init__(self.message)
 
 
+def _reject_nonfinite(value):
+    """递归检查原Python字段，拒绝非有限浮点数，避免JSON转换将其掩盖为None。"""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("响应含非有限数值")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _reject_nonfinite(key)
+            _reject_nonfinite(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_nonfinite(item)
+
+
 def _checked_response(value, schema):
-    """重新校验并复制项目Schema，拒绝框架对象/非有限数/坏Unicode，不输出无效正文。"""
+    """转换前检查原字段，再复制/校验DKF响应；非法数值不能被静默改为未知值。"""
     try:
         if not isinstance(value, schema):
             raise ValueError
+        # JSON模式可能把NaN/Infinity转换为null，必须先核对保留原数值的Python快照。
+        _reject_nonfinite(value.model_dump(mode="python"))
         raw = json.dumps(value.model_dump(mode="json"), ensure_ascii=False, allow_nan=False)
         raw.encode("utf-8", errors="strict")
         return schema.model_validate(json.loads(raw))

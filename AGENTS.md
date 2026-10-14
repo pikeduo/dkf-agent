@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**24：Knowledge Query API。已实现同范围/search本地Hybrid/Top5与/query显式云问答、自有Schema和安全错误/日志；新增用例仅编写，待人工验收。阶段23最终Mock修正、阶段22真实问答及阶段16等此前待验收事项保留，不自动进入25。**
+当前阶段：**24：Knowledge Query API。已实现同范围/search本地Hybrid/Top5与/query显式云问答、自有Schema和安全错误/日志；响应非有限数校验修正待用户复测，真实HTTP/云验收待完成。阶段23相关回归用户已报告148通过，真实来源及阶段22/16等此前待验收事项保留，不自动进入25。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -48,8 +48,8 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 20 | 已实现LlamaIndex组合Retriever、等权RRF、稳定Chunk去重、分支排名/分数与证据DTO保留；用例未运行，待验收 |
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
 | 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
-| 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；Mock兼容修正待复测，真实来源与答案忠实度待验收 |
-| 24 | 已实现POST /api/knowledge/search、/query，惰性模型边界、范围/参数校验和脱敏错误；未执行测试/真实请求，待验收 |
+| 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；相关回归用户已报告148通过，真实来源与忠实度待验收 |
+| 24 | 已实现POST /api/knowledge/search、/query、范围与脱敏错误；非有限数响应校验修正待用户复测，真实HTTP/云验收待完成 |
 | 25 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。

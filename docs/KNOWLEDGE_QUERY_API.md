@@ -1,6 +1,6 @@
 # Knowledge Query API：契约与人工验收
 
-阶段24代码已实现，Mock仅编写未执行，真实数据库/模型/HTTP/云响应待用户验收。不新增依赖、配置、数据库/迁移、Worker或模型，不进入阶段25；阶段23最终Mock修正及此前真实质量验收继续保留。
+阶段24代码已实现，用户运行联合Mock后发现非有限数响应校验问题，已修正但待用户复测；真实数据库/模型/HTTP/云响应待验收。不新增依赖、配置、数据库/迁移、Worker或模型，不进入阶段25；阶段23相关回归用户已报告148通过，真实来源及此前质量验收继续保留。
 
 ## 公开契约
 
@@ -18,6 +18,8 @@ API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型�
 原Retriever继续在SQL限定kb/可选doc/ACTIVE/READY/有效代次，Dense核对模型身份；接口再次检查输出范围，不删掉越界行冒充成功。合法UUID但不存在/跨库/不合格的文档不会扩大范围，可能没有匹配；空结果不证明库/文档存在，本阶段不新增存在性查询，用户可通过已有管理员详情确认。接口不重Parse/Chunk/文档Embedding/Index、不落库/迁移或创建第二套真相表。
 
 错误固定为`detail.code/message`，不含input/ctx、问题/正文、连接串/Key、私有路径、SQL或上游原文。仅本领域APIRoute清理输入/响应验证错误，不改变其他API的错误协议。
+
+响应在Pydantic JSON转换前递归检查原Python字段中的NaN/正负Infinity（含嵌套metadata及模型身份），任一非法值整批502/KNOWLEDGE_RESULT；不能利用JSON转换将其静默变为null后发布成功。合法None、有限数和字面文本“NaN/Infinity”保持原样，不猜测或修改原证据；新增Mock覆盖搜索/问答两条路径，由用户复测。
 
 | HTTP | 典型安全错误 |
 |---|---|
