@@ -612,7 +612,7 @@ def test_dataset_results_are_separate_and_omni_never_has_qa_metrics():
 
 @pytest.mark.parametrize("with_ocb", [False, True])
 def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch, with_ocb):
-    """旧 OHR/新双 QA 均复用唯一 Retriever；原问题及分组指标保留，不触发文档重编码。"""
+    """验收入口用注册的检索验收角色，仍复用唯一Retriever/原问题/分组指标，不重编码。"""
     from app.core import business_logging, config
     queries, artifacts, instances = [], [], []
     d = exported_document() | {"file_name": "metadata.pdf", "model_identity": {"stub": "identity"}, "parse_jobs": []}
@@ -665,7 +665,9 @@ def test_dense_uses_original_question_and_keeps_tasks_unchanged(monkeypatch, wit
         artifacts.append((kind, payload))
 
     def logging(*args, **kwargs):
-        """禁用真实写盘日志，只检查检索调用。"""
+        """禁用真实写盘，只在日志配置调用时核对验收角色；配置getter仍返回空Stub。"""
+        if kwargs:
+            assert kwargs == {"role": "retrieval-acceptance"}
         return None
 
     monkeypatch.setitem(sys.modules, "app.services.rag.llama_index.dense_retriever", SimpleNamespace(DenseRetriever=Retriever))

@@ -122,7 +122,7 @@ print([(str(result.chunk_id),str(result.doc_id),result.page_start,result.page_en
 python -c $denseReadCheck
 ```
 
-预期返回 ≤20 项、kb_id 一致、距离升序/score 降序且原始 Chunk ID/页码/章节/证据可反查，不出现新文档编码、任务或 SQL 写入。第一次 Query 可能花时间加载/校验权重，模型文件缺失或显存错误必须安全失败，不自动下载或 CPU 回退。CLI 的日志角色按现有格式器显示“未知进程”，由 event/pid/kb_id 关联，不冒充 API/Worker。
+预期返回 ≤20 项、kb_id 一致、距离升序/score 降序且原始 Chunk ID/页码/章节/证据可反查，不出现新文档编码、任务或 SQL 写入。第一次 Query 可能花时间加载/校验权重，模型文件缺失或显存错误必须安全失败，不自动下载或 CPU 回退。独立CLI角色dense-cli显示“Dense CLI”，联合冒烟检索步骤的retrieval-acceptance显示“检索验收”；由event/pid/kb_id关联，不冒充API/Worker，映射统一见[业务日志](BUSINESS_LOGGING.md#进程角色)。
 
 3. 通过已有 `/chunks` 或 pgAdmin 只读核对每个返回 chunk_id 的正文、文件名、页码/section/source_spans，查所属 Document=READY、index_config.result.model 与本地 Query 一致。使用确定具有证据的真实问题人工判断相关性，Top-K 的存在或同文件并不证明 Retrieval/RAG 准确率；不生成回答。
 

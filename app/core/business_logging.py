@@ -12,6 +12,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter, sleep
+from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from app.core.config import PROJECT_ROOT, Settings
@@ -23,6 +24,18 @@ else:
 
 LOGGER = logging.getLogger("dkf.business")
 CONTEXT: ContextVar[dict | None] = ContextVar("business_log_context", default=None)
+# 独立进程角色与固定显示名称集中维护；未注册/非字符串输入不透传到日志。
+ROLE_LABELS = MappingProxyType({
+    "api": "API",
+    "worker": "Worker",
+    "dense-cli": "Dense CLI",
+    "bm25-cli": "BM25 CLI",
+    "hybrid-cli": "Hybrid CLI",
+    "rerank-cli": "Reranker CLI",
+    "retrieval-acceptance": "检索验收",
+    "preset-cli": "Preset CLI",
+    "unknown": "未知进程",
+})
 FIELDS = {
     "request_id",
     "task_id",
@@ -389,13 +402,13 @@ class ReadableFormatter(logging.Formatter):
     """仅格式化业务事件，不输出异常堆栈、任意响应、连接串或文档正文。"""
 
     def __init__(self, role: str = "unknown") -> None:
-        """固定进程来源字段，不允许请求或业务字段伪造 API/Worker 身份。"""
+        """只接受集中注册的稳定角色，未知/异常类型安全回退；业务字段不能伪造进程身份。"""
 
         super().__init__()
-        self.role = role if role in {"api", "worker"} else "unknown"
+        self.role = role if type(role) is str and role in ROLE_LABELS else "unknown"
 
     def format(self, record: logging.LogRecord) -> str:
-        """生成本机时间的中文单行摘要，保留事件码及关联字段，不输出结果正文。"""
+        """按集中角色显示生成中文单行摘要，保留真实PID及事件字段，不输出任意角色/正文。"""
 
         event = (
             record.msg
@@ -408,7 +421,7 @@ class ReadableFormatter(logging.Formatter):
             .astimezone()
             .isoformat(sep=" ", timespec="milliseconds"),
             logging.getLevelName(record.levelno),
-            {"api": "API", "worker": "Worker", "unknown": "未知进程"}[self.role],
+            ROLE_LABELS[self.role],
             EVENT_LABELS.get(event, "业务事件"),
             f"event={event}",
             f"pid={record.process}",
@@ -472,7 +485,7 @@ class SafeDailyFileHandler(logging.Handler):
 
 
 def configure_logging(settings: Settings, role: str) -> None:
-    """配置业务 Logger；API/Worker 合并每日文件，重复配置或 prefork 不增加文件数量。"""
+    """以注册角色配置业务Logger；所有进程仍合并每日文件，重复配置不增加文件数量。"""
 
     LOGGER.setLevel(settings.log_level)
     LOGGER.disabled = False

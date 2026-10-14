@@ -1,5 +1,6 @@
 """业务日志的离线验收：隐私、请求隔离、任务关联、每日合并和故障降级。"""
 
+import ast
 import asyncio
 import io
 import logging
@@ -50,6 +51,84 @@ def records(stream):
     """将内存日志按行解析为事件字典，不依赖终端文本或第三方日志格式。"""
 
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
+
+
+@pytest.mark.parametrize("role,label", [
+    ("api", "API"), ("worker", "Worker"), ("dense-cli", "Dense CLI"),
+    ("bm25-cli", "BM25 CLI"), ("hybrid-cli", "Hybrid CLI"),
+    ("rerank-cli", "Reranker CLI"), ("retrieval-acceptance", "检索验收"),
+    ("preset-cli", "Preset CLI"),
+])
+def test_registered_process_roles_keep_exact_labels_and_real_pid(role, label):
+    """API/Worker及CLI角色显示固定名称，格式/真实PID不变，不将CLI冒充服务进程。"""
+    record = logging.LogRecord("dkf.business", logging.INFO, "", 0, "rerank.finished", (), None)
+    formatter = logs.ReadableFormatter(role)
+    line = formatter.format(record)
+    assert logs.ROLE_LABELS[role] == label and line.split(" | ")[2] == label
+    parsed = read_log_line(line)
+    assert parsed["role"] == role and parsed["pid"] == record.process == os.getpid()
+    assert parsed["event"] == "rerank.finished" and parsed["level"] == "INFO"
+    assert len(line.split(" | ")) == 6 and formatter.role == role
+
+
+@pytest.mark.parametrize("role", [None, 1, [], {}, object(), "unregistered-cli", "API",
+    "api\nSECRET_ROLE", "worker | pid=1", "postgresql://SECRET_ROLE"])
+def test_unknown_process_role_is_a_safe_fixed_fallback(role):
+    """未注册/非法类型角色只显示固定未知来源，不能注入换行、字段、敏感文本或伪造PID。"""
+    record = logging.LogRecord("dkf.business", logging.INFO, "", 0, "task.started", (), None)
+    line = logs.ReadableFormatter(role).format(record)
+    assert line.split(" | ")[2] == "未知进程" and len(line.split(" | ")) == 6
+    assert read_log_line(line)["role"] == "unknown" and read_log_line(line)["pid"] == os.getpid()
+    assert "SECRET_ROLE" not in line and "unregistered-cli" not in line and "\n" not in line
+
+
+def test_roles_reconfigure_same_daily_file_and_match_console(events, tmp_path, capsys):
+    """所有角色的终端/文件一致、同日仍一份日志，重配不变更操作系统PID或进程名称。"""
+    settings = Settings(_env_file=None, log_dir=tmp_path)
+    process_name = multiprocessing.current_process().name
+    for role in logs.ROLE_LABELS:
+        logs.configure_logging(settings, role=role)
+        logs.log_event("task.started")
+    console = capsys.readouterr().err.splitlines()
+    [path] = tmp_path.glob("*.log")
+    disk = path.read_text(encoding="utf-8").splitlines()
+    assert console == disk and len(disk) == len(logs.ROLE_LABELS)
+    entries = [read_log_line(line) for line in disk]
+    assert [entry["role"] for entry in entries] == list(logs.ROLE_LABELS)
+    assert {entry["pid"] for entry in entries} == {os.getpid()}
+    assert multiprocessing.current_process().name == process_name
+    assert len(list(tmp_path.iterdir())) == 2
+
+
+@pytest.mark.parametrize("role", [name for name in logs.ROLE_LABELS if name not in {"api", "worker", "unknown"}])
+def test_cli_roles_do_not_weaken_payload_redaction_or_identity_protection(events, role):
+    """CLI同样只输出白名单摘要，Query/正文/连接串/密钥/私有路径及伪造角色/PID均不透传。"""
+    logs.LOGGER.handlers[0].setFormatter(logs.ReadableFormatter(role))
+    logs.log_event("rerank.finished", item_count=5, role="worker", pid=1,
+                   query="PRIVATE_QUERY", text="PRIVATE_BODY", database_url="PRIVATE_DATABASE",
+                   token="PRIVATE_TOKEN", model_dir="PRIVATE_MODEL_PATH")
+    [entry] = records(events)
+    assert entry["role"] == role and entry["pid"] == os.getpid() and entry["item_count"] == 5
+    assert "PRIVATE" not in events.getvalue() and " | Worker | " not in events.getvalue()
+
+
+def test_application_logging_entry_roles_are_registered():
+    """只读取应用/脚本源码审计固定角色，无模块导入/业务执行；新角色须先注册才可通过。"""
+    assert len(set(logs.ROLE_LABELS.values())) == len(logs.ROLE_LABELS)
+    for directory in (logs.PROJECT_ROOT / "app", logs.PROJECT_ROOT / "scripts"):
+        for path in directory.rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
+            for call in ast.walk(tree):
+                if not isinstance(call, ast.Call):
+                    continue
+                name = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
+                if name != "configure_logging":
+                    continue
+                role = next((keyword.value for keyword in call.keywords if keyword.arg == "role"), None)
+                if role is None and len(call.args) >= 2:
+                    role = call.args[1]
+                if isinstance(role, ast.Constant):
+                    assert isinstance(role.value, str) and role.value in logs.ROLE_LABELS, path.name
 
 
 def test_fields_are_allowlisted_and_single_line(events):

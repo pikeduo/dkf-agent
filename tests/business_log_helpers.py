@@ -3,11 +3,11 @@
 import json
 from datetime import datetime
 
-from app.core.business_logging import FIELD_LABELS
+from app.core.business_logging import FIELD_LABELS, ROLE_LABELS
 
 
 def read_log_line(line: str) -> dict:
-    """解析固定前缀及引用过的标量，验证完整单行并还原原事件字段用于回归断言。"""
+    """复用集中角色表解析固定前缀/标量，不另建API/Worker专用映射或接受任意来源。"""
 
     timestamp, level, role, description, event, pid, *fields = line.split(" | ")
     datetime.fromisoformat(timestamp)
@@ -15,7 +15,7 @@ def read_log_line(line: str) -> dict:
     result = {
         "timestamp": timestamp,
         "level": level,
-        "role": {"API": "api", "Worker": "worker", "未知进程": "unknown"}[role],
+        "role": {label: name for name, label in ROLE_LABELS.items()}[role],
         "event": event.removeprefix("event="),
         "pid": int(pid.removeprefix("pid=")),
     }

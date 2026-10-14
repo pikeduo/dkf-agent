@@ -863,7 +863,7 @@ def retrieval_tasks(run, plan):
 
 
 def dense_run(run, plan, kb_id):
-    """共同 READY 前置通过后复用 Dense 分别测 OHR/OCB；不重编码文档、不混算 QA/GT。"""
+    """共同READY前置通过后以检索验收角色测OHR/OCB，复用Dense，不重编码或混算QA/GT。"""
     before, verification = verify_run(run, plan, kb_id)
     if verification["status"] != "PASS":
         # 必须在导入框架/配置日志/加载 BGE-M3 之前停止；未执行不能填零分冒充检索结果。
@@ -882,7 +882,7 @@ def dense_run(run, plan, kb_id):
     from app.core.config import get_settings
     from app.services.rag.llama_index.dense_retriever import DenseRetriever
 
-    configure_logging(get_settings(), role="dense-cli")
+    configure_logging(get_settings(), role="retrieval-acceptance")
     retriever = DenseRetriever(kb_id, top_k=20)
     docs = quality.documents_index(before)
     chunks = {chunk["chunk_id"]: chunk for document in docs.values() for chunk in document["chunks"]}
