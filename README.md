@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY 表示所有 Chunk 向量已入库；已有只读 Dense/BM25/Hybrid、本地BGE重排及DeepSeek Python问答入口，尚无 HTTP 检索或问答接口。管理接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY表示所有Chunk向量已入库；提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -99,7 +99,7 @@ python -m pip install "llama-index-core>=0.14,<0.15"
 python -m pip check
 ```
 
-不安装全量 llama-index 或 OpenAI/PGVectorStore/Reader 集成，不需要新 API Key、模型或迁移。安装前核对 Python 3.11 及现有 Pydantic/SQLAlchemy/tenacity 依赖；pip 可能调整传递依赖，冲突时停止并记录，不无条件升级。core 包含 NLTK/tiktoken 等依赖，首次导入可能校验/下载缺失的 NLP 资源，需由用户预先准备缓存，具体见 [Adapter 部署与使用](docs/LLAMA_INDEX_ADAPTER.md)。Dense Python Retriever 复用同一依赖，尚无 HTTP 检索或问答接口。
+不安装全量 llama-index 或 OpenAI/PGVectorStore/Reader 集成，不需要新 API Key、模型或迁移。安装前核对 Python 3.11 及现有 Pydantic/SQLAlchemy/tenacity 依赖；pip 可能调整传递依赖，冲突时停止并记录，不无条件升级。core 包含 NLTK/tiktoken 等依赖，首次导入可能校验/下载缺失的 NLP 资源，需由用户预先准备缓存，具体见 [Adapter 部署与使用](docs/LLAMA_INDEX_ADAPTER.md)。Dense Python Retriever及HTTP搜索/问答复用同一依赖。
 
 ## 2. 手动部署基础服务
 
@@ -354,6 +354,8 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式云上传，支持多选 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 已有文档云提交 / 活动云任务恢复，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 云任务状态与安全错误 |
+| POST | `/api/knowledge/search` | 同范围Hybrid检索及本地Top5重排，不调用LLM |
+| POST | `/api/knowledge/query` | 显式确认云外传及费用后生成带引用回答 |
 | POST | `/tasks/add` | 示例任务，JSON 参数 x、y、可选 queue |
 | GET | `/tasks/{task_id}` | Celery 状态与结果 |
 
@@ -460,13 +462,13 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 ### Dense Python Retriever
 
-仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认20，1～100），以及 `doc_ids=["目标文档UUID"]` 限定单/多文档（最多100个）。省略 doc_ids 检索该库全部合格文档；空列表/非法UUID拒绝，文档过滤在 PostgreSQL Top-K 前执行，无匹配不扩大范围。`retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回原始证据 DTO。Query 首次调用会加载已有本地 BGE-M3，构造不会加载；尚无 HTTP 检索或问答接口。
+仅使用已入库且与本地 Query 模型身份一致的 READY 文档；无需新迁移、队列、依赖或 API Key。显式导入 `app.services.rag.llama_index.dense_retriever.DenseRetriever`，构造传入 `kb_id`、可选 `top_k`（默认20，1～100），以及 `doc_ids=["目标文档UUID"]` 限定单/多文档（最多100个）。省略 doc_ids 检索该库全部合格文档；空列表/非法UUID拒绝，文档过滤在 PostgreSQL Top-K 前执行，无匹配不扩大范围。`retrieve(query)` 返回 NodeWithScore，`retrieve_results(query)` 返回原始证据 DTO。Query首次调用会加载已有本地BGE-M3，构造不会加载；HTTP入口使用统一Hybrid/重排，不另设Dense接口。
 
 用户先准备已有 core/NLP 缓存、PostgreSQL 和同版本 BGE-M3；检索时不需要 API/Worker，避免与 GPU Worker 同时各加载一份模型。无匹配返回空集，不扩大库或重建数据；首版精确排序有扫描成本，分数为余弦相似度而非概率。完整使用与手动验收见 [Dense Retrieval](docs/DENSE_RETRIEVAL.md)。
 
 ### BM25 Python Retriever
 
-已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key，尚无HTTP检索/问答接口。
+已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；独立BM25只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key。HTTP入口统一Hybrid/重排，不另设BM25接口。
 
 使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次读取当前READY语料，不产生第二套业务表或磁盘索引。首次构建有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
 
@@ -493,7 +495,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 ### DeepSeek Python 问答
 
-`app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)` 复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。引用来源/页码由原Chunk回填，不采用模型生成的来源；无证据明确返回不足。尚无HTTP问答接口，不新增迁移或Worker。
+`app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)`复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。HTTP `/api/knowledge/query`委托同一入口；引用来源/页码由原Chunk回填，不采用模型生成的来源，无证据明确返回不足，不新增迁移或Worker。
 
 用户在本地`.env`配置`DEEPSEEK_API_KEY`及上面的模型/预算后重启问答进程；复用已有httpx、core，不需OpenAI SDK或全量LlamaIndex。默认`DEEPSEEK_PROVIDER=official`、`deepseek-flash`、关闭thinking、JSON非流式输出，参数依据[DeepSeek官方接口](https://api-docs.deepseek.com/api/create-chat-completion/)，执行前核对账号模型权限。官方模式仅允许官方HTTPS端点（含`/v1`）；选择`DEEPSEEK_PROVIDER=sub2api`后可配置明确的HTTPS`/v1`网关和其真实模型ID，公网HTTP仅在`DEEPSEEK_ALLOW_INSECURE_HTTP=true`显式开启，**会明文传输密钥和最终证据，禁止正式部署使用**。均不读环境代理、不跟随重定向。切换配置需要重启问答进程；Sub2API需另行真实确认thinking/JSON模式兼容性。
 
@@ -502,6 +504,22 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 最小使用、Mock/真实问题验收及错误说明见[DeepSeek RAG](docs/DEEPSEEK_RAG.md)。结构合法和引用存在不证明答案忠实或问答准确率已通过，必须对照真实证据人工核验。
 
 若最终证据只支持问题的一部分，允许仅回答有依据部分并明确缺口，不因无关候选或局部缺失整体拒答；`insufficient_evidence=true`表示没有可靠可答内容，`false`不保证全部子问题已回答。代码不会根据非空候选或高分强制改写模型拒答，也不会为此自动追加收费请求。
+
+### Knowledge搜索与问答HTTP接口
+
+用户准备好现有PostgreSQL/READY文档、本地BGE-M3、Reranker及core/NLP缓存后，按前文启动FastAPI即可使用`/docs`中的knowledge分组。不另开Query Worker，不新增依赖/模型/迁移；推荐单API进程，停止同卡GPU Worker，注意双模型显存及首次加载耗时。
+
+两个POST接口使用JSON（示例UUID需替换为真实值）：
+
+```json
+{"kb_id":"实际知识库UUID","question":"请解释文档中的关键概念","doc_ids":null,"top_k":30}
+```
+
+`doc_ids`省略/null表示该库全部合格文档；限定文档时填写1～100个真实UUID，空数组拒绝。`top_k`默认30、严格整数1～100，表示融合候选上限，最终重排最多5条。仅检索ACTIVE库/READY及原检索器要求的有效代次/向量身份，不匹配不扩大范围；空集不证明指定文档存在。
+
+`/search`不调用LLM，返回`{"status":"success或empty","evidence":[...]}`，每条为项目Evidence及原来源/分数；`/query`返回原`RAGAnswer`（status/answer/citations/insufficient_evidence），须**额外传`"allow_cloud":true`**确认本次问题/最终正文可发给当前配置的DeepSeek提供方并接受费用，否则403。搜索也会运行本地模型，问答不会自动重试收费或把异常伪装成不足。
+
+错误统一为`{"detail":{"code":"固定错误码","message":"安全中文说明"}}`：422输入无效、403未确认云外传、409证据冲突、413上下文超限、429供应商限流、502上游响应/输出不合法、503部署/数据库/供应商不可用、500未预期错误。详情不回显问题/正文；暂无鉴权、API限流或请求幂等，仅本机/可信内网使用，不暴露公网。客户端超时不保证取消推理/收费，勿盲目重复发送。具体契约及手动步骤见[Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md)。
 
 ### Citation 与来源反查
 

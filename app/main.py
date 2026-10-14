@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.admin_knowledge_bases import router as admin_knowledge_bases_router
 from app.api.docs import router as docs_router
 from app.api.health import router as health_router
+from app.api.knowledge import router as knowledge_router
 from app.api.mineru import router as mineru_router
 from app.api.tasks import router as tasks_router
 from app.core.business_logging import RequestLoggingMiddleware, configure_logging
@@ -24,6 +25,7 @@ app = FastAPI(
 
 # 路由集中在入口注册，后续模块可按领域扩展而不影响应用启动流程。
 app.include_router(health_router)
+app.include_router(knowledge_router)
 app.include_router(tasks_router)
 app.include_router(admin_knowledge_bases_router)
 app.include_router(mineru_router)

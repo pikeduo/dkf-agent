@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段23 Citation / Evidence代码已实现、待人工验收；阶段22真实问答/误拒答效果、阶段21排序收益及阶段16等此前待验收事项保留。** 不自动进入24。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段24 Knowledge Query API代码已实现、待人工验收；阶段23最终Mock修正及阶段22/21/16等此前待验收事项保留。** 不自动进入25。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮只完善框架无关引用与显式只读来源反查，不改阶段22Prompt/不足判断、不自动查询数据库或调用云端，不开发阶段24接口。\
+> 本轮只增加现有检索/问答服务的HTTP边界、自有Schema、安全日志和Mock用例，不执行测试/真实查询/模型，不改业务数据库、Prompt或索引语义。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -2957,6 +2957,8 @@ rerank_score
 ---
 
 # 30. 阶段 24：Knowledge Query API
+
+当前实现：POST `/api/knowledge/search`本地Hybrid候选→Top5重排→DKF Evidence；POST `/query`复用已有RAG入口，显式`allow_cloud=true`才允许单次LLM合成。候选top_k默认30/1～100；API不导入或返回框架类型，验证错误不回显输入，异常不伪装空证据。未执行Mock或真实验收，不新增数据库/模型/配置；现阶段仅本机/可信内网使用，详见[接口契约与验收](KNOWLEDGE_QUERY_API.md)。
 
 ## 目标
 为前端和未来 Agent 提供稳定接口，并隔离 LlamaIndex 具体实现。

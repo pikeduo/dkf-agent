@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**23：Citation / Evidence。已实现框架无关引用契约、Node互转及当前Chunk→Block→Document只读来源反查；来源Mock兼容修正待用户复测，真实来源与忠实度待验收。阶段22误拒答修正的真实效果、阶段21排序收益及阶段16等此前待验收事项保留，不自动进入24。**
+当前阶段：**24：Knowledge Query API。已实现同范围/search本地Hybrid/Top5与/query显式云问答、自有Schema和安全错误/日志；新增用例仅编写，待人工验收。阶段23最终Mock修正、阶段22真实问答及阶段16等此前待验收事项保留，不自动进入25。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -49,11 +49,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 21 | 已实现本地BGE Reranker惰性共享/离线批处理、Top5 Postprocessor、三类分数及Node/DTO往返；用例未执行，真实排序收益待验收 |
 | 22 | 已实现同范围Hybrid→Top5 Reranker→最终Evidence单次DeepSeek合成、引用校验与不足/异常区分；Mock及真实问答待用户执行 |
 | 23 | 已实现稳定Citation/三类分数、答案标记校验、只读来源快照与字符/Hash/页语义校验；Mock兼容修正待复测，真实来源与答案忠实度待验收 |
-| 24 及后续 | 未开展，等待用户确认 |
+| 24 | 已实现POST /api/knowledge/search、/query，惰性模型边界、范围/参数校验和脱敏错误；未执行测试/真实请求，待验收 |
+| 25 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0007_pgvector_index`；尚未由 Codex 执行迁移，“已实现”不等于已完成真实模型/API/数据库人工验收。
-- 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY 只表示数据入库完成。Dense 仅 Python 入口，尚无 HTTP 检索或问答接口。
-- 本轮只补齐阶段23来源边界；阶段22Prompt/引用白名单及不足判断保持不变。反查仅由调用方显式执行，不隐式加入问答收费链路；不执行查询/测试，不推进阶段24。
+- 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
+- 用户已指定推进阶段24，但此前验收不自动通过；本轮不改阶段22Prompt/引用白名单及不足判断，阶段23当前来源反查仍需显式调用。不执行请求/模型/测试，不推进阶段25。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -242,6 +243,12 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 沿用PDF物理页、图片像素页及Office逻辑页/空bbox；保留context/overlap与结构块原文，不去重来源片段或重排。来源核对不是答案语义验真，也不是用户鉴权；现有RAG返回引用快照，调用方显式核对当前来源，不伪称每次生成都已查库验真。
 - 来源日志复用每日合并文件和集中注册evidence-cli，仅ID/数量/耗时/安全错误；新专题用例只编写，真实DB来源及回答忠实度由用户验收。
 
+### Knowledge Query API
+
+- /api/knowledge/search和/query只用DKF请求/响应与KnowledgeService，不导入/返回LlamaIndex类型。每次固定kb_id/doc_ids，Top-K是融合候选上限（默认30、1～100），最终沿用Top5重排；不重Parse/Embedding/Index，不扩大范围或创建新存储。
+- /query的allow_cloud默认false，请求明确true才允许已有单次云合成；/search不调用LLM。异常不是空集/证据不足；输入/响应验证错误只返固定安全code/message，不回显input/ctx/正文或上游原文，不自动重试收费。
+- API同步工作在线程池执行，模型由项目共享服务惰性加载；模型/API部署与验收由用户执行。现阶段无鉴权/RBAC/请求幂等或取消保证，仅本机/可信内网使用；云许可标记不是用户权限，HTTP请求重跑可能再次收费。
+
 ## 5. 专题文档与交付要求
 
 | 修改范围 | 必须阅读 |
@@ -262,6 +269,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 本地重排、分数/证据、部署及质量验收 | [BGE Reranker](docs/RERANKER.md) |
 | 问答编排、LLM边界、最终引用与人工验收 | [DeepSeek RAG](docs/DEEPSEEK_RAG.md) |
 | 引用契约、Block字符反查、页语义与失效边界 | [Citation / Evidence](docs/CITATION_EVIDENCE.md) |
+| 搜索/问答HTTP契约、云许可及安全错误 | [Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

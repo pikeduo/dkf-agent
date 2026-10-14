@@ -94,4 +94,4 @@ python -c $evidenceCheck
 
 在**已持有RAGAnswer的同一Python进程**运行`EvidenceService().resolve_answer(result)`，无需再次调用DeepSeek。核对每个`[n]`对应原Citation的Chunk及Trace；逐项人工判断回答数字、单位、关键事实是否被引用原文支持。未知分数/位置继续保留为空，不让LLM补来源。过期引用必须失败，不用同ID新正文解释旧回答。
 
-真实问答仍按[DeepSeek RAG](DEEPSEEK_RAG.md)由用户单独确认外传权限和收费后执行；本阶段没有发起真实请求，也不新增一次问答来“验证引用”。来源一致、Mock通过或READY均不能宣称答案忠实度/问答准确率通过。阶段16正式素材、阶段21排序收益、阶段22真实问答及误拒答效果的未验收事项继续保留；验收反馈前不进入阶段24。
+真实问答仍按[DeepSeek RAG](DEEPSEEK_RAG.md)由用户单独确认外传权限和收费后执行；本阶段没有发起真实请求，也不新增一次问答来“验证引用”。来源一致、Mock通过或READY均不能宣称答案忠实度/问答准确率通过。阶段16正式素材、阶段21排序收益、阶段22真实问答及误拒答效果的未验收事项继续保留。用户已指定推进阶段24，[HTTP接口](KNOWLEDGE_QUERY_API.md)复用原Citation而不自动授予来源验收结论；不自动进入阶段25。

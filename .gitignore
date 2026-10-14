@@ -44,6 +44,7 @@ docs/*
 !docs/RERANKER.md
 !docs/DEEPSEEK_RAG.md
 !docs/CITATION_EVIDENCE.md
+!docs/KNOWLEDGE_QUERY_API.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*
