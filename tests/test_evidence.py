@@ -24,15 +24,16 @@ from app.services.rag import evidence as tool
 
 
 def source_fixture(file_type="pdf", page=2, *, text="中文来源\n数值10%", kind="text"):
-    """构造完整已存字段/字符来源Stub，不声称已解析真实PDF/Office文件。"""
+    """构造独立的Block/Chunk字段快照并复制可变坐标，不解析真实文档。"""
     kb_id, doc_id, chunk_id, parse_id, chunk_task_id, block_id = (uuid4() for _ in range(6))
     logical = file_type not in {"pdf", "jpg", "jpeg", "png"}
     bbox = None if logical else [10.0, 20.0, 30.0, 40.0]
     block = DocumentBlock(block_id=block_id, doc_id=doc_id, block_index=1, page=page,
         section="真实块章节", block_type=kind, text=text, bbox=bbox,
         source="mineru_cloud", confidence=None)
+    # 两个数据库JSON字段应独立；共享bbox会让单侧损坏用例同时改动两端，失去负向意义。
     span = {"block_id": str(block_id), "block_index": 1, "page": page, "block_type": kind,
-            "source": block.source, "bbox": bbox, "block_text_hash": hashlib.sha256(text.encode()).hexdigest(),
+            "source": block.source, "bbox": copy.deepcopy(bbox), "block_text_hash": hashlib.sha256(text.encode()).hexdigest(),
             "start_char": 0, "end_char": len(text), "chunk_start_char": 0, "chunk_end_char": len(text), "role": "content"}
     metadata = {"source_parse_task_id": str(parse_id), "file_hash": "a" * 64,
                 "page_semantics": "logical" if logical else "physical_pdf" if file_type == "pdf" else "image_page",
@@ -214,13 +215,16 @@ def test_session_stub_reads_scope_independently_of_compiler_parameter_names(use_
 
 @pytest.mark.parametrize("change", ["page", "bbox", "hash", "text", "offset", "unknown_semantic", "missing_spans", "missing_block", "file_hash", "generation"])
 def test_corrupt_or_stale_sources_are_rejected_without_repair(change):
-    """按故障类型断言准确错误码，防止Mock内部错误冒充来源校验而意外通过。"""
+    """仅破坏指定一侧并断言准确错误码，防止共享坐标或Mock错误掩盖真实负向校验。"""
     chunk, document, blocks = source_fixture()
     span = chunk.chunk_metadata["source_spans"][0]
     if change == "page":
         span["page"] = 3
     elif change == "bbox":
+        original_bbox = copy.deepcopy(blocks[0].bbox)
+        assert span["bbox"] is not blocks[0].bbox
         span["bbox"][0] = 11.0
+        assert blocks[0].bbox == original_bbox and span["bbox"] != blocks[0].bbox
     elif change == "hash":
         span["block_text_hash"] = "b" * 64
     elif change == "text":
