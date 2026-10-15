@@ -269,28 +269,37 @@ def test_cross_document_values_require_explicit_identity_and_same_kb():
         service.bind_formula_variables(formula, evidence_inputs=[item])
 
 
-def test_logs_only_keep_roles_identifiers_counts_and_safe_statuses():
-    """记录开始/缺参/成功/失败，禁止参数、单位、原式、变量名或引文进入日志。"""
+@pytest.mark.parametrize("cached_level", [logging.WARNING, logging.DEBUG])
+def test_logs_only_keep_roles_identifiers_counts_and_safe_statuses(cached_level):
+    """覆盖级别缓存后记录完整事件及脱敏摘要；用公开API设置/恢复级别，避免污染后续测试。"""
     output = io.StringIO()
     handler = logging.StreamHandler(output)
     handler.setFormatter(logs.ReadableFormatter("formula-binding-cli"))
     logger = logs.LOGGER
     previous = logger.handlers[:], logger.level, logger.propagate, logger.disabled
     token = logs.CONTEXT.set(None)
-    context, _, formula, service = prepared()
-    logger.handlers, logger.level, logger.propagate, logger.disabled = [handler], logging.INFO, False, False
     try:
+        context, _, formula, service = prepared()
+        logger.handlers, logger.propagate, logger.disabled = [handler], False, False
+        # 直接赋值level不清理isEnabledFor缓存；先覆盖两种旧缓存，再用setLevel正确切换。
+        logger.setLevel(cached_level)
+        assert logger.isEnabledFor(logging.INFO) is (cached_level <= logging.INFO)
+        logger.setLevel(logging.INFO)
+        assert logger.isEnabledFor(logging.INFO)
         service.bind_formula_variables(formula)
         service.bind_formula_variables(formula, user_inputs=[user("profit", "987654.123", "PRIVATE_UNIT"), user("revenue", "100")])
         with pytest.raises(tool.FormulaBindingError):
             service.bind_formula_variables(formula, user_inputs=[user("profit", "PRIVATE_VALUE")])
         content = output.getvalue()
-        assert all(event in content for event in ("formula_binding.started", "formula_binding.finished",
-                                                  "formula_binding.need_variables", "formula_binding.failed"))
+        for event in ("formula_binding.started", "formula_binding.finished",
+                      "formula_binding.need_variables", "formula_binding.failed"):
+            assert event in content, f"缺少业务日志事件：{event}"
         assert "Formula Binding CLI" in content and str(formula.source.chunk_id) in content and "pid=" in content
         assert all(secret not in content for secret in ("PRIVATE", "987654.123", "revenue", "profit", formula.raw_formula))
     finally:
-        logger.handlers, logger.level, logger.propagate, logger.disabled = previous
+        handler.close()
+        logger.handlers, logger.propagate, logger.disabled = previous[0], previous[2], previous[3]
+        logger.setLevel(previous[1])
         logs.CONTEXT.reset(token)
 
 
