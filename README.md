@@ -573,6 +573,12 @@ Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc
 
 用户可用`python -m scripts.stage27_formula_acceptance`查看默认dry-run说明，实际调用需真实业务ID及显式执行/云许可。详细输入选择、限制和手动验收见[公式语义说明](docs/FORMULA_SEMANTICS.md)。
 
+### 公式参数绑定
+
+`app.services.formula_binding.bind_formula_variables(formula, user_inputs=..., evidence_inputs=...)`消费已有公式定义：支持显式用户数值或指定文档引文，重新核对当前来源，缺参返回`need_variables`。数值使用字符串，单位保持原样；不猜值、不换算、不执行计算或LLM请求。只需现有PostgreSQL，不新增依赖、迁移、HTTP接口或Worker。
+
+`python -m scripts.stage28_formula_acceptance`默认dry-run；用户准备包含已有公式结果及参数的本地JSON后，通过`--input <文件> --execute`执行只读绑定。默认不显示数值/正文；详细输入契约与操作见[参数绑定说明](docs/FORMULA_SEMANTICS.md#阶段28参数识别与绑定)。
+
 ### 预置知识库导入
 
 已有 OHR-Bench、OmniDocBench 和 OCB 原件时，可按 [三数据集联合冒烟](docs/PRESET_IMPORT.md#三数据集最短操作新运行) 在独立测试库抽取约14份（5 PDF、3图像、三类Office各2份），完成上传→READY→Dense及分数据集报告。直接使用已下载 OCB，不要求补齐缺失43份、许可Excel或手工SQL导出；默认dry-run，真实处理前须用户确认全部所选文件云外传及费用。OCB断言人工核验、Omni GT不当QA，不能代替正式多格式验收或宣称问答准确率。

@@ -213,6 +213,29 @@ def _bind(text: str, trace: EvidenceTrace, block_id: UUID, target, spans) -> For
         raise FormulaError("FORMULA_OUTPUT") from None
 
 
+def validate_formula_snapshot(formula: FormulaSemanticResult, trace: EvidenceTrace) -> FormulaSemanticResult:
+    """供参数绑定复核已提取定义与当前来源；不调用LLM，不证明数学/语义等价或签名真实性。"""
+    try:
+        formula = FormulaSemanticResult.model_validate(formula.model_dump(mode="python"))
+        if formula.status != "success" or formula.source.model_dump() != trace.model_dump():
+            raise ValueError
+        _, target, spans = _context(trace, formula.formula_block_id)
+        canonical, names = normalize_expression(formula.normalized_formula)
+        identity = f"{VERSION}:{trace.chunk_id}:{formula.formula_block_id}:{trace.file_hash}:" + (
+            f"{trace.source_parse_task_id}:{trace.source_chunk_task_id}:{target.block_text_hash}")
+        if (formula.raw_formula != target.text or formula.normalized_formula != canonical
+                or formula.variables != names or formula.formula_id != uuid5(trace.doc_id, identity)):
+            raise ValueError
+        references = [formula.formula_name_evidence, *[meaning.evidence for meaning in formula.variable_meanings.values()]]
+        for group in references:
+            rebuilt = _references([_WireReference(evidence_id=ref.evidence_id, quote=ref.quote) for ref in group], spans)
+            if rebuilt != group:
+                raise ValueError
+        return formula
+    except Exception:
+        raise FormulaError("FORMULA_SOURCE") from None
+
+
 class FormulaService:
     """公式提取的唯一显式业务边界；不触发检索、模型加载、解析任务或数据库写入。"""
 

@@ -23,6 +23,7 @@
 | rag-cli | RAG CLI |
 | evidence-cli | Evidence CLI |
 | formula-cli | Formula CLI |
+| formula-binding-cli | Formula Binding CLI |
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
 | unknown / 未注册角色 | 未知进程 |
@@ -94,6 +95,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `citation.created` | 已从原DTO复制运行时引用；不代表答案已发布、当前数据库已核对或事实语义正确，不记录引用正文/分数/metadata |
 | `evidence.started / finished / skipped / failed` | 显式只读来源核对；仅UUID/引用及唯一Block数量/耗时/固定错误码。finished表示同快照字符/Hash/页语义一致，不代表回答忠实；不足答案无引用时skipped不查库 |
 | `formula.started / synthesis_started / finished / insufficient / unsupported / failed` | 指定公式的来源核对、单次所选LLM结构化、结构完成/不足/不支持/安全失败；仅UUID、数量、状态、耗时/固定错误码，不记录原式、表达式、上下文、含义或模型输出，finished不表示语义/计算验收 |
+| `formula_binding.started / finished / need_variables / failed` | 已有定义与参数当前来源核对、绑定/缺参/安全失败；仅UUID、数量、状态、耗时/固定错误码，不记录变量名/数值/单位/引文，不请求LLM或计算 |
 | `knowledge.started / finished / failed / rejected` | API/服务的search或query过程与结果摘要：仅kb/doc UUID、候选上限/范围数量、返回数量/状态/耗时/安全码。rejected仅输入/输出校验或兜底错误；不记录问题、原响应、metadata或异常原文，复用api角色及每日单文件 |
 | `preset.started / imported / reused` | 用户执行 CLI 后开始批量导入 / 原件已提交并投递 auto / 同内容沿用已有 doc_id，不代表 READY |
 | `preset.advanced / state` | 下一阶段检查点提交后投递 / 业务状态变化，复用原队列与每日日志 |
