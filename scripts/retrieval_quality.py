@@ -301,15 +301,15 @@ def publish_json(path, payload):
         json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
 
 
-def real_backends(case, candidate_limit, branch_top_k):
-    """用户显式执行时才构造现有只读Retriever/共享本地模型；不启动服务或调用LLM。"""
+def real_backends(case, candidate_limit, branch_top_k, *, reranker_service=None):
+    """复用只读Retriever/本地模型；实验可注入共享服务的测量代理，默认行为不变。"""
     from app.services.rag.llama_index.dense_retriever import DenseRetriever
     from app.services.rag.llama_index.bm25_retriever import BM25Retriever
     from app.services.rag.llama_index.hybrid_retriever import fuse_nodes
     from app.services.rag.llama_index.reranker_adapter import BGERerankerAdapter
     dense = DenseRetriever(case["kb_id"], doc_ids=case.get("doc_ids"), top_k=branch_top_k)
     bm25 = BM25Retriever(case["kb_id"], doc_ids=case.get("doc_ids"), top_k=branch_top_k)
-    adapter = BGERerankerAdapter(top_n=100)
+    adapter = BGERerankerAdapter(top_n=100, service=reranker_service)
 
     def retrieve(query):
         """每表达各调用一次原两支，保存Fusion截断前排名；同实例复用BM25派生词频。"""
