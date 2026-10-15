@@ -211,7 +211,7 @@ def test_execute_reports_task_failure_reason(monkeypatch):
 
 @pytest.mark.parametrize("explicit_cloud", [False, True])
 def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk(cloud_context, monkeypatch, explicit_cloud):
-    """隔离DB验证缓存miss至ingest/done全链；仅模型/供应商/Broker为Stub，不运行GPU。"""
+    """统一云测试配置验证隔离DB的miss至ingest/done全链；模型/供应商/Broker为Stub。"""
     from app.api import admin_knowledge_bases as admin
     from app.services import document_management as service
     from app.tasks import documents, chunks, management, embeddings, indexing as index_tasks
@@ -222,7 +222,9 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
     context = cloud_context
     managers, chunk_messages, downstream = [], [], []
     context.settings = context.settings.model_copy(update={
-        "embeddings_dir": context.directory.parent / "vectors", "embedding_device": "cuda:0"})
+        "embeddings_dir": context.directory.parent / "vectors",
+        "embedding_device": "cuda:0",
+    })
 
     def manager_publish(doc_id, task_id):
         """只记录已提交的独立编排消息，不连接真实Broker。"""
@@ -235,6 +237,8 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
 
     for module in (admin, api_module):
         # 原逐阶段夹具有意隔离管理；本用例显式恢复真实新编排准备/投递边界。
+        # 扫描PDF超过原上传夹具的1MiB限制，仅本用例统一使用cloud_context的50MiB配置。
+        monkeypatch.setattr(module, "get_settings", lambda: context.settings)
         monkeypatch.setattr(module, "prepare_ingestion", service.prepare_ingestion)
         monkeypatch.setattr(module, "publish_ingestion", service.publish_ingestion)
     monkeypatch.setattr(service, "publish_management", manager_publish)
@@ -253,8 +257,17 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
         job = upload(context)
         doc_id = UUID(job["doc_id"])
     else:
-        saved = context.api("POST", f"{PREFIX}/{context.kb_id}/documents",
-            files={"file": ("当前路由.pdf", router_pdf("scan"))}).json()
+        # 先验证HTTP状态，避免直接读取doc_id掩盖真正的上传错误。
+        response = context.api(
+            "POST",
+            f"{PREFIX}/{context.kb_id}/documents",
+            files={"file": ("当前路由.pdf", router_pdf("scan"))},
+        )
+        assert response.status_code == 201, (
+            f"上传失败，HTTP状态码：{response.status_code}；"
+            f"安全响应内容：{response.text[:500]}"
+        )
+        saved = response.json()
         doc_id = UUID(saved["doc_id"])
         result = documents.process_document.apply(args=[saved["doc_id"]],
             task_id=saved["task_id"])
@@ -609,7 +622,7 @@ def test_image_network_exhaustion_requires_confirmed_force_reparse(
     assert response.json()["detail"]["error_code"] == "CACHE_REPARSE_REQUIRED"
     with cloud_context.session() as session:
         new_job = create_job(session, session.get(Document, UUID(job["doc_id"])),
-                             cloud_context.settings, force_reparse=True)
+                            cloud_context.settings, force_reparse=True)
         session.commit()
         new = {"job_id": str(new_job.job_id), "doc_id": str(new_job.doc_id)}
     assert new["job_id"] != job["job_id"] and new["doc_id"] == job["doc_id"]
