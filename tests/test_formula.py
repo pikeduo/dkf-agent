@@ -394,16 +394,22 @@ def test_upstream_failure_does_not_retry_switch_provider_or_mask_as_insufficient
     assert len(llm.calls) == 1
 
 
-def test_logs_keep_process_role_ids_and_safe_results_without_formula_or_context():
-    """记录关键阶段、源UUID和真实角色，不记录公式、表达式、上下文、结果或私有路径。"""
+@pytest.mark.parametrize("cached_level", [logging.WARNING, logging.DEBUG])
+def test_logs_keep_process_role_ids_and_safe_results_without_formula_or_context(cached_level):
+    """覆盖先前级别缓存后捕获关键事件/脱敏；设置与恢复均清理缓存，不污染后续用例。"""
     output = io.StringIO()
     handler = logging.StreamHandler(output)
     handler.setFormatter(logs.ReadableFormatter("formula-cli"))
     logger = logs.LOGGER
     previous = logger.handlers[:], logger.level, logger.propagate, logger.disabled
     token = logs.CONTEXT.set(None)
-    logger.handlers, logger.level, logger.propagate, logger.disabled = [handler], logging.INFO, False, False
     try:
+        logger.handlers, logger.propagate, logger.disabled = [handler], False, False
+        # 先制造前序用例可能留下的INFO开关缓存，再通过公开API切换，禁止直接赋值level。
+        logger.setLevel(cached_level)
+        logger.isEnabledFor(logging.INFO)
+        logger.setLevel(logging.INFO)
+        assert logger.isEnabledFor(logging.INFO)
         context = source(context=CONTEXT + "PRIVATE_CONTEXT")
         result = extract(context, LLMStub())
         with pytest.raises(LLMError):
@@ -416,5 +422,6 @@ def test_logs_keep_process_role_ids_and_safe_results_without_formula_or_context(
         assert CONTEXT not in content and "获利水平" not in content
     finally:
         handler.close()
-        logger.handlers, logger.level, logger.propagate, logger.disabled = previous
+        logger.handlers, logger.propagate, logger.disabled = previous[0], previous[2], previous[3]
+        logger.setLevel(previous[1])
         logs.CONTEXT.reset(token)
