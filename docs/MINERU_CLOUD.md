@@ -121,6 +121,8 @@ python -c $mineruZipCheck
 
 未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 终止本代次，不自动重建收费 batch；未知 err_msg 不透传。
 
+本地等待与平台终态须区分：已确认上传的原Batch在检查本地截止之前先做一次GET，done可正常回收；未完成且窗口过期才记录JOB_TIMEOUT。显式文档级Retry只允许当前代次/Hash、已上传/已有Batch的本地超时Job续看同一批次，私有`_local_wait_started_at`保存新观察窗口，不更改created_at/submitted_at/费用身份、不重置网络重试预算。不自动复活远端失败、未知POST或坏ZIP。详见[缓存miss真实验收与超时恢复](STAGE26_SUPPLEMENT.md#工作项一缓存miss与原批次恢复)，本次新收费批次仍待用户授权验收。
+
 所有入口远端 failed 都不自动追加 batch 或降级 Native；管理员核对后才可显式开启新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。
 
 没有 Outbox/自动补投器。活动 `/mineru` 恢复沿用 batch；失败文档优先缓存，收费历史而无可用缓存时拒绝新批次，需管理员 `/reparse?force=true` 明确确认费用。完成状态不可借 `/mineru` 重解析，Reindex 仅缓存回放；更换参数不能覆盖活动任务，不后台扫描。

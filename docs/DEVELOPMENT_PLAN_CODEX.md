@@ -5,7 +5,7 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段27公式语义结构化代码与Mock用例已编写，待用户测试及真实LLM/公式质量验收；阶段26及此前待验收事项保留。** 不自动进入28。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段27公式业务保持不变；阶段26缓存命中增量主链已由用户确认通过，本轮补新云批次与跨语言诊断，Mock可按用户本轮授权执行，真实云/GPU质量仍待人工验收。此前其他待办保留。** 不自动进入28。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  

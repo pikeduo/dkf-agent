@@ -244,7 +244,8 @@ def test_router_cloud_dispatch_failure_retry_keeps_same_paid_batch(context, monk
     document, session, settings = context
     tool.prepare_ingestion(session, document, settings)
     job = SimpleNamespace(job_id=uuid4(), doc_id=document.doc_id, task_id=uuid4(), file_hash=document.file_hash,
-        state="running", is_active=True, upload_complete=True, batch_id="existing-batch")
+        state="running", is_active=True, upload_complete=True, batch_id="existing-batch",
+        created_at=datetime.now(UTC), parse_options={})
     tool.rebind_cloud_management(document, job.task_id, job.job_id)
     document.processing_task_id, document.status = job.task_id, "OCR_PROCESSING"
     from app.services.mineru import jobs

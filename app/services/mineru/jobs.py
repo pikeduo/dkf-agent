@@ -292,12 +292,33 @@ def lock_job(
 
 
 def check_deadline(job: DocumentParseJob, settings: Settings) -> None:
-    """限制云端任务总体等待时间，避免消息无限调度或挂起。"""
+    """限制本轮本地观察窗口；显式Retry可续看同一批次，不篡改真实创建/提交时间。"""
 
-    if (
-        datetime.now(UTC) - job.created_at
-    ).total_seconds() > settings.mineru_job_timeout_seconds:
-        raise MinerUError("JOB_TIMEOUT", "MinerU 云端解析等待超时，请人工核对任务")
+    started = job.created_at
+    renewed = job.parse_options.get("_local_wait_started_at")
+    if renewed is not None:
+        try:
+            started = datetime.fromisoformat(renewed)
+            if started.tzinfo is None or not job.created_at <= started <= datetime.now(UTC):
+                raise ValueError
+        except (TypeError, ValueError):
+            raise MinerUError("JOB_CHECKPOINT", "MinerU 本地等待检查点无效，未提交新批次") from None
+    if (datetime.now(UTC) - started).total_seconds() > settings.mineru_job_timeout_seconds:
+        raise MinerUError("JOB_TIMEOUT", "MinerU 本地等待超时，不代表云任务失败；请核对原批次后Retry")
+
+
+def renew_local_wait(job: DocumentParseJob, settings: Settings) -> None:
+    """仅供显式Retry延长已上传批次的过期观察窗口；不重置费用身份或自动重试计数。"""
+
+    if not job.batch_id or not job.upload_complete:
+        return
+    check_normalizer_recipe(job)
+    try:
+        check_deadline(job, settings)
+    except MinerUError as exc:
+        if exc.code != "JOB_TIMEOUT":
+            raise
+        job.parse_options = job.parse_options | {"_local_wait_started_at": datetime.now(UTC).isoformat()}
 
 
 def check_normalizer_recipe(job: DocumentParseJob) -> None:
@@ -322,10 +343,10 @@ def submit_step(
     if not locked:
         return "skipped", 0
     document, job = locked
-    check_deadline(job, settings)
     check_normalizer_recipe(job)
     if job.upload_complete:
         return "check", 0
+    check_deadline(job, settings)
     if job.batch_id is None:
         if job.submission_attempted:
             age = (datetime.now(UTC) - job.submission_started_at).total_seconds()
@@ -416,9 +437,9 @@ def check_step(
     if not locked:
         return "skipped", 0
     document, job = locked
-    check_deadline(job, settings)
     check_normalizer_recipe(job)
     if not job.upload_complete or not job.batch_id:
+        check_deadline(job, settings)
         return "submit", 0
     result = provider.query(job.batch_id, job.data_id)
     job.state, job.trace_id = result["state"], result["trace_id"]
@@ -436,6 +457,8 @@ def check_step(
                           else error.code,
                           "MinerU 远端解析失败，未自动降级 Native 或追加新批次")
     if job.state != "done":
+        # Worker停机时间不是供应商失败：已提交批次先做一次GET，done仍可回收；未完成才停止调度。
+        check_deadline(job, settings)
         job.error_code = job.error_message = document.error_message = None
         session.commit()
         return "check", settings.mineru_poll_interval_seconds

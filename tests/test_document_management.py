@@ -161,7 +161,8 @@ def test_retry_resumes_exact_active_cloud_batch(context, monkeypatch):
     document, session, settings = context
     document.status = "OCR_PROCESSING"
     job = SimpleNamespace(job_id=uuid4(), task_id=document.processing_task_id, file_hash=document.file_hash,
-                          state="running", upload_complete=True, batch_id="existing-batch")
+                          state="running", upload_complete=True, batch_id="existing-batch",
+                          created_at=datetime.now(UTC), parse_options={})
     monkeypatch.setattr(tool, "active_job", lambda session, document: job)
     tool.prepare_management(session, document, settings, "retry")
     action = tool.next_action(session, document, settings)
@@ -174,7 +175,8 @@ def test_cloud_completed_before_retry_dispatch_advances_to_chunk_instead_of_resu
     document, session, settings = context
     document.status = "OCR_PROCESSING"
     job = SimpleNamespace(job_id=uuid4(), task_id=document.processing_task_id, file_hash=document.file_hash,
-                          state="running", upload_complete=True)
+                          state="running", upload_complete=True, batch_id="existing-batch",
+                          created_at=datetime.now(UTC), parse_options={})
     monkeypatch.setattr(tool, "active_job", lambda session, document: job)
     tool.prepare_management(session, document, settings, "retry")
     document.status, document.chunk_task_id = "CHUNKING", None

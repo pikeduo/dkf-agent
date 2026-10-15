@@ -724,6 +724,8 @@ Swagger 仍显示 Add string item 时，重启 API、Ctrl+F5 刷新，检查 `/s
 
 MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs、平台批次与直连网络/VPN/TUN，不关闭证书校验、不改签名 URL、不盲目创建新批次。详见 [网络排查与恢复](docs/MINERU_CLOUD.md#结果下载与代理排查)。
 
+`JOB_TIMEOUT` 是本地等待超时，不代表云端失败。已上传的原Batch可在重启后先查询/回收；核对原批次后，管理员普通 `/api/admin/documents/{doc_id}/retry` 可恢复当前代次的本地超时，保留原Job/Batch/Data ID，不自动重新收费。更新代码后由用户重启API/CPU Worker；新PDF费用前置检查、恢复边界及只读跨语言检索对照见 [阶段26补充说明](docs/STAGE26_SUPPLEMENT.md)。
+
 联合冒烟的 `SMOKE_RETRIEVAL_PREREQUISITE` 表示 READY/证据/向量前置校验未通过，Dense 尚未执行，不是 GPU 故障结论；先按 [只读失败复核](docs/PRESET_IMPORT.md#已有失败报告的只读复核) 查真实文档/Job 错误码，不重新上传。`code` 命令不可用时可用 Windows `notepad` 查看报告，无需安装新依赖。
 
 MinerU 远端 done、ZIP 已下载但出现 EMPTY_BLOCK 时，先保留旧结果并按 [合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标) 核对。新版归一化缓存为 mineru-adapter-v2，用户需按原命令重启 API/CPU Worker；旧冻结任务或 Reindex 版本不一致会安全拒绝，不自动付费重解析。不要删除旧缓存、修改文档状态或盲目 Force Reparse。

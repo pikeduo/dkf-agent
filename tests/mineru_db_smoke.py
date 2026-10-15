@@ -211,12 +211,18 @@ def test_execute_reports_task_failure_reason(monkeypatch):
 
 @pytest.mark.parametrize("explicit_cloud", [False, True])
 def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk(cloud_context, monkeypatch, explicit_cloud):
-    """用户隔离DB验收新上传/Router换绑及云结果接续；同批次只提交一次，不运行GPU。"""
+    """隔离DB验证缓存miss至ingest/done全链；仅模型/供应商/Broker为Stub，不运行GPU。"""
     from app.api import admin_knowledge_bases as admin
     from app.services import document_management as service
-    from app.tasks import documents, chunks, management
+    from app.tasks import documents, chunks, management, embeddings, indexing as index_tasks
+    from app.services.embedding import processing as embedding_processing
+    from app.services.parse_cache import ParseCache
+    from embedding_db_smoke import DenseStub
+    from router_samples import router_pdf
     context = cloud_context
-    managers, chunk_messages = [], []
+    managers, chunk_messages, downstream = [], [], []
+    context.settings = context.settings.model_copy(update={
+        "embeddings_dir": context.directory.parent / "vectors", "embedding_device": "cuda:0"})
 
     def manager_publish(doc_id, task_id):
         """只记录已提交的独立编排消息，不连接真实Broker。"""
@@ -238,16 +244,23 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
     monkeypatch.setattr(management, "get_settings", lambda: context.settings)
     monkeypatch.setattr(management.manage_document, "retry", lambda **kwargs: Retry())
     monkeypatch.setattr(chunks.chunk_document, "apply_async", chunk_publish)
+    for module in (chunks, embeddings, index_tasks):
+        monkeypatch.setattr(module, "processing_session", context.session)
+    monkeypatch.setattr(embedding_processing, "get_embedding_service", lambda *args: DenseStub())
+    monkeypatch.setattr(embeddings.embed_document, "apply_async", lambda **kwargs: downstream.append(("embed", kwargs)))
+    monkeypatch.setattr(index_tasks.index_document, "apply_async", lambda **kwargs: downstream.append(("index", kwargs)))
     if explicit_cloud:
         job = upload(context)
         doc_id = UUID(job["doc_id"])
     else:
         saved = context.api("POST", f"{PREFIX}/{context.kb_id}/documents",
-            files={"file": ("当前路由.pdf", pdf_bytes(1))}, data={"parse_mode": "mineru"}).json()
+            files={"file": ("当前路由.pdf", router_pdf("scan"))}).json()
         doc_id = UUID(saved["doc_id"])
         result = documents.process_document.apply(args=[saved["doc_id"]],
-            kwargs={"parse_mode": "mineru"}, task_id=saved["task_id"])
+            task_id=saved["task_id"])
         assert result.state == "SUCCESS" and result.result["status"] == "delegated_to_mineru"
+        assert result.result["route_decision"]["parse_mode"] == "auto"
+        assert result.result["route_decision"]["route_strategy"] == "mineru_whole"
         job = context.api("GET", f"{PREFIX}/{context.kb_id}/documents/{doc_id}/parse-jobs").json()[0]
         assert job["task_id"] != saved["task_id"]
     with context.session() as session:
@@ -257,6 +270,14 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
         assert service.config_for(document)["source_parse_task_id"] == job["task_id"]
         assert service.config_for(document)["stage"] == "cloud"
     assert execute(job).state == "SUCCESS"
+    # 真实提交检查点必须先落库；重复submit/未完成check不能再POST或PUT。
+    with context.session() as session:
+        checkpoint = session.get(DocumentParseJob, UUID(job["job_id"]))
+        assert checkpoint.batch_id and checkpoint.data_id and checkpoint.submission_attempted and checkpoint.upload_complete
+        assert ParseCache(context.settings).job_document(
+            session.get(Document, doc_id), checkpoint.parse_options["_cache_recipe"], checkpoint.job_id) is None
+    assert execute(job).result["status"] == "scheduled_check"
+    assert execute(job, "check").result["status"] == "scheduled_check"
     context.provider.state = "done"
     assert execute(job, "check").result["status"] == "awaiting_chunk"
     result = management.manage_document.apply(args=[str(doc_id)], task_id=str(manager_id))
@@ -266,7 +287,34 @@ def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk
         assert document.status == "CHUNKING" and document.chunk_task_id is not None
         assert service.config_for(document)["stage"] == "chunk"
         assert service.config_for(document)["source_parse_task_id"] == str(document.processing_task_id)
+        assert ParseCache(context.settings).job_document(
+            document, session.get(DocumentParseJob, UUID(job["job_id"])).parse_options["_cache_recipe"],
+            UUID(job["job_id"])) is not None
+    # 用生产阶段任务与管理决策推进，不手动置READY；GPU只提供确定性单位向量。
+    first_chunk = chunk_messages[0]
+    assert chunks.chunk_document.apply(args=first_chunk["args"], task_id=first_chunk["task_id"]).state == "SUCCESS"
+    assert management.manage_document.apply(args=[str(doc_id)], task_id=str(manager_id)).state == "RETRY"
+    assert downstream[-1][0] == "embed"
+    message = downstream[-1][1]
+    assert message["queue"] == "gpu_queue"
+    assert embeddings.embed_document.apply(args=message["args"], task_id=message["task_id"]).state == "SUCCESS"
+    assert management.manage_document.apply(args=[str(doc_id)], task_id=str(manager_id)).state == "RETRY"
+    assert downstream[-1][0] == "index"
+    message = downstream[-1][1]
+    assert index_tasks.index_document.apply(args=message["args"], task_id=message["task_id"]).state == "SUCCESS"
+    assert management.manage_document.apply(args=[str(doc_id)], task_id=str(manager_id)).result["status"] == "done"
+    assert execute(job).result["status"] == execute(job, "check").result["status"] == "skipped"
+    with context.session() as session:
+        document = session.get(Document, doc_id)
+        config = service.config_for(document)
+        assert document.status == "READY" and (config["operation"], config["state"]) == ("ingest", "done")
+        total, vectors = session.execute(select(func.count(), func.count(DocumentChunk.embedding))
+            .where(DocumentChunk.doc_id == doc_id)).one()
+        assert total == vectors > 0
+        assert session.scalar(select(func.count()).select_from(DocumentParseJob)
+            .where(DocumentParseJob.doc_id == doc_id)) == 1
     assert context.provider.submissions == 1
+    assert context.provider.uploads == 1
 
 
 @pytest.mark.parametrize(
@@ -925,3 +973,31 @@ def test_ambiguous_publish_failure_does_not_overwrite_completed_job(
         row = session.get(DocumentParseJob, UUID(ids["job_id"]))
         assert row.state == "done" and row.error_code is None
         assert session.get(Document, row.doc_id).status == "CHUNKING"
+
+
+def test_local_timeout_retry_api_recovers_original_uploaded_batch(cloud_context, monkeypatch):
+    """隔离DB通过正常Retry恢复旧JOB_TIMEOUT；旧/重复消息不申请第二个收费批次。"""
+    from app.api import admin_documents
+    context = cloud_context
+    monkeypatch.setattr(admin_documents, "get_settings", lambda: context.settings)
+    monkeypatch.setattr(admin_documents, "publish_management", lambda *args: True)
+    job = upload(context)
+    execute(job)
+    with context.session() as session:
+        current = session.get(DocumentParseJob, UUID(job["job_id"]))
+        original = current.job_id, current.task_id, current.batch_id, current.data_id
+        current.created_at = datetime.now(UTC) - timedelta(seconds=context.settings.mineru_job_timeout_seconds + 10)
+        session.commit()
+    assert execute(job, "check", expected_state="FAILURE").state == "FAILURE"
+    assert detail(context, job)[1]["error_code"] == "JOB_TIMEOUT"
+    recovered = context.api("POST", f"/api/admin/documents/{job['doc_id']}/retry")
+    assert recovered.status_code == 202
+    with context.session() as session:
+        current = session.get(DocumentParseJob, UUID(job["job_id"]))
+        assert current.is_active and current.error_code is None
+        assert (current.job_id, current.task_id, current.batch_id, current.data_id) == original
+        assert "_local_wait_started_at" in current.parse_options
+    context.provider.state = "done"
+    assert execute(job, "check").result["status"] == "awaiting_chunk"
+    assert execute(job, "check").result["status"] == "skipped"
+    assert context.provider.submissions == context.provider.uploads == 1

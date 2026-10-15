@@ -1,6 +1,6 @@
 # 文档管理与动态增量入库（阶段25/26）
 
-阶段25/26代码与测试用例已编写，未执行迁移、pytest、文件清理、Worker、GPU或MinerU真实请求。以前阶段的待验收事项不自动通过，不进入阶段27。阶段26没有新迁移、依赖或环境变量。
+阶段25/26代码与用例已实现。最新用户验收：阶段26缓存命中增量主链、READY/ingest-done、新文档检索及旧文档不变已通过；缓存未命中新云批次尚待人工确认。本轮获单独授权执行相关Mock回归，不执行数据库迁移、真实文件清理、Worker、GPU或MinerU请求。以前阶段待办保留，阶段27公式业务不变。阶段26没有新迁移、依赖或环境变量；补充验收见[阶段26补充](STAGE26_SUPPLEMENT.md)。
 
 ## 接口与观察
 
@@ -35,7 +35,7 @@
 
 投递意图在发送前提交；确认丢失或进程在提交/投递间中断存在缺口，没有Outbox或exactly-once保证。管理任务不会因为一直等不到结果就盲目重发子任务；用户检查后显式Retry可重投编排/原阶段检查点。重复同操作沿用活动management_task_id，不建立新业务代次。已READY的维护结果若最终编排标记丢失，Retry仅补done，不重新推理。
 
-失败阶段优先恢复Index→Embedding→Chunk→Parse，不把普通解析失败的旧Block当成当前已完成输入。活动云任务沿用job_id/batch_id及upload_complete决定submit/check；终态收费失败没有普通Retry自动新批次路径。失败Reparse的Retry改为普通ingest并复用业务代次，受现有收费历史保护；只有再次显式Force Reparse允许新云请求。
+失败阶段优先恢复Index→Embedding→Chunk→Parse，不把普通解析失败的旧Block当成当前已完成输入。活动云任务沿用job_id/batch_id及upload_complete决定submit/check；当前代次已上传Batch的JOB_TIMEOUT允许普通Retry续看原批次，不视为远端失败，其他终态仍不复活。终态收费失败没有普通Retry自动新批次路径。失败Reparse的Retry改为普通ingest并复用业务代次，受现有收费历史保护；只有再次显式Force Reparse允许新云请求。
 
 Reindex缓存缺失/损坏/原件Hash/配置/版本改变明确FAILED，不运行Router预检/Parser或MinerU，不自动Force。成功回放保持原Block身份与阅读顺序，再按当前配置建立新切片/GPU/入库检查点。改变Embedding冻结参数后应使用Reindex，不用重复/embed期待新参数生效。
 

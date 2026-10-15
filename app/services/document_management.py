@@ -102,6 +102,40 @@ def active_job(session, document):
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
 
 
+def retry_cloud_job(session, document, settings):
+    """显式Retry只恢复当前代次的本地超时批次；不复活远端失败、未知POST或旧代次。"""
+    from app.services.mineru.jobs import renew_local_wait
+    from app.services.mineru.errors import MinerUError
+    job = active_job(session, document)
+    if job is None and document.status == "FAILED":
+        job = session.scalar(select(DocumentParseJob).where(
+            DocumentParseJob.doc_id == document.doc_id,
+            DocumentParseJob.task_id == document.processing_task_id,
+            DocumentParseJob.state == "failed", DocumentParseJob.is_active.is_(False),
+            DocumentParseJob.error_code == "JOB_TIMEOUT").with_for_update())
+        if not isinstance(job, DocumentParseJob):
+            return None
+        if (job.doc_id != document.doc_id or job.task_id != document.processing_task_id
+                or job.is_active or job.state != "failed" or job.error_code != "JOB_TIMEOUT"
+                or job.file_hash != document.file_hash or not job.batch_id or not job.upload_complete
+                or job.provider != "mineru_cloud"):
+            raise ManagementError("MANAGEMENT_CHECKPOINT")
+        # 只有已确认上传的原batch可以重新观察；不创建Job、不更换data_id/task_id、不申请链接。
+        try:
+            renew_local_wait(job, settings)
+        except MinerUError:
+            raise ManagementError("MANAGEMENT_CHECKPOINT") from None
+        job.is_active, job.state, job.finished_at = True, "pending", None
+        job.error_code = job.error_message = document.error_message = None
+        document.status = "PARSING"
+    elif job is not None:
+        try:
+            renew_local_wait(job, settings)
+        except MinerUError:
+            raise ManagementError("MANAGEMENT_CHECKPOINT") from None
+    return job
+
+
 def require_idle(session, document) -> None:
     """行锁内拒绝活动云/切片/GPU/入库；排队原生任务通过换代次失效而非强杀进程。"""
     config = config_for(document)
@@ -233,7 +267,7 @@ def prepare_management(session, document, settings, operation: str, *, parse_mod
                 session.flush()
                 return document.management_task_id, False
             raise ManagementError("MANAGEMENT_STATE")
-        job = active_job(session, document)
+        job = retry_cloud_job(session, document, settings)
         if job is not None:
             if job.task_id != document.processing_task_id or job.file_hash != document.file_hash or job.state == "failed":
                 raise ManagementError("MANAGEMENT_CHECKPOINT")
