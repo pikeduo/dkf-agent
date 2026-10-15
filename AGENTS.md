@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**26：动态增量入库。已将新上传接入逐文档解析→切片→Embedding→Index→READY编排，补云代次换绑及联合冒烟兼容，代码与用例已编写，待用户测试和真实扫描PDF验收。阶段25迁移及此前待验收事项保留；阶段23回归用户已报告148通过，不自动进入27。**
+当前阶段：**27：公式语义结构化。已实现显式Evidence核对→单次所选LLM→受限表达式及变量含义/来源绑定，代码与Mock用例已编写，待用户测试及真实公式质量验收。阶段26真实增量及此前待验收事项保留；不自动进入28，不绑定参数或执行计算。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -52,11 +52,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 24 | 已实现POST /api/knowledge/search、/query、范围与脱敏错误；非有限数响应校验修正待用户复测，真实HTTP/云验收待完成 |
 | 25 | 已补八个文档级管理接口、逐阶段恢复、缓存Reindex至READY、异步自有文件/DB级联删除及共享缓存保护；新迁移/Mock/DB/Worker待验收 |
 | 26 | 已接通普通/显式云新上传自动入库、同Job云代次衔接与只读Query可见性用例；测试未运行，真实增量待验收 |
-| 27 及后续 | 未开展，等待用户确认 |
+| 27 | 已补公式提取服务、原式/变量/引用严格契约、四则语法规范化与人工验收CLI；测试未运行，真实LLM/数学语义待验收 |
+| 28 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
-- 用户已指定推进阶段26，但此前验收不自动通过；新上传复用阶段25编排与原阶段服务，不改检索/Prompt/引用或预置导入语义，不执行请求/模型/迁移/测试，不推进27。
+- 用户已指定推进阶段27，但此前验收不自动通过；公式服务不改Parser/上传/检索/原RAG Prompt或索引语义，不执行请求/模型/迁移/测试，不推进28。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -253,6 +254,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - /query的allow_cloud默认false，请求明确true才允许已有单次云合成；/search不调用LLM。异常不是空集/证据不足；输入/响应验证错误只返固定安全code/message，不回显input/ctx/正文或上游原文，不自动重试收费。
 - API同步工作在线程池执行，模型由项目共享服务惰性加载；模型/API部署与验收由用户执行。现阶段无鉴权/RBAC/请求幂等或取消保证，仅本机/可信内网使用；云许可标记不是用户权限，HTTP请求重跑可能再次收费。
 
+### 公式语义结构化
+
+- 仅显式extract_formula处理当前ACTIVE/READY指定Chunk中的完整MinerU formula Block；复用EvidenceService的Hash/字符/代次/页语义核对，邻近上下文只取同Chunk相邻两块，缺失/片段不猜测补全。不改原式/OCR，不自动在上传/Query插入付费调用。
+- 唯一LLM工厂尊重LLM_PROVIDER，默认DeepSeek，显式allow_cloud=True才允许公式/上下文外传；一次请求，无自动重试/换提供方。名称/变量含义的原文短引文必须唯一匹配白名单，来源ID/页/章节/bbox由Evidence回填；未知含义为null，不编造值或单位。
+- normalized_formula只做标准库有界AST白名单校验及四则规范化，不求值、不用eval/exec/parse_expr，不调用SymPy；不支持函数/幂/不定项求和等时明确失败或unsupported。formula_id绑定原件/解析/Chunk/Block身份；来源仅为读取快照，不建立第二套真相表或公式缓存。
+- success仅指结构/引用通过，semantic_validation保持manual_pending；数学等价、百分比口径与名称翻译须人工核验，不能用合法引文宣称语义验真。参数绑定和安全计算留阶段28/29；日志复用每日文件与注册formula-cli角色，禁止记录原式、规范式、变量含义、上下文或模型原文。
+
 ### Admin文档管理与动态增量
 
 - 新上传（普通auto/native/mineru及显式云上传）自动建立ingest编排，保留单文件doc_id与原响应契约，按原阶段任务推进至READY；历史文档不自动接管，显式Retry/Reindex/Reparse/Delete及旧逐阶段/预置CLI语义保留。复用现有management字段，不新增业务表/全库重建。
@@ -285,6 +293,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 引用契约、Block字符反查、页语义与失效边界 | [Citation / Evidence](docs/CITATION_EVIDENCE.md) |
 | 搜索/问答HTTP契约、云许可及安全错误 | [Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md) |
 | 管理接口、恢复编排、删除所有权及人工验收 | [Admin文档管理](docs/DOCUMENT_MANAGEMENT.md) |
+| 公式提取、表达式语法、语义来源及人工验收 | [公式语义结构化](docs/FORMULA_SEMANTICS.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 

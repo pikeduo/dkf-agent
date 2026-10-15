@@ -565,6 +565,14 @@ python scripts/migrate_llm_env.py --apply
 
 PDF沿用物理页与点数bbox，图片为第1页/像素bbox，Office沿用逻辑页且bbox为空；来源一致不证明答案忠实度。详细契约、反查用法及人工核验见[Citation / Evidence](docs/CITATION_EVIDENCE.md)。
 
+### 公式语义结构化
+
+Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`只处理指定READY文档中已有、完整的MinerU公式Block，先核对Evidence，再复用`LLM_PROVIDER`选择的现有服务做一次语义结构化。默认DeepSeek官方；选custom时仍遵守独立配置，不失败换提供方。需手动部署好的PostgreSQL与所选LLM配置，不需要GPU/Redis/Worker、新依赖或迁移；不新增HTTP接口，也不在上传或普通RAG中自动调用。
+
+返回公式名称、原式、受限四则表达式、变量/含义及完整来源；未知含义为null，不改OCR原式或伪造页码。**只有明确`allow_cloud=True`才允许公式及相邻正文外传并接受本次费用**，异常不自动重试。结构合法不证明数学等价或语义准确，结果标记`manual_pending`；本功能不绑定变量值、不执行SymPy计算。
+
+用户可用`python -m scripts.stage27_formula_acceptance`查看默认dry-run说明，实际调用需真实业务ID及显式执行/云许可。详细输入选择、限制和手动验收见[公式语义说明](docs/FORMULA_SEMANTICS.md)。
+
 ### 预置知识库导入
 
 已有 OHR-Bench、OmniDocBench 和 OCB 原件时，可按 [三数据集联合冒烟](docs/PRESET_IMPORT.md#三数据集最短操作新运行) 在独立测试库抽取约14份（5 PDF、3图像、三类Office各2份），完成上传→READY→Dense及分数据集报告。直接使用已下载 OCB，不要求补齐缺失43份、许可Excel或手工SQL导出；默认dry-run，真实处理前须用户确认全部所选文件云外传及费用。OCB断言人工核验、Omni GT不当QA，不能代替正式多格式验收或宣称问答准确率。

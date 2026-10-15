@@ -34,6 +34,7 @@ ROLE_LABELS = MappingProxyType({
     "rerank-cli": "Reranker CLI",
     "rag-cli": "RAG CLI",
     "evidence-cli": "Evidence CLI",
+    "formula-cli": "Formula CLI",
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
     "unknown": "未知进程",
@@ -43,6 +44,7 @@ FIELDS = {
     "task_id",
     "doc_id",
     "chunk_id",
+    "block_id",
     "kb_id",
     "job_id",
     "batch_id",
@@ -105,7 +107,7 @@ FIELDS = {
     "visual_cache_hit_count",
     "operation",
 }
-LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "kb_id", "job_id"}
+LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "block_id", "kb_id", "job_id"}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
 PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 FILE_PREFIX = "knowledge-service"
@@ -217,6 +219,12 @@ EVENT_LABELS = {
     "management.deleted": "文档自有文件清理及数据库级联删除已完成",
     "management.failed": "文档管理未完成，保留检查点及安全原因",
     "management.error_record_failed": "文档管理失败原因未能写入数据库",
+    "formula.started": "开始指定来源的公式语义提取",
+    "formula.synthesis_started": "公式及相邻证据已核对，准备单次语义结构化",
+    "formula.finished": "公式定义结构校验完成，语义及运算口径仍待人工核验",
+    "formula.insufficient": "当前公式证据不足，未补写定义或猜测变量",
+    "formula.unsupported": "公式超出第一版语法范围，未执行计算",
+    "formula.failed": "公式提取安全失败，未发布部分定义或自动重试",
     "rag.node_converted": "已有 Chunk 已转换为运行时 Node，未重新处理或落库",
     "rag.result_converted": "运行时 Node 已还原项目证据结果",
     "rag.query_encoded": "Query 已通过项目共享服务编码，未新增文档向量",
@@ -280,6 +288,7 @@ FIELD_LABELS = {
     "request_id": "request_id",
     "doc_id": "doc_id",
     "chunk_id": "chunk_id",
+    "block_id": "block_id",
     "kb_id": "kb_id",
     "task_id": "task_id",
     "job_id": "job_id",

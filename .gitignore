@@ -47,6 +47,7 @@ docs/*
 !docs/CITATION_EVIDENCE.md
 !docs/KNOWLEDGE_QUERY_API.md
 !docs/DOCUMENT_MANAGEMENT.md
+!docs/FORMULA_SEMANTICS.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*

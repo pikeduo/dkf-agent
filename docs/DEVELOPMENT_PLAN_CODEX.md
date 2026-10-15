@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段26动态增量入库代码与用例已编写，待用户执行测试及真实扫描PDF验收；阶段25迁移及此前待验收事项保留。** 不自动进入27。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段27公式语义结构化代码与Mock用例已编写，待用户测试及真实LLM/公式质量验收；阶段26及此前待验收事项保留。** 不自动进入28。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮仅将新上传接续既有逐文档处理编排，不执行测试/真实查询/模型，不改业务数据库、Prompt或索引语义。\
+> 本轮仅增加显式公式语义服务与独立公式Prompt，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -3073,6 +3073,8 @@ Parse Cache 默认复用；只有 `reparse` 才重新调用 MinerU Cloud。
 
 # 33. 阶段 27：公式语义结构化
 
+代码与用例已编写，尚未执行；契约与用户命令见[公式语义说明](FORMULA_SEMANTICS.md)。仅提供显式Python服务与默认dry-run的人工CLI，不新增HTTP接口/迁移/配置，不改普通RAG或上传链路。
+
 ## 目标
 在 MinerU 的公式视觉解析结果基础上完成中级任务 6 的语义层处理。
 
@@ -3114,6 +3116,10 @@ MinerU 负责视觉 / 版面层公式提取；DeepSeek 负责语义结构化；S
 
 ## 完成标准
 公式可被转换为稳定的业务表达式，变量含义和公式来源均可追溯。
+
+- 当前入口`extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`复用EvidenceService核对完整MinerU公式与同Chunk相邻上下文；仅显式授权后调用现有LLM工厂一次，默认DeepSeek，遵守全局提供方选择。
+- 保留raw_formula及原来源/页语义；受限四则表达式规范化、严格JSON、原文引文唯一定位，未知变量含义保持null。无效/过期/超限/截断不洗成成功，不为失败自动重试收费。
+- 返回稳定源身份formula_id及manual_pending语义标记，不声称已证明数学等价；人工对照九类公式、百分比及变量含义。参数值绑定和SymPy计算仍为阶段28/29，不提前实现。
 
 ---
 
