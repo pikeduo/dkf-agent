@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.api import admin_knowledge_bases, mineru
 from app.models import Document, DocumentParseJob
-from app.services import document_upload
+from app.services import batch_upload, document_upload
 from app.tasks import documents
 
 pytest_plugins = ("business_logging_smoke",)
@@ -238,8 +238,11 @@ def test_cloud_batch_is_explicit_independent_and_handles_duplicate(
     assert len(list(context.directory.iterdir())) == 2
 
 
-def test_cloud_configuration_failure_is_batch_level(cloud_context, monkeypatch):
-    """Token 缺失为整批预检失败，不留下文件、文档或任务。"""
+@pytest.mark.parametrize("file_count", [1, 2])
+def test_cloud_cache_miss_without_token_preserves_upload_and_creates_no_job(
+    cloud_context, monkeypatch, file_count
+):
+    """无Token的缓存miss保留已提交原件，逐项安全拒绝；不创建云Job或投递收费任务。"""
 
     settings = cloud_context.settings.model_copy(
         update={"mineru_api_token": SecretStr("")}
@@ -251,11 +254,34 @@ def test_cloud_configuration_failure_is_batch_level(cloud_context, monkeypatch):
         return settings
 
     monkeypatch.setattr(mineru, "get_settings", no_token)
+    files = [("图.png", png_bytes()), ("文.pdf", pdf_bytes())][:file_count]
     response = post_batch(
-        cloud_context.api, cloud_context.kb_id, [("图.png", png_bytes())], cloud=True
+        cloud_context.api, cloud_context.kb_id, files, cloud=True
     )
-    assert response.status_code == 503
-    assert not cloud_context.directory.exists()
+    if file_count == 1:
+        assert response.status_code == 503
+        items = [{"status_code": response.status_code, "doc_id": response.json()["detail"]["doc_id"],
+                  "detail": response.json()["detail"]}]
+    else:
+        assert response.status_code == 200
+        payload = response.json()
+        assert (payload["total"], payload["accepted_count"], payload["failed_count"]) == (2, 0, 2)
+        items = payload["items"]
+    assert len({item["doc_id"] for item in items}) == file_count
+    for item, (name, content) in zip(items, files, strict=True):
+        assert item["status_code"] == 503 and item["detail"]["error_code"] == "TOKEN_MISSING"
+        prefix = f"{PREFIX}/{cloud_context.kb_id}/documents/{item['doc_id']}"
+        document = cloud_context.api("GET", prefix).json()
+        assert document["file_name"] == name and document["status"] == "UPLOADED"
+        assert document["error_message"] is None
+        assert cloud_context.api("GET", prefix + "/parse-jobs").json() == []
+        assert (cloud_context.directory / f"{item['doc_id']}.{document['file_type']}").read_bytes() == content
+    assert cloud_context.api("GET", f"{PREFIX}/{cloud_context.kb_id}/documents").json()["total"] == file_count
+    assert len(list(cloud_context.directory.iterdir())) == file_count
+    assert cloud_context.messages == []
+    assert (cloud_context.provider.submissions, cloud_context.provider.uploads,
+            cloud_context.provider.queries, cloud_context.provider.downloads) == (0, 0, 0, 0)
+    assert "unit-secret-not-real" not in response.text
 
 
 def test_cloud_publish_failure_preserves_job_and_continues(cloud_context, monkeypatch):
@@ -408,30 +434,57 @@ def test_database_flush_failure_does_not_revoke_previous_commit(
 def test_commit_confirmation_lost_preserves_file_for_list_recovery(
     upload_context, monkeypatch
 ):
-    """模拟已提交但确认丢失，503 不代表未保存；列表能找回原件与记录且不重复投递。"""
+    """定点模拟第二文件存储提交后确认丢失；额外编排commit不改变故障对象或丢失原件。"""
 
     api, kb_id, directory = upload_context
     original = Session.commit
-    calls = 0
+    original_store = batch_upload.store_document
+    target_name = "确认丢失.txt"
+    fault_key = "test_batch_upload_commit_subject"
+    injected, messages = [], []
+
+    def track_storage_commit(session, kb_id, upload, settings, **kwargs):
+        """只在单文件存储边界标记故障对象，退出后移除，不污染后续编排事务。"""
+
+        session.info[fault_key] = upload.filename
+        try:
+            return original_store(session, kb_id, upload, settings, **kwargs)
+        finally:
+            session.info.pop(fault_key, None)
 
     def lost_confirmation(session):
-        """先实际提交第二个单文件，再模拟连接失效导致确认丢失，不破坏真实连接。"""
+        """目标原件真实提交后仅注入一次确认丢失，不依赖全局commit次数。"""
 
-        nonlocal calls
-        calls += 1
+        target_storage = session.info.get(fault_key) == target_name
         original(session)
-        if calls == 2:
+        if target_storage and not injected:
+            injected.append(target_name)
             raise OperationalError(
                 "COMMIT", None, Exception("SECRET"), connection_invalidated=True
             )
 
+    def accepted(*args, **kwargs):
+        """记录已确认文件的解析投递；确认丢失项不能被自动重投，不访问Broker。"""
+
+        messages.append(kwargs)
+
+    monkeypatch.setattr(batch_upload, "store_document", track_storage_commit)
     monkeypatch.setattr(Session, "commit", lost_confirmation)
+    monkeypatch.setattr(documents.process_document, "apply_async", accepted)
     response = post_batch(
         api, kb_id, [("先.txt", b"one"), ("确认丢失.txt", b"two"), ("后.txt", b"three")]
     )
     assert [item["status_code"] for item in response.json()["items"]] == [201, 503, 201]
     assert response.json()["items"][1]["doc_id"] is None
-    assert api("GET", f"{PREFIX}/{kb_id}/documents").json()["total"] == 3
+    listing = api("GET", f"{PREFIX}/{kb_id}/documents").json()
+    assert listing["total"] == 3 and injected == [target_name]
+    recovered = next(item for item in listing["items"] if item["file_name"] == target_name)
+    assert recovered["status"] == "UPLOADED"
+    assert (directory / f"{recovered['doc_id']}.txt").read_bytes() == b"two"
+    assert len(messages) == 2
+    assert {message["args"][0] for message in messages} == {
+        response.json()["items"][index]["doc_id"] for index in (0, 2)
+    }
     assert len(list(directory.iterdir())) == 3
     assert "SECRET" not in response.text
 
