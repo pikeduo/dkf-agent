@@ -1,10 +1,11 @@
-"""管理员显式维护的持久化编排；复用既有任务，不重新实现Parse/Chunk/Embedding/Index。"""
+"""上传增量及管理员维护的持久化编排；复用既有文档任务，不重建整个知识库。"""
 
 import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.business_logging import log_event
 from app.models import Document, DocumentParseJob
@@ -50,7 +51,7 @@ def config_for(document) -> dict | None:
         if (not isinstance(config, dict) or config["version"] != "document-management-v1"
                 or document.management_task_id is None
                 or config["source_parse_task_id"] != str(document.processing_task_id)
-                or config["operation"] not in {"retry", "reindex", "reparse", "delete"}
+                or config["operation"] not in {"ingest", "retry", "reindex", "reparse", "delete"}
                 or config["parse_operation"] not in {"ingest", "reindex", "reparse"}
                 or config["parse_mode"] not in {"auto", "native", "mineru"}
                 or config["stage"] not in STAGES or config["state"] not in {"running", "failed", "done"}
@@ -123,6 +124,79 @@ def retry_stage(document) -> str:
     if document.chunk_task_id is not None:
         return "chunk"
     return "parse"
+
+
+def prepare_ingestion(session, document, settings, *, parse_mode="auto", job=None) -> UUID:
+    """行锁内为新上传文件建立增量检查点；首阶段仍由原上传入口提交，不重置解析代次。
+
+    显式云上传可绑定刚创建的Job或已成功回放的缓存；不恢复旧失败文档、不触发云请求。
+    """
+    previous = config_for(document)
+    if previous is not None:
+        if (previous["operation"] == "ingest" and previous["state"] == "running"
+                and previous["parse_mode"] == parse_mode):
+            return document.management_task_id
+        raise ManagementError("MANAGEMENT_STATE")
+    if (parse_mode not in {"auto", "native", "mineru"} or document.processing_task_id is None
+            or any(getattr(document, field) is not None for field in
+                   ("chunk_task_id", "embedding_task_id", "index_task_id"))):
+        raise ManagementError("MANAGEMENT_CHECKPOINT")
+    stage, stage_task_id = "parse", str(document.processing_task_id)
+    if job is None:
+        if document.status != "UPLOADED":
+            raise ManagementError("MANAGEMENT_STATE")
+    else:
+        if (job.doc_id != document.doc_id or job.task_id != document.processing_task_id
+                or job.file_hash != document.file_hash or parse_mode != "mineru"):
+            raise ManagementError("MANAGEMENT_CHECKPOINT")
+        if job.is_active and document.status in {"PARSING", "OCR_PROCESSING"}:
+            stage, stage_task_id = "cloud", str(job.job_id)
+        elif not job.is_active and job.state == "done" and document.status == "CHUNKING":
+            stage, stage_task_id = "chunk", None
+        else:
+            raise ManagementError("MANAGEMENT_STATE")
+    document.management_task_id = uuid4()
+    document.management_config = {
+        "version": "document-management-v1", "operation": "ingest", "parse_operation": "ingest",
+        "source_parse_task_id": str(document.processing_task_id), "parse_mode": parse_mode,
+        "state": "running", "stage": stage, "stage_task_id": stage_task_id,
+        # 原入口已冻结首阶段发送意图；管理任务只接续后续阶段，缓存命中则直接准备Chunk。
+        "dispatched": stage != "chunk", "resume_failed": False,
+        "expires_at": (datetime.now(UTC) + timedelta(seconds=max(600, settings.mineru_job_timeout_seconds))).isoformat(),
+    }
+    session.flush()
+    return document.management_task_id
+
+
+def rebind_cloud_management(document, task_id: UUID, job_id: UUID) -> None:
+    """Router创建云代次时同步绑定管理检查点；同事务换代，管理UUID与既有收费Job不变。"""
+    config = config_for(document)
+    if config is None:
+        return
+    if config["stage"] != "parse" or config["operation"] == "delete":
+        raise ManagementError("MANAGEMENT_CHECKPOINT")
+    config.update(source_parse_task_id=str(task_id), stage="cloud", stage_task_id=str(job_id), dispatched=True)
+    document.management_config = config
+
+
+def record_ingestion_dispatch_failure(session, doc_id: UUID, manager_id: UUID) -> None:
+    """独立短事务标记上传编排投递失败；不覆盖已推进的Document或新代次，原件始终保留。"""
+    session.rollback()
+    try:
+        with session.begin():
+            mark_failed(session, doc_id, manager_id, "MANAGEMENT_DISPATCH")
+    except (SQLAlchemyError, ManagementError):
+        session.rollback()
+        log_event("management.error_record_failed", level=logging.ERROR, doc_id=doc_id,
+                  task_id=manager_id, error_code="MANAGEMENT_DISPATCH")
+
+
+def publish_ingestion(session, doc_id: UUID, manager_id: UUID) -> None:
+    """首阶段提交后启动后续增量编排；确认失败安全记录并交由显式Retry恢复，不盲目补投。"""
+    if not publish_management(doc_id, manager_id):
+        record_ingestion_dispatch_failure(session, doc_id, manager_id)
+        raise ManagementError("MANAGEMENT_DISPATCH")
+    log_event("management.requested", doc_id=doc_id, task_id=manager_id, operation="ingest")
 
 
 def prepare_management(session, document, settings, operation: str, *, parse_mode="auto") -> tuple[UUID, bool]:

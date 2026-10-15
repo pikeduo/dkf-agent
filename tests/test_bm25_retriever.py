@@ -90,6 +90,23 @@ def test_cache_refreshes_ready_membership_content_and_current_metadata():
     assert retriever.retrieve('ESA') == [] and retriever._index.ids == ()
 
 
+def test_existing_bm25_instance_includes_incremental_ready_document_without_business_rebuild():
+    """新READY文档进入当前快照时仅重建本地派生词频；已有Chunk及业务任务代次不变。"""
+    first = lexical_pair(number=1)
+    second = lexical_pair(first[0].kb_id, number=2)
+    rows = [first]
+    factory, _ = factory_for(rows)
+    retriever = BM25Retriever(first[0].kb_id, session_factory=factory)
+    before = copy.deepcopy(first[0].chunk_metadata), first[1].processing_task_id, first[1].index_task_id
+    assert len(retriever.retrieve('NASA')) == 1
+    old_index = retriever._index
+    rows.append(second)
+    nodes = retriever.retrieve('NASA')
+    assert {node.node.metadata['doc_id'] for node in nodes} == {str(first[1].doc_id), str(second[1].doc_id)}
+    assert retriever._index is not old_index
+    assert (first[0].chunk_metadata, first[1].processing_task_id, first[1].index_task_id) == before
+
+
 def test_source_failure_cannot_fall_back_to_existing_cache():
     """已有缓存也不能掩盖本次来源失败或非READY越界行，错误不返回半份证据。"""
     pair = lexical_pair()

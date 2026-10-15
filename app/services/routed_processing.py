@@ -256,15 +256,20 @@ def run_routed_step(
 
 
 def record_dispatch_error(session: Session, job_id: UUID) -> None:
-    """投递确认失败只保留活动检查点和安全提示，绝不回退已完成云解析状态。"""
+    """投递失败保留活动云检查点；已有编排标记失败供Retry恢复，不回退已完成云状态。"""
 
     from app.services.mineru.jobs import lock_job
 
     locked = lock_job(session, job_id)
     if locked:
         document, job = locked
+        from app.services.document_management import mark_failed
+        if document.management_task_id is not None:
+            mark_failed(session, document.doc_id, document.management_task_id, "MANAGEMENT_DISPATCH")
         job.error_code = "QUEUE"
         job.error_message = document.error_message = (
+            "MinerU 短任务投递确认失败，请用文档Retry恢复同一任务"
+            if document.management_task_id is not None else
             "MinerU 短任务投递确认失败，请用已有文档 MinerU 入口恢复同一任务"
         )
     log_event(

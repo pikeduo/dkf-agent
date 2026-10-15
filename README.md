@@ -2,7 +2,7 @@
 
 `knowledge-service` 用于非结构化知识库建设与问答。当前支持知识库管理、单选/多选上传、异步解析及状态查询；默认自动选择 Native 或 MinerU Cloud，复杂 XLSX 优先局部云增强。
 
-**解析 → CHUNKING，显式切片 → EMBEDDING，显式本地向量化 → INDEXING，显式 pgvector 入库 → READY。** READY表示所有Chunk向量已入库；提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
+**新上传 → 自动解析 → Chunk → 本地 Embedding → pgvector → READY → 自动参与同库查询。** 每份文档独立增量处理，不重建整个知识库；READY表示所有Chunk向量已入库，不代表内容质量或问答准确。提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
 ## 1. 环境与配置
 
@@ -205,13 +205,13 @@ python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --poo
 
 默认访问 [Swagger](http://127.0.0.1:8000/docs) 和 [健康接口](http://127.0.0.1:8000/health)。监听地址/端口以 Uvicorn 参数为准；局域网访问加 `--host 0.0.0.0 --port 8000`，`--reload` 仅用于开发。
 
-CPU Worker 应显示 default_queue、process_document、chunk_document、index_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析、切片或入库。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
+CPU Worker 应显示 default_queue、manage_document、process_document、chunk_document、index_document、submit_mineru_parse、check_mineru_result 和 ready；仅启动 API 不会执行解析、切片或入库。新上传自动接续到READY，还须启动下节GPU Worker。Windows threads/solo 仅用于开发，正式 Linux CPU 使用 prefork 并发 2～4。
 
 自动模式默认可能生成 XLSX 的 PDF Bundle，因此 Windows 使用上面的串行 Worker；不要同时保留旧 threads Worker 消费该队列。
 
 ### 本地 BGE-M3 与 GPU Worker
 
-仅做上传/解析时无需模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用 `sentence_transformers.SentenceTransformer`，不是 FlagEmbedding.BGEM3FlagModel；不启用 Sparse/ColBERT。固定 `local_files_only=True`、`trust_remote_code=False`，缺文件报错，Worker 不自动下载或降级 CPU。
+新上传自动入库需要已部署BGE-M3及GPU Worker；缺失时不能达到READY，修复部署后使用文档级Retry恢复，不需要重传。历史逐阶段入口仅做解析时仍无需模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用 `sentence_transformers.SentenceTransformer`，不是 FlagEmbedding.BGEM3FlagModel；不启用 Sparse/ColBERT。固定 `local_files_only=True`、`trust_remote_code=False`，缺文件报错，Worker 不自动下载或降级 CPU。
 
 以下安装、下载、模型验证、迁移和启动命令**仅由用户手动执行**，不是给 Codex 的执行授权；不需要重建整个 Conda 环境。
 
@@ -350,7 +350,7 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | GET | `/health`、`/docs`、`/openapi.json` | 健康、Swagger、接口定义 |
 | POST / GET | `/api/admin/knowledge-bases` | 创建 / 分页列出知识库 |
 | GET | `/api/admin/knowledge-bases/{kb_id}` | 知识库详情 |
-| GET / POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档列表 / 单选、多选上传 |
+| GET / POST | `/api/admin/knowledge-bases/{kb_id}/documents` | 文档列表 / 单选、多选上传并自动增量入库 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}` | 文档状态、错误、任务标识 |
 | GET | `/api/admin/documents/{doc_id}`、`/{doc_id}/status` | 文档详情、各阶段任务、安全云任务及Block/Chunk/向量统计 |
 | GET | `/api/admin/documents/{doc_id}/blocks`、`/{doc_id}/chunks` | 按原序分页查询解析/切片证据，limit=1～100、offset≥0 |
@@ -365,7 +365,7 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/process` | 重新投递，可选 Query parse_mode，无请求体 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reindex` | 仅回放成功解析缓存，停在等待切片，不调用 MinerU |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/reparse?force=true` | 管理员明确重新解析，可选 parse_mode，可能重新收费 |
-| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式云上传，支持多选 |
+| POST | `/api/admin/knowledge-bases/{kb_id}/mineru/documents` | 显式云上传后自动增量入库，支持多选 |
 | POST | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/mineru` | 已有文档云提交 / 活动云任务恢复，无请求体 |
 | GET | `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/parse-jobs` | 云任务状态与安全错误 |
 | POST | `/api/knowledge/search` | 同范围Hybrid检索及本地Top5重排，不调用LLM |
@@ -411,15 +411,17 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 单份普通上传返回 201，显式云上传返回 202，均不代表解析成功。多份返回 200 及 total/accepted_count/failed_count/items，**需检查每项 status_code、doc_id 和 detail，不代表全批成功**；单项失败不撤销其他项。重复内容返回 409 和已有 doc_id，无需重传。队列/提交失败可能已保存原件，应先查文档列表再恢复。
 
+两种新上传入口均为每份文件建立`ingest`编排：解析完成后自动投递切片、GPU向量化与CPU入库，无需再手动调用`/chunk /embed /index`。`GET /api/admin/documents/{doc_id}/status`可查看`management_task_id`、编排状态及各阶段数量；原上传`task_id`仍代表解析代次，不是整条链路的完成凭据。须使用ACTIVE知识库，并保证各进程共用存储、GPU模型身份与查询配置一致；完成后无需调用知识库Reindex或重启查询进程。
+
 Native 文本严格解码 UTF-8、BOM UTF-16/32、GB18030；CSV 支持引号字段、空值，不支持不等宽行。DOCX 提取正文/表格；XLSX 按 Sheet 提取单元格、保留公式不执行，不解析图片/图表。Native Office/文本为逻辑页 1，PDF 为物理页；云 Office 为转换后逻辑页、bbox 为空，不声称原件排版坐标。
 
 MinerU 还受平台 200 MB/200 页限制，应用取更小限制；Office 转换页数由平台最终校验。云失败不自动降回 Native。复杂 XLSX 的 Native/云质量需在两个知识库单独对照，不能直接假定云解析完整。
 
 ### 状态查询与恢复
 
-- 文档详情是业务状态依据；云解析另查 parse-jobs。成功为 Document=CHUNKING，云 job=done；Celery SUCCESS 或交接结果 delegated_to_mineru 不代表整份解析成功。
+- 文档详情是业务状态依据；解析完成为Document=CHUNKING、云job=done，新上传继续经过EMBEDDING/INDEXING至READY。云Celery SUCCESS或delegated_to_mineru只代表短步骤，不代表全链路完成；中间状态可能很快经过。
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
-- 仅 UPLOADED/FAILED 可通过 /process 重投，默认 auto；管理员可覆盖。活动云任务用 /mineru 恢复同一任务；收费失败且无可用缓存时，普通重投不再申请批次，返回 CACHE_REPARSE_REQUIRED。相同内容已有活动云任务时为 CACHE_IN_PROGRESS，完成后再重投可复用结果。
+- 新上传失败或编排超时先查`/api/admin/documents/{doc_id}/status`、详情及parse-jobs，修复原因后用文档级`/retry`恢复，不重传或重建全库。旧无编排文档仅UPLOADED/FAILED可通过`/process`重投，活动云任务用`/mineru`恢复；活动管理任务拒绝旧写入口。收费失败且无缓存仍需明确Force，不因普通Retry新增云批次。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
 - 旧知识库嵌套`/reindex`保留仅回放到CHUNKING的兼容语义；新文档级`/api/admin/documents/{doc_id}/reindex`自动接续切片、GPU向量化及入库。两者均不重新调用MinerU，缓存缺失/损坏/参数变化明确失败，旧结果保留供诊断，不自动Force。成功回放替换Block时同事务失效旧Chunk。
 - `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
@@ -439,7 +441,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 ### 已有文档切片
 
-文档详情为 CHUNKING 且解析已完成时，提交一次（无请求体）：
+以下仅用于**历史无活动编排**的文档；新上传由后台自动切片，不要重复提交。文档详情为CHUNKING且解析已完成时，提交一次（无请求体）：
 
 ```powershell
 curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/documents/文档UUID/chunk"
@@ -458,7 +460,7 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 `DELETE`返回202，先令文档退出检索，CPU再清理自有上传副本、Block/Chunk/向量、文档解析/Hybrid/GPU目录和Job指针；活动任务409。无其他文档引用的整份缓存会清理，跨文档共享及无法确认独占的视觉缓存保留，不删除正式preset、模型、日志或全局索引。清理失败保留删除检查点供Retry，成功后详情404；文件/数据库非原子，删除前备份并仅用可丢弃文档验证。此接口无鉴权，仅可信内网使用。
 
-具体响应、恢复边界和人工验收见[Admin文档管理](docs/DOCUMENT_MANAGEMENT.md)。缓存固定锁运行中不可删除；新阶段仅由显式管理请求开启，不自动推进普通上传流程。
+具体响应、恢复边界和增量入库人工验收见[文档管理与增量入库](docs/DOCUMENT_MANAGEMENT.md)。缓存固定锁运行中不可删除；历史文档不自动补处理，预置导入CLI及旧逐阶段维护接口保留原流程。新上传只推进自身文档，Dense读取当前READY数据、BM25刷新可重建快照，不修改其他文档或重建全库向量。
 
 ### 已有 Chunk 向量化
 

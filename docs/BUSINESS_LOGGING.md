@@ -48,7 +48,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `upload.batch_rejected / batch_started` | 批次数量拒绝/预检后开始逐文件处理，包含 `file_count`；知识库或配置预检失败仅有 HTTP 请求日志 |
 | `upload.batch_item / batch_finished` | 逐文件的输入序号、状态码、已知 doc_id、耗时；最终的总数、接收/失败数量和批次耗时，不记录结果正文 |
 | `document.dispatched / dispatch_failed` | 原生消息投递确认/失败；确认成功不代表 Worker 已消费 |
-| `management.requested / dispatched / advanced / rejected` | 显式维护检查点已提交/管理消息投递/下一阶段投递/活动任务拒绝；仅UUID、操作、阶段及固定原因，无配置、路径或正文 |
+| `management.requested / dispatched / advanced / rejected` | 上传ingest或显式维护检查点已提交/管理消息投递/下一阶段投递/活动任务拒绝；仅UUID、操作、阶段及固定原因，无配置、路径或正文 |
 | `management.finished / deleted / failed / dispatch_failed / error_record_failed` | 管理结束（以Document为准）/自有文件及数据库删除均完成/失败与投递或记录失败；不会把部分文件清理当删除成功 |
 | `task.started / finished` | Celery 本次执行及状态/耗时；云端短任务 SUCCESS 不代表整份文档完成 |
 | `parse.started / validated` | 原生 Parser 开始/统一输出校验通过；仍可能写库失败 |

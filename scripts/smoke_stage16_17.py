@@ -410,7 +410,7 @@ def readonly_session():
 
 
 def read_target(kb_id, plan, *, exclusive=False):
-    """只读小测试库状态及当前代次错误；不用旧 Job 错误冒充新任务失败，不写业务状态。"""
+    """只读小测试库状态、当前错误和编排标识；不把旧Job错误当新失败，不写业务状态。"""
     from sqlalchemy import select
     from app.db.seed import DEFAULT_KB_ID
     from app.models import Document, DocumentParseJob, KnowledgeBase
@@ -439,6 +439,7 @@ def read_target(kb_id, plan, *, exclusive=False):
                 raise SmokeError("TARGET")
             result[row.file_hash] = {"doc_id": str(row.doc_id), "kb_id": str(row.kb_id), "file_type": row.file_type,
                 "status": row.status, "error_code": document_error_code(row, jobs_by_doc.get(row.doc_id, [])),
+                "management_task_id": str(row.management_task_id) if row.management_task_id else None,
                 **{field: str(getattr(row, field)) if getattr(row, field) else None for field in TASK_FIELDS}}
         return result
 
@@ -552,7 +553,7 @@ def match_document(item, row, kb_id):
 
 
 def drive_pipeline(args, run, plan, client, *, reader=read_target, clock=monotonic, pause=sleep):
-    """仅通过原 API 上传及提交后续阶段；每个 POST 有意图记录，已有任务只等待、不补投。"""
+    """原API上传后只观察增量编排；历史无编排文档沿用逐阶段POST，已有任务不补投。"""
     deadline = clock() + args.timeout
     for item in plan["documents"]:
         if clock() >= deadline:
@@ -606,6 +607,18 @@ def drive_pipeline(args, run, plan, client, *, reader=read_target, clock=monoton
                 continue
             if row["status"] == "READY":
                 finished += 1
+                continue
+            if row.get("management_task_id") is not None:
+                # 新上传已有服务端逐文档编排；只观察，不和后台管理任务争抢旧逐阶段POST。
+                code, status = api_request(client, "GET", f"/api/admin/documents/{row['doc_id']}/status")
+                management = status.get("management")
+                if (code != 200 or status.get("doc_id") != row["doc_id"] or status.get("kb_id") != str(args.kb_id)
+                        or not isinstance(management, dict)
+                        or management.get("management_task_id") != row["management_task_id"]
+                        or management.get("state") not in {"running", "failed", "done"}):
+                    raise SmokeError("TARGET")
+                if management["state"] == "failed":
+                    return {"status": "FAIL", "reason": "MANAGEMENT_FAILED", "doc_id": row["doc_id"]}
                 continue
             if row["status"] in STAGES:
                 operation, field = STAGES[row["status"]]

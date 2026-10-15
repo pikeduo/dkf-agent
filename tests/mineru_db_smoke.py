@@ -209,6 +209,66 @@ def test_execute_reports_task_failure_reason(monkeypatch):
     assert execute(job, "check", expected_state="FAILURE") is failure
 
 
+@pytest.mark.parametrize("explicit_cloud", [False, True])
+def test_incremental_upload_cloud_generation_and_atomic_blocks_continue_to_chunk(cloud_context, monkeypatch, explicit_cloud):
+    """用户隔离DB验收新上传/Router换绑及云结果接续；同批次只提交一次，不运行GPU。"""
+    from app.api import admin_knowledge_bases as admin
+    from app.services import document_management as service
+    from app.tasks import documents, chunks, management
+    context = cloud_context
+    managers, chunk_messages = [], []
+
+    def manager_publish(doc_id, task_id):
+        """只记录已提交的独立编排消息，不连接真实Broker。"""
+        managers.append((doc_id, task_id))
+        return True
+
+    def chunk_publish(**kwargs):
+        """观察下一阶段投递，绝不运行切片或生成真实样本。"""
+        chunk_messages.append(kwargs)
+
+    for module in (admin, api_module):
+        # 原逐阶段夹具有意隔离管理；本用例显式恢复真实新编排准备/投递边界。
+        monkeypatch.setattr(module, "prepare_ingestion", service.prepare_ingestion)
+        monkeypatch.setattr(module, "publish_ingestion", service.publish_ingestion)
+    monkeypatch.setattr(service, "publish_management", manager_publish)
+    monkeypatch.setattr(documents, "processing_session", context.session)
+    monkeypatch.setattr(documents, "get_settings", lambda: context.settings)
+    monkeypatch.setattr(management, "processing_session", context.session)
+    monkeypatch.setattr(management, "get_settings", lambda: context.settings)
+    monkeypatch.setattr(management.manage_document, "retry", lambda **kwargs: Retry())
+    monkeypatch.setattr(chunks.chunk_document, "apply_async", chunk_publish)
+    if explicit_cloud:
+        job = upload(context)
+        doc_id = UUID(job["doc_id"])
+    else:
+        saved = context.api("POST", f"{PREFIX}/{context.kb_id}/documents",
+            files={"file": ("当前路由.pdf", pdf_bytes(1))}, data={"parse_mode": "mineru"}).json()
+        doc_id = UUID(saved["doc_id"])
+        result = documents.process_document.apply(args=[saved["doc_id"]],
+            kwargs={"parse_mode": "mineru"}, task_id=saved["task_id"])
+        assert result.state == "SUCCESS" and result.result["status"] == "delegated_to_mineru"
+        job = context.api("GET", f"{PREFIX}/{context.kb_id}/documents/{doc_id}/parse-jobs").json()[0]
+        assert job["task_id"] != saved["task_id"]
+    with context.session() as session:
+        document = session.get(Document, doc_id)
+        manager_id = document.management_task_id
+        assert managers == [(doc_id, manager_id)]
+        assert service.config_for(document)["source_parse_task_id"] == job["task_id"]
+        assert service.config_for(document)["stage"] == "cloud"
+    assert execute(job).state == "SUCCESS"
+    context.provider.state = "done"
+    assert execute(job, "check").result["status"] == "awaiting_chunk"
+    result = management.manage_document.apply(args=[str(doc_id)], task_id=str(manager_id))
+    assert result.state == "RETRY" and len(chunk_messages) == 1
+    with context.session() as session:
+        document = session.get(Document, doc_id)
+        assert document.status == "CHUNKING" and document.chunk_task_id is not None
+        assert service.config_for(document)["stage"] == "chunk"
+        assert service.config_for(document)["source_parse_task_id"] == str(document.processing_task_id)
+    assert context.provider.submissions == 1
+
+
 @pytest.mark.parametrize(
     "name,content",
     [("测试.pdf", None), ("图片.png", png_bytes())]

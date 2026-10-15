@@ -208,7 +208,7 @@ EVENT_LABELS = {
     "index.retry": "向量入库数据库步骤等待重试",
     "index.failed": "向量入库失败，本次写入已回滚",
     "index.error_record_failed": "向量入库失败原因未能写入数据库",
-    "management.requested": "管理员文档维护检查点已提交",
+    "management.requested": "文档入库或维护编排检查点已提交",
     "management.dispatched": "文档管理编排任务已投递",
     "management.dispatch_failed": "文档管理投递确认失败，保留检查点",
     "management.rejected": "文档管理状态或活动任务校验未通过",

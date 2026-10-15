@@ -115,6 +115,24 @@ def test_constructor_is_lazy_and_default_service_is_shared(monkeypatch):
                                     "SET LOCAL lock_timeout = '2s'"]
 
 
+def test_same_retriever_observes_new_ready_document_without_kb_rebuild():
+    """当前SQL快照新增READY证据后同一Retriever即可返回；不重编码旧文档或更改其代次。"""
+    first = stored_pair(chunk_number=1)
+    second = stored_pair(first[0].kb_id, chunk_number=2)
+    rows = [(*first, 0.1)]
+    factory, sessions = factory_for(rows)
+    service = QueryServiceStub()
+    retriever = DenseRetriever(first[0].kb_id, embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    before = copy.deepcopy(first[0].chunk_metadata), first[1].processing_task_id, first[1].index_task_id
+    assert [node.node.metadata["doc_id"] for node in retriever.retrieve("metadata query")] == [str(first[1].doc_id)]
+    # 模拟Index事务已经提交的查询快照，不伪装执行真实Embedding/入库。
+    rows.append((*second, 0.2))
+    nodes = retriever.retrieve("metadata query")
+    assert [node.node.metadata["doc_id"] for node in nodes] == [str(first[1].doc_id), str(second[1].doc_id)]
+    assert (first[0].chunk_metadata, first[1].processing_task_id, first[1].index_task_id) == before
+    assert len(service.queries) == 2 and len(sessions) == 2 and all(session.closed for session in sessions)
+
+
 def test_top_k_nodes_are_stable_and_metadata_roundtrip_is_complete():
     """Top-K 与重复查询顺序/ID 稳定，页码、正文、Sheet/章节、source_spans 与模型身份不丢失。"""
     first = stored_pair(chunk_number=1)

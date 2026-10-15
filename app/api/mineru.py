@@ -1,4 +1,4 @@
-"""显式 MinerU 管理入口，不自动选择 Parser，不改变现有原生上传接口。"""
+"""显式MinerU入口；新上传文档接续增量入库，已有文档入口保留原恢复语义。"""
 
 from pathlib import Path
 from typing import Annotated
@@ -21,6 +21,9 @@ from app.schemas.knowledge_base import DocumentResponse
 from app.schemas.parse_job import ParseJobResponse
 from app.services.batch_upload import MAX_BATCH_FILES, store_batch, validate_batch
 from app.services.document_upload import store_document
+from app.services.document_management import (
+    ManagementError, prepare_ingestion, publish_ingestion, record_ingestion_dispatch_failure,
+)
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import create_job, lock_job
 from app.services.mineru.provider import MinerUCloudProvider
@@ -40,15 +43,22 @@ def require_configuration():
     return settings
 
 
-def start_job(session, document: Document, settings) -> ParseJobResponse:
-    """先提交本地任务，再投递短步骤；队列失败保留活动任务，显式入口可恢复投递。"""
+def start_job(session, document: Document, settings, *, continue_to_ready=False) -> ParseJobResponse:
+    """先提交云检查点再投递；新上传可接续READY，已有文档只恢复原短步骤。"""
 
+    manager_id = None
     try:
         job = create_job(session, document, settings)
         if job.is_active:
             provider = MinerUCloudProvider(settings)
             provider.close()
+        if continue_to_ready:
+            manager_id = prepare_ingestion(session, document, settings, parse_mode="mineru", job=job)
         session.commit()
+    except ManagementError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail={"doc_id": str(document.doc_id),
+            "code": exc.code, "message": str(exc)}) from None
     except MinerUError as exc:
         session.rollback()
         code = (
@@ -70,6 +80,8 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
         session.commit()
         log_event("cache.persisted", doc_id=response.doc_id, job_id=response.job_id,
                   parse_cache_hit=True, status="CHUNKING", mineru_file_submit_count=0)
+        if manager_id is not None:
+            continue_ingestion(session, response.doc_id, manager_id)
         return response
     next_step = "check" if job.upload_complete else "submit"
     # ORM 刷新会开启读事务；发送消息前也释放它，避免占用连接及妨碍并发 Worker。
@@ -84,6 +96,8 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
             _, current = locked
             current.error_code, current.error_message = exc.code, str(exc)
         session.commit()
+        if manager_id is not None:
+            record_ingestion_dispatch_failure(session, response.doc_id, manager_id)
         raise HTTPException(
             status_code=503,
             detail={
@@ -92,14 +106,25 @@ def start_job(session, document: Document, settings) -> ParseJobResponse:
                 "job_id": str(response.job_id),
             },
         ) from None
+    if manager_id is not None:
+        continue_ingestion(session, response.doc_id, manager_id)
     return response
+
+
+def continue_ingestion(session, doc_id: UUID, manager_id: UUID) -> None:
+    """上传原响应保留Parse Job契约；增量编排投递失败返回安全503及已保存的文档标识。"""
+    try:
+        publish_ingestion(session, doc_id, manager_id)
+    except ManagementError as exc:
+        raise HTTPException(status_code=503, detail={"doc_id": str(doc_id),
+            "code": exc.code, "message": str(exc)}) from None
 
 
 @router.post(
     "/{kb_id}/mineru/documents",
     response_model=ParseJobResponse | BatchUploadResponse,
     status_code=202,
-    summary="上传一份或多份 PDF、图片或 Office 并显式提交 MinerU 云端解析",
+    summary="上传一份或多份PDF、图片或Office，显式云解析后自动增量入库至READY",
     responses={
         200: {
             "model": BatchUploadResponse,
@@ -131,7 +156,7 @@ def upload_mineru_document(
         ),
     ],
 ) -> ParseJobResponse | BatchUploadResponse:
-    """原显式入口支持多选；单份保留原响应，多份各建云任务，不自动选择 Parser。"""
+    """新上传显式云解析并接续READY；多份各建任务，单份保留原Parse Job响应。"""
 
     try:
         validate_batch(file)
@@ -148,12 +173,12 @@ def upload_mineru_document(
                     detail="MinerU 仅接受 PDF、图片与 DOC/DOCX/PPT/PPTX/XLS/XLSX",
                 )
             saved = store_document(session, kb_id, upload, settings)
-            return start_job(session, session.get(Document, saved.doc_id), settings)
+            return start_job(session, session.get(Document, saved.doc_id), settings, continue_to_ready=True)
 
         def dispatch(response: DocumentResponse) -> ParseJobResponse:
             """复用当前单文档云任务建立与投递，仍为每份原件保留独立任务身份。"""
 
-            return start_job(session, session.get(Document, response.doc_id), settings)
+            return start_job(session, session.get(Document, response.doc_id), settings, continue_to_ready=True)
 
         response.status_code = 200
         return store_batch(

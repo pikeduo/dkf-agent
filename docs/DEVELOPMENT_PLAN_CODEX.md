@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段24 Knowledge Query API代码已实现、待人工验收；阶段23最终Mock修正及阶段22/21/16等此前待验收事项保留。** 不自动进入25。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段26动态增量入库代码与用例已编写，待用户执行测试及真实扫描PDF验收；阶段25迁移及此前待验收事项保留。** 不自动进入27。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮只增加现有检索/问答服务的HTTP边界、自有Schema、安全日志和Mock用例，不执行测试/真实查询/模型，不改业务数据库、Prompt或索引语义。\
+> 本轮仅将新上传接续既有逐文档处理编排，不执行测试/真实查询/模型，不改业务数据库、Prompt或索引语义。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -3044,6 +3044,8 @@ Parse Cache 默认复用；只有 `reparse` 才重新调用 MinerU Cloud。
 
 # 32. 阶段 26：动态增量入库
 
+代码与Mock用例已编写，尚未执行；详细操作与验收见[文档管理与增量入库](DOCUMENT_MANAGEMENT.md#阶段26动态增量人工验收)。无需新迁移、依赖或环境变量，继续使用`0008_document_management`。
+
 ## 目标
 
 ```text
@@ -3054,12 +3056,18 @@ Parse Cache 默认复用；只有 `reparse` 才重新调用 MinerU Cloud。
 → Native / MinerU Cloud
 → Chunk
 → Embedding
+→ Index / pgvector
 → READY
 → 自动参与 Query
 ```
 
 ## 完成标准
 新增扫描 PDF 后无需重建整个知识库。
+
+- 普通及显式MinerU新上传均逐文件建立ingest编排，保持原201/202、多项200与独立doc_id；其他文档的Block、Chunk、向量和任务代次不变。
+- Router转云同事务换绑编排代次，沿用同一Job/batch；失败/超时显式记录，用户Retry恢复，不自动重复收费或降级不完整Native。
+- 全量有效向量与READY仍由已有Index事务保证；Dense/BM25从当前同库READY证据派生查询，保留模型身份、文档范围及来源校验。
+- 自动测试只编写；真实验收需用户已部署CPU/GPU、BGE-M3、pgvector与MinerU并确认扫描件外传及额度。小样本成功不自动完成阶段16正式验收，不提前进入27。
 
 ---
 

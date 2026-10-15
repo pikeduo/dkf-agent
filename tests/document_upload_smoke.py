@@ -45,7 +45,7 @@ def sample_content(extension):
 
 @pytest.fixture
 def upload_context(api, tmp_path, monkeypatch):
-    """将文件存储指向临时目录、上限设为 1 MiB，并创建本用例的知识库。"""
+    """隔离原上传/逐阶段基线及临时存储；新增增量编排由独立用例验证，不访问Broker。"""
 
     settings = get_settings().model_copy(
         update={"upload_dir": tmp_path / "uploads", "max_upload_size_mb": 1,
@@ -65,6 +65,19 @@ def upload_context(api, tmp_path, monkeypatch):
         return SimpleNamespace(id=kwargs["task_id"])
 
     monkeypatch.setattr(process_document, "apply_async", accepted_task)
+    from app.api import mineru as mineru_api
+
+    def legacy_checkpoint(*args, **kwargs):
+        """原阶段测试模拟无管理检查点的历史文档；不开启新编排影响逐阶段断言。"""
+        return uuid4()
+
+    def no_continuation(*args, **kwargs):
+        """不投递真实管理消息；本夹具仍完整验证原解析投递、事务及原件契约。"""
+        return None
+
+    for module in (admin_api, mineru_api):
+        monkeypatch.setattr(module, "prepare_ingestion", legacy_checkpoint)
+        monkeypatch.setattr(module, "publish_ingestion", no_continuation)
     kb = api("POST", PREFIX, json={"name": "上传验收库"}).json()
     return api, kb["kb_id"], settings.upload_dir
 

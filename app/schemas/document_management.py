@@ -15,7 +15,7 @@ class ManagementResponse(BaseModel):
     doc_id: UUID
     kb_id: UUID
     management_task_id: UUID
-    operation: Literal["retry", "reindex", "reparse", "delete"]
+    operation: Literal["ingest", "retry", "reindex", "reparse", "delete"]
     stage: Literal["parse", "cloud", "chunk", "embed", "index", "delete", "done"]
     state: Literal["running", "failed", "done"]
     status: str

@@ -1,6 +1,6 @@
-# 阶段25：Admin文档管理与人工验收
+# 文档管理与动态增量入库（阶段25/26）
 
-代码与测试用例已编写，未执行迁移、pytest、文件清理、Worker、GPU或MinerU真实请求。以前阶段的待验收事项不自动通过，不进入阶段26。没有新依赖或环境变量。
+阶段25/26代码与测试用例已编写，未执行迁移、pytest、文件清理、Worker、GPU或MinerU真实请求。以前阶段的待验收事项不自动通过，不进入阶段27。阶段26没有新迁移、依赖或环境变量。
 
 ## 接口与观察
 
@@ -25,7 +25,11 @@
 
 迁移`0008_document_management`新增可空`management_task_id/management_config`及成对/唯一约束，历史文档保持空值。私有配置冻结操作、解析代次、解析模式、阶段投递意图、截止时间；不塞进Chunk/Embedding/Index配置或外部Provider参数。原有四阶段的独立任务/检查点仍是业务事实。
 
-只有管理员显式维护才启动`app.tasks.management.manage_document`。每个CPU短步骤读取本地状态、准备一个既有阶段并提交检查点，然后投递原任务；每文档一个GPU任务，队列/参数/幂等性不变。不直接调用任务主体、Parser或模型，不重新实现处理链；默认上传仍保留此前逐阶段语义，未提前实现动态增量阶段26。
+新上传及管理员显式维护启动`app.tasks.management.manage_document`。每个CPU短步骤读取本地状态、准备一个既有阶段并提交检查点，然后投递原任务；每文档一个GPU任务，队列/参数/幂等性不变。不直接调用任务主体、Parser或模型，不重新实现处理链；新上传自动接续READY，历史无编排文档及预置导入CLI仍保留原流程。
+
+新上传管理operation为`ingest`，默认auto，管理员native/mineru覆盖不变。普通上传先持久化首阶段发送意图，再用原processing_task_id投递process_document；独立管理UUID只负责接续。Router创建MinerU Job会换解析代次，必须在同事务换绑管理配置的source_parse_task_id与cloud Job，管理UUID不变。显式云新上传在原Job事务建立编排，仍只投递一次原submit/check；缓存命中直接接续Chunk，不请求云端。响应task_id仍是解析代次，不能拿它当作整条链路完成状态。
+
+只处理当前doc_id，既有Index事务保证向量与READY同时提交。新增READY文档自动进入同ACTIVE库/同模型Dense SQL快照；已运行BM25实例按新READY集合重建派生词频，不重建业务Chunk/向量。既有知识库、其他文档和HNSW均不重建，不新增第二套真相表。Cloud失败、下游失败或模型配置问题不伪装READY；管理投递失败保留原件和已有消息，503不意味着文件未上传。
 
 等待用5秒countdown，不阻塞sleep/while轮询、不另查MinerU HTTP；API与管理检查采用NOWAIT文档行锁，原Parser/GPU持锁时409或短任务RETRY。正常编排截止时间冻结为至少600秒及当前MINERU_JOB_TIMEOUT_SECONDS中的较大值，Celery重试另有24小时硬上限。超时不取消后台工作，不保证正在推理的阶段实时可见。
 
@@ -123,4 +127,102 @@ Invoke-RestMethod -Uri "$deleteBase/status"
 Invoke-RestMethod -Method Post -Uri "$docBase/reparse?force=true&parse_mode=auto"
 ```
 
-确认有新管理/解析代次、最终READY及原证据契约保持；按真实MinerU批次核对费用。无需重新验证LLM问答或扩展阶段26，本轮结束后等待用户反馈。
+确认有新管理/解析代次、最终READY及原证据契约保持；按真实MinerU批次核对费用。无需为了验证管理流程重复调用收费LLM；等待用户反馈后再推进其他阶段。
+
+## 阶段26动态增量人工验收
+
+Codex未执行以下命令、上传、模型或API。现有上传回归夹具隔离新增编排，继续验证历史逐阶段语义；独立增量用例验证真实新调度边界、批量独立性、云换绑、缓存命中、失败及同实例查询可见性，不生成验收文档。
+
+### 1. 用户执行Mock回归
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_incremental_ingestion.py tests/test_document_management.py tests/test_management_task.py tests/test_admin_documents.py tests/test_smoke_stage16_17.py tests/test_dense_retriever.py tests/test_bm25_retriever.py tests/test_business_logging.py -q -ra
+```
+
+已有PostgreSQL/pgvector隔离schema权限时，用户另行执行上传/Router/云幂等回归（Broker/Provider为Mock，不是真实外传）：
+
+```powershell
+python -m pytest tests/document_upload_smoke.py tests/document_processing_smoke.py tests/batch_upload_smoke.py tests/parser_router_smoke.py tests/mineru_db_smoke.py -q -ra
+```
+
+### 2. 启动现有服务
+
+确认已部署PostgreSQL17/pgvector、Redis、BGE-M3及GPU，迁移head为`0008_document_management`。若阶段25迁移尚未执行，先按README备份/停止进程，由用户执行升级；阶段26不新增迁移。重启API和所有Worker，三个独立PowerShell终端分别执行：
+
+```powershell
+conda activate dkf-agent
+python -m uvicorn app.main:app --reload
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -Q default_queue --pool=solo --concurrency=1 --hostname=cpu@%h -l info
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
+```
+
+CPU须注册manage_document及原解析/Chunk/Index/MinerU任务，GPU须注册embed_document。仅CPU可推进至EMBEDDING，GPU缺席不能READY。API搜索还需要现有Reranker部署；8GB显存注意GPU Worker与在线Embedding/Reranker进程共存，沿用README的显存建议，不自动替换冻结参数或降级CPU。
+
+### 3. 新增扫描PDF，仅上传一次
+
+使用已有ACTIVE测试库及一份用户拥有的、允许外传、未在同库上传过的扫描PDF；先确认MinerU Token/Redis/额度、应用大小和200页限制。不要生成样本或为测试反复Force。上传前记录同库已有READY文档的ID、各任务ID、Block/Chunk/向量数量，便于最后对比。
+
+```powershell
+$kbId = '实际ACTIVE测试知识库UUID'
+$base = 'http://127.0.0.1:8000'
+$filePath = '已有且允许外传的扫描PDF绝对路径'
+$upload = curl.exe --fail-with-body --noproxy "*" -X POST "$base/api/admin/knowledge-bases/$kbId/documents" -F "file=@$filePath"
+# 只有HTTP成功且响应是Document时才继续；503/409先按detail查询已保存记录，不重传。
+if ($LASTEXITCODE -ne 0) { throw '上传未确认成功，请检查detail和文档列表，不要直接重传' }
+$saved = $upload | ConvertFrom-Json
+$docId = $saved.doc_id
+$docBase = "$base/api/admin/documents/$docId"
+Invoke-RestMethod -Uri "$docBase/status"
+Invoke-RestMethod -Uri $docBase
+```
+
+无需调用`/chunk /embed /index`或知识库Reindex。由用户稍后重复GET/status，预期UPLOADED→PARSING（云端阶段）→CHUNKING→EMBEDDING→INDEXING→READY；中间阶段可能快速经过或原任务持锁暂不可见。最终`chunk_count=vector_count>0`、`invalid_vector_count=0`，management为done/done；READY提交后管理终态可能最多晚一个检查周期，不改变查询资格。
+
+详情Parse Job应保留一个当前job_id/batch_id，终态done；云JSON或缓存失败不得落半份Block或置READY。日志按doc_id关联upload.stored、parse/router/mineru、management.advanced、chunk/embedding/index.persisted及management.finished，最后index.persisted才证明READY提交。业务摘要不含正文/密钥，不把重复日志次数当费用，按实际批次及平台核对。
+
+### 4. 证据、向量与增量Query
+
+```powershell
+Invoke-RestMethod -Uri "$docBase/blocks?limit=20&offset=0"
+Invoke-RestMethod -Uri "$docBase/chunks?limit=20&offset=0"
+$search = @{ kb_id=$kbId; question='该扫描件中实际存在的问题或关键词'; doc_ids=@($docId); top_k=20 } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "$base/api/knowledge/search" -ContentType 'application/json' -Body $search
+```
+
+对照原件人工确认OCR、阅读顺序、物理页、bbox、Block/source_spans。单文档搜索Evidence只含新doc_id，保留原Chunk/页/章节；去掉请求的doc_ids再查询同库，应自动纳入新文档，无需重启查询进程或重建KB，但Top5命中效果仍须问题/候选质量对照，不保证所有问题必命中。`/search`不调用LLM，Query仅生成查询向量，不重编码已有文档；问答另依现有明确云许可验收，不把搜索成功等同回答准确。
+
+可在pgAdmin对当前新文档执行只读SQL（替换UUID），不修改状态或向量：
+
+```sql
+SELECT d.doc_id, d.kb_id, d.status, count(c.chunk_id) AS chunk_count,
+       count(c.embedding) AS vector_count,
+       count(c.chunk_id) FILTER (WHERE c.embedding IS NOT NULL AND
+         (vector_dims(c.embedding) <> 1024 OR abs(vector_norm(c.embedding) - 1) > 0.0001)) AS invalid_vectors
+FROM documents d LEFT JOIN document_chunks c ON c.doc_id=d.doc_id AND c.kb_id=d.kb_id
+WHERE d.doc_id='实际新文档UUID'
+GROUP BY d.doc_id;
+```
+
+最后对照上传前快照，既有文档ID、Block/Chunk ID、数量、解析/切片/GPU/Index代次不变。同库重传同内容应409，仅返回已有doc_id，不生成第二套任务或额外云批次；不要通过跨库重复付费验证幂等。
+
+### 5. 未完成及恢复
+
+FAILED查Document.error_message和Parse Job；管理失败/超时查management.error_code/cause_code。缺GPU、队列或模型部署按原README人工修复；检查点冻结后参数改变要明确Reindex，普通Retry不偷偷替换参数。确认原因已解决后：
+
+```powershell
+Invoke-RestMethod -Method Post -Uri "$docBase/retry"
+Invoke-RestMethod -Uri "$docBase/status"
+```
+
+普通Retry沿用原检查点和活动云Job/batch，不继承Force。收费历史无可用结果、SUBMIT_UNCERTAIN须先人工核对，不反复重传或申请新批次。没有Outbox；发送意图提交后崩溃可能造成等待缺口，显式Retry/管理员核对恢复，不能声称exactly-once。当前有界编排不是无限期后台恢复器，不自动处理历史文档。
+
+联合冒烟脚本会检测management_task_id，新上传仅只读状态，不再争抢旧逐阶段POST；旧无编排计划仍使用原有逐阶段接口，不改计划/报告。阶段26完成标准是上述单文档增量链路及旧文档不变，不等于阶段16完整素材/质量验收或官方基准通过。本轮等待用户实测，不进入27。

@@ -235,6 +235,34 @@ def test_failed_document_is_fail_and_never_retried(monkeypatch):
     assert not any(method == "POST" for method, path in api.calls)
 
 
+@pytest.mark.parametrize("failed", [False, True])
+def test_managed_upload_only_observes_status_and_never_posts_legacy_stages(monkeypatch, failed):
+    """新增编排由服务端接续；工具只查询/status，管理失败如实FAIL，不重复投递阶段。"""
+    rows = {"a" * 64: document() | {"management_task_id": TASK}}
+    args, reader, clock, _ = pipeline_stub(monkeypatch, rows)
+
+    class ManagedApi(Api):
+        """模拟已部署阶段26的状态接口，禁止旧逐阶段写请求。"""
+
+        def request(self, method, path, **kwargs):
+            """状态检查返回管理结论；成功时仅模拟后台完成，不执行任务主体。"""
+            assert method == "GET"
+            if path.endswith("/status"):
+                self.calls.append((method, path))
+                if not failed:
+                    self.rows["a" * 64]["status"] = "READY"
+                return Response(200, {"doc_id": DOC, "kb_id": str(KB), "management": {
+                    "management_task_id": TASK, "state": "failed" if failed else "running"}})
+            return super().request(method, path, **kwargs)
+
+    api = ManagedApi(rows)
+    result = tool.drive_pipeline(args, Path("virtual"), {"documents": [sample()]}, api,
+        reader=reader, clock=clock.now, pause=clock.pause)
+    assert result["status"] == ("FAIL" if failed else "PASS")
+    assert any(path.endswith("/status") for _, path in api.calls)
+    assert not any(method == "POST" for method, _ in api.calls)
+
+
 def exported_document():
     """构造字符跨度元数据，不生成或运行文档解析验收样本。"""
     text = "内存断言文本"

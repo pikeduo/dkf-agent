@@ -39,6 +39,9 @@ from app.services.batch_upload import MAX_BATCH_FILES, store_batch, validate_bat
 from app.services.document_dispatch import publish_document
 from app.services.document_processing import transition_document
 from app.services.document_upload import store_document
+from app.services.document_management import (
+    ManagementError, prepare_ingestion, publish_ingestion, record_ingestion_dispatch_failure,
+)
 from app.services.chunk.processing import prepare_chunk, publish_chunk
 from app.services.chunk.splitter import ChunkError
 from app.services.embedding.processing import prepare_embedding, publish_embedding
@@ -179,7 +182,7 @@ def list_knowledge_base_documents(
     "/{kb_id}/documents",
     response_model=DocumentResponse | BatchUploadResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="上传一份或多份文档并逐文件提交异步处理任务",
+    summary="上传一份或多份文档，逐文件自动解析并增量入库至READY",
     responses={
         200: {
             "model": BatchUploadResponse,
@@ -218,7 +221,7 @@ def upload_knowledge_base_document(
         ),
     ] = "auto",
 ) -> DocumentResponse | BatchUploadResponse:
-    """原上传入口默认自动路由；多选仍逐文件提交独立 Document 和处理代次。"""
+    """原入口默认自动路由并接续到READY；多选仍逐文件提交独立Document及编排。"""
 
     try:
         validate_batch(file)
@@ -243,12 +246,30 @@ def upload_knowledge_base_document(
 def dispatch_uploaded_document(
     session: Session, response: DocumentResponse, parse_mode: ParseMode = "auto"
 ) -> DocumentResponse:
-    """提交后投递默认自动模式或管理员覆盖；队列失败仍保留原件与持久化状态。"""
+    """提交增量检查点后投递原解析任务及编排；保持原响应task_id，不重建其他文档。"""
 
+    document = session.scalar(select(Document).where(
+        Document.doc_id == response.doc_id, Document.processing_task_id == response.task_id
+    ).with_for_update(nowait=True).execution_options(populate_existing=True))
+    if document is None:
+        raise HTTPException(status_code=503, detail="上传代次不可用，请查询文档状态")
+    try:
+        manager_id = prepare_ingestion(session, document, get_settings(), parse_mode=parse_mode)
+        session.commit()
+    except ManagementError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail={"doc_id": str(response.doc_id),
+            "code": exc.code, "message": str(exc)}) from None
     options = {"parse_mode": parse_mode}
     if not publish_document(session, response.doc_id, response.task_id, **options):
+        record_ingestion_dispatch_failure(session, response.doc_id, manager_id)
         session.expire_all()
         return DocumentResponse.model_validate(session.get(Document, response.doc_id))
+    try:
+        publish_ingestion(session, response.doc_id, manager_id)
+    except ManagementError as exc:
+        raise HTTPException(status_code=503, detail={"doc_id": str(response.doc_id),
+            "code": exc.code, "message": str(exc)}) from None
     return response
 
 

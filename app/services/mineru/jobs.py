@@ -72,7 +72,7 @@ def create_job(
     hybrid_context: dict | None = None,
     force_reparse: bool = False,
 ) -> DocumentParseJob:
-    """先查已验证缓存；只有首次 miss/明确 Reparse 创建云身份，恢复仍沿用同一批次。"""
+    """先查已验证缓存，首次miss/明确Reparse才创建云身份；同步换绑编排，恢复沿用原批次。"""
 
     document = session.scalar(
         select(Document)
@@ -204,6 +204,9 @@ def create_job(
     if document.status == "FAILED":
         transition_document(document, "UPLOADED")
     transition_document(document, "PARSING")
+    # 云任务使用原有独立解析代次，管理编排必须同事务换绑，否则扫描PDF会被误判为旧检查点。
+    from app.services.document_management import rebind_cloud_management
+    rebind_cloud_management(document, job.task_id, job.job_id)
     document.processing_task_id = job.task_id
     session.add(job)
     session.flush()
