@@ -200,6 +200,124 @@ def test_document_thousands_and_decimal_value_is_exact_and_not_unit_converted():
     assert value.source.value_reference.quote == "1,234.500"
 
 
+@pytest.mark.parametrize("text,value_text,expected", [
+    (r"in the amount of \$267,508.65.", "267,508.65", "267508.65"),
+    ("in the amount of $22,875.00.", "22,875.00", "22875"),
+    ("The amount is 267,508.65. The balance is confirmed.", "267,508.65", "267508.65"),
+    ("The amount is 22,875.00.\nThe balance is confirmed.", "22,875.00", "22875"),
+    ("The count is 125 units for this period.", "125", "125"),
+    ("The amount is 123.45 dollars for this period.", "123.45", "123.45"),
+    ("The amount is 1,234,567.8900 dollars.", "1,234,567.8900", "1234567.89"),
+    ("The count is 125.", "125", "125"),
+    ("The adjustment is -12.50.", "-12.50", "-12.5"),
+])
+@pytest.mark.parametrize("short_quote", [False, True])
+def test_complete_document_numbers_allow_sentence_period_and_preserve_exact_offsets(text, value_text, expected, short_quote):
+    """完整数值在句末/句中均可绑定；短/长引文不改变原句号、Hash或双端字符位置。"""
+    context = source(context=CONTEXT + " " + text)
+    formula = extract(context, LLMStub())
+    before = copy.deepcopy(context[2].chunk_metadata), context[2].text, context[-1][1].text
+    quote = value_text if short_quote else text
+    result = tool.FormulaBindingService(evidence_service=context[0]).bind_formula_variables(formula,
+        user_inputs=[user("revenue", "100")],
+        evidence_inputs=[document_input(context, value=value_text, quote=quote, unit=None)])
+    assert result.status == "success" and result.required_variables == []
+    value = result.variables[0]
+    assert value.value == expected and value.unit is None and value.source.unit_reference is None
+    record, chunk = context[-1][1], context[2]
+    for ref, original in ((value.source.quote_reference, quote), (value.source.value_reference, value_text)):
+        block_start, chunk_start = record.text.index(original), chunk.text.index(original)
+        assert ref.block_id == record.block_id and ref.evidence_id == 2
+        assert (ref.start_char, ref.end_char) == (block_start, block_start + len(original))
+        assert (ref.chunk_start_char, ref.chunk_end_char) == (chunk_start, chunk_start + len(original))
+        assert ref.quote == original == record.text[ref.start_char:ref.end_char]
+        assert chunk.text[ref.chunk_start_char:ref.chunk_end_char] == original
+    assert value.source.trace == formula.source
+    assert (context[2].chunk_metadata, context[2].text, context[-1][1].text) == before
+
+
+@pytest.mark.parametrize("text,value_text", [
+    ("123.456", "123.45"), ("123.45", "123"), ("2025", "25"),
+    ("1,200", "200"), ("1.23", "1.2"), ("1,200.50.", "200.50"),
+    ("123.45e3.", "123.45"), ("123.45E+3.", "123.45"), ("1e3.", "3"),
+    ("-123.45.", "123.45"), ("+123.45.", "123.45"), (".123.", "123"),
+    ("123.45.6", "123.45"), ("123.45...", "123.45"),
+    ("123.45.e3", "123.45"), ("123.45.+6", "123.45"),
+    ("123.45.next", "123.45"),
+])
+def test_document_numeric_fragments_and_ambiguous_periods_are_still_rejected(text, value_text):
+    """不可用句号例外截出小数/整数/千分位/指数/带符号数字片段；即使quote不含延续也拒绝。"""
+    context = source(context=CONTEXT + " Amount: " + text)
+    formula = extract(context, LLMStub())
+    with pytest.raises(tool.FormulaBindingError) as error:
+        tool.FormulaBindingService(evidence_service=context[0]).bind_formula_variables(formula,
+            evidence_inputs=[document_input(context, value=value_text, quote=value_text, unit=None)])
+    assert error.value.code == "FORMULA_BINDING_SOURCE"
+
+
+@pytest.mark.parametrize("text,value_text", [("1e3.", "1e3"), ("123.45.", "123.45."),
+    ("+.", "+"), ("1,20.", "1,20")])
+def test_sentence_period_exception_never_replaces_strict_number_validation(text, value_text):
+    """句末标点处理不能把科学计数、不完整数或非法千分组洗成合法value_text。"""
+    context = source(context=CONTEXT + " Amount: " + text)
+    formula = extract(context, LLMStub())
+    with pytest.raises(tool.FormulaBindingError) as error:
+        tool.FormulaBindingService(evidence_service=context[0]).bind_formula_variables(formula,
+            evidence_inputs=[document_input(context, value=value_text, quote=text, unit=None)])
+    assert error.value.code == "FORMULA_BINDING_INPUT"
+
+
+@pytest.mark.parametrize("visible_suffix,allowed", [(".", False), (". ", True)])
+def test_period_at_partial_source_end_cannot_hide_unseen_numeric_continuation(visible_suffix, allowed):
+    """部分Block末尾的句号不冒充整句结束；已观察到空白才允许，不补读或改写原Block。"""
+    visible = CONTEXT + " Amount: 123.45" + visible_suffix
+    context = source(context=visible + "6 remains in the original block")
+    chunk, block = context[2], context[-1][1]
+    span = chunk.chunk_metadata["source_spans"][1]
+    # 仅内存Stub让Chunk截到数字后的句号；原Block/Hash保留，让EvidenceService校验真实部分区间。
+    span["end_char"] = len(visible)
+    span["chunk_end_char"] = span["chunk_start_char"] + len(visible)
+    chunk.text = chunk.text[:span["chunk_end_char"]]
+    formula = extract(context, LLMStub())
+    service = tool.FormulaBindingService(evidence_service=context[0])
+    item = document_input(context, value="123.45", quote="123.45", unit=None)
+    if allowed:
+        result = service.bind_formula_variables(formula, evidence_inputs=[item])
+        assert result.variables[0].value == "123.45"
+        assert result.variables[0].source.trace.source_spans[1].text == visible
+    else:
+        with pytest.raises(tool.FormulaBindingError, match="FORMULA_BINDING_SOURCE"):
+            service.bind_formula_variables(formula, evidence_inputs=[item])
+    assert block.text == visible + "6 remains in the original block"
+
+
+@pytest.mark.parametrize("problem", ["missing_quote", "repeated_quote", "repeated_value", "missing_block",
+                                     "block_hash", "foreign_kb"])
+def test_sentence_period_does_not_bypass_quote_hash_or_scope_validation(problem):
+    """句末数值仍受引文/数值唯一性、真实Block/Hash及知识库范围限制，不改原证据补齐。"""
+    text = "The amount is $267,508.65."
+    repeated = problem in {"repeated_quote", "repeated_value"}
+    context = source(context=CONTEXT + " " + text + (" " + text if repeated else ""))
+    formula = extract(context, LLMStub())
+    item = document_input(context, value="267,508.65", quote=text, unit=None)
+    if problem == "missing_quote":
+        item["quote"] = "No matching amount here."
+    elif problem == "repeated_value":
+        item["quote"] = text + " " + text
+    elif problem == "missing_block":
+        item["block_id"] = uuid4()
+    elif problem == "block_hash":
+        context[2].chunk_metadata["source_spans"][1]["block_text_hash"] = "b" * 64
+    elif problem == "foreign_kb":
+        context[3].kb_id = uuid4()
+    with pytest.raises((tool.FormulaBindingError, EvidenceError)) as error:
+        tool.FormulaBindingService(evidence_service=context[0]).bind_formula_variables(formula, evidence_inputs=[item])
+    if problem in {"missing_quote", "repeated_quote", "repeated_value", "missing_block"}:
+        assert isinstance(error.value, tool.FormulaBindingError) and error.value.code == "FORMULA_BINDING_SOURCE"
+    else:
+        assert isinstance(error.value, EvidenceError)
+
+
 def test_binding_never_creates_llm_service_or_reextracts_formula(monkeypatch):
     """已有定义的参数绑定没有任何云调用/再提取入口，不因缺参自动付费。"""
     from app.services import formula as extraction, llm

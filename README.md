@@ -579,6 +579,12 @@ Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc
 
 `python -m scripts.stage28_formula_acceptance`默认dry-run；用户准备包含已有公式结果及参数的本地JSON后，通过`--input <文件> --execute`执行只读绑定。默认不显示数值/正文；详细输入契约与操作见[参数绑定说明](docs/FORMULA_SEMANTICS.md#阶段28参数识别与绑定)。
 
+### 公式安全计算
+
+`app.services.formula_calculation.calculate_formula(value)`接受已有的`FormulaBindingRequest`或`FormulaBindingResult`，重新核对当前来源后执行受限四则运算，返回精确分数、小数展示、代入步骤及完整来源。使用已声明的SymPy，不使用`eval/exec`或通用字符串求值；缺参不算、零分母安全失败，不请求LLM、不写业务库或推断单位。
+
+用户手动检查`python -c "import sympy; print(sympy.__version__)"`；无需GPU/Redis/Worker、新配置或迁移。`python -m scripts.stage29_formula_acceptance`默认dry-run；复用原阶段28请求文件，加`--input <文件> --execute --show-content`可在可信终端查看计算过程。请先人工核对原式、参数单位/主体/期间；精确算术不等于业务语义已验真。详见[计算说明](docs/FORMULA_SEMANTICS.md#阶段29公式安全计算)。
+
 ### 预置知识库导入
 
 已有 OHR-Bench、OmniDocBench 和 OCB 原件时，可按 [三数据集联合冒烟](docs/PRESET_IMPORT.md#三数据集最短操作新运行) 在独立测试库抽取约14份（5 PDF、3图像、三类Office各2份），完成上传→READY→Dense及分数据集报告。直接使用已下载 OCB，不要求补齐缺失43份、许可Excel或手工SQL导出；默认dry-run，真实处理前须用户确认全部所选文件云外传及费用。OCB断言人工核验、Omni GT不当QA，不能代替正式多格式验收或宣称问答准确率。

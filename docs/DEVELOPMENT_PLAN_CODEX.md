@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段27公式业务保持不变；阶段26缓存命中增量主链已由用户确认通过，本轮补新云批次与跨语言诊断，Mock可按用户本轮授权执行，真实云/GPU质量仍待人工验收。此前其他待办保留。** 不自动进入28。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段29公式安全计算代码与Mock用例已编写，待用户执行；复用阶段27/28来源与绑定，阶段28句末小数修复252项Mock已通过，真实验收及此前待办保留。** 不自动进入30。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮仅增加显式公式语义服务与独立公式Prompt，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
+> 本轮仅增加显式有界SymPy计算服务与人工CLI，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -3155,6 +3155,8 @@ source
 ---
 
 # 35. 阶段 29：公式安全计算
+
+代码与用例已编写，未执行；入口`app.services.formula_calculation.calculate_formula(value)`只接受既有绑定请求/结果，先复核来源和允许符号，再显式构造有界SymPy有理数四则，不使用通用字符串求值。逐步零分母检查、精确结果/12位半偶展示、代入步骤、引擎版本及全部来源可复现；语义/单位仍待人工确认。用户命令及限制见[计算说明](FORMULA_SEMANTICS.md#阶段29公式安全计算)，不新增HTTP接口/迁移/配置，不提前接入Agent。
 
 ## 目标
 完成任务 6b。

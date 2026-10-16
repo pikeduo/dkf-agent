@@ -1,5 +1,6 @@
 """显式参数绑定：用户值/已核对引文→变量及来源；无LLM、计算、落库或自动检索。"""
 
+import hashlib
 import logging
 import re
 from decimal import Decimal
@@ -66,7 +67,7 @@ def reference(span, evidence_id, start, end):
 
 
 def document_value(item, trace):
-    """唯一引文内唯一完整数值才绑定；单位必须直接相邻，复杂表头单位暂由人工明确处理。"""
+    """唯一完整数值才绑定；句号须后接空白或经Hash确认的整块末尾，不改写来源/单位。"""
     matches = [(index, span) for index, span in enumerate(trace.source_spans, 1) if span.block_id == item.block_id]
     if len(matches) != 1:
         raise FormulaBindingError("FORMULA_BINDING_SOURCE")
@@ -78,10 +79,16 @@ def document_value(item, trace):
         raise FormulaBindingError("FORMULA_BINDING_SOURCE")
     number = number_literal(item.value_text)
     start, end = position + offset, position + offset + len(item.value_text)
-    # 防止用局部引文把2025或1,200中的25/200切出来冒充一个完整数值。
-    for adjacent in (span.text[start - 1:start] if start else "", span.text[end:end + 1]):
-        if adjacent and adjacent in "0123456789.,eE+-":
-            raise FormulaBindingError("FORMULA_BINDING_SOURCE")
+    # 保留左边界完整性；右侧句号仅在无数字延续时视为标点，不删除/裁剪原文或引文。
+    left, right = span.text[start - 1:start] if start else "", span.text[end:end + 1]
+    sentence_period = right == "." and (
+        end + 1 < len(span.text) and span.text[end + 1].isspace()
+        or end + 1 == len(span.text)
+        and hashlib.sha256(span.text.encode("utf-8")).hexdigest() == span.block_text_hash
+    )
+    if (left and left in "0123456789.,eE+-"
+            or right and right in "0123456789.,eE+-" and not sentence_period):
+        raise FormulaBindingError("FORMULA_BINDING_SOURCE")
     unit_ref, unit = None, checked_unit(item.unit_text)
     if unit is not None:
         unit_offset = item.quote.find(unit)

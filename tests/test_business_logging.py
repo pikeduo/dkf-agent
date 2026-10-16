@@ -88,6 +88,7 @@ def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
     ("evidence-cli", "Evidence CLI"),
     ("formula-cli", "Formula CLI"),
     ("formula-binding-cli", "Formula Binding CLI"),
+    ("formula-calculation-cli", "Formula Calculation CLI"),
     ("preset-cli", "Preset CLI"),
 ])
 def test_registered_process_roles_keep_exact_labels_and_real_pid(role, label):

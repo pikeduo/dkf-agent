@@ -1,6 +1,6 @@
-# 公式语义结构化、参数绑定与人工验收（阶段27/28）
+# 公式结构化、参数绑定与安全计算（阶段27～29）
 
-阶段27/28代码与Mock用例已编写，本轮Codex未执行pytest、来源查询、真实API或模型。阶段26及此前待验收事项不自动通过，不进入阶段29。没有新依赖、环境变量、数据库表/迁移、HTTP接口或Worker任务；提取使用当前LLM配置，参数绑定只复用EvidenceService，不调用LLM。
+阶段27～29代码与Mock用例已编写；阶段29本轮仅静态检查，未执行测试或计算验收。2026-10-16此前专项授权的阶段28句末数值修复五文件回归为252通过，记录保留如下；不是阶段29通过。未查询真实来源、请求真实API或运行模型，此前待办不自动通过，不进入阶段30。复用已声明SymPy，无新依赖/配置/迁移/HTTP接口或Worker；提取才调用LLM，绑定与计算仅只读Evidence及本地处理。
 
 ## 服务与范围
 
@@ -131,7 +131,7 @@ python -m scripts.stage27_formula_acceptance --kb-id $kbId --doc-id $docId --chu
 
 分别选已有的九类真实公式评估，不要求为了凑覆盖制造素材。没有的类型如实记缺口；校验结构、数学等价、变量语义、来源质量四项分别人工记录。图像OCR遗漏/原式误识别、公式跨Chunk导致不完整、上下文不在当前Chunk、模型误解百分比/同环比均是需要记录的边界；本阶段不自动修复OCR、套模板、扩大上下文或请求第二次模型。
 
-阶段27的真实公式质量仍需用户反馈，不因进入阶段28自动通过；安全计算与Knowledge Agent不在本轮范围。
+阶段27的真实公式质量仍需用户反馈，不因进入后续阶段自动通过；提取入口自身不绑定/计算，阶段29显式服务见下节，Knowledge Agent不在本轮范围。
 
 ## 阶段28：参数识别与绑定
 
@@ -173,7 +173,7 @@ result = bind_formula_variables(formula, user_inputs=[
 
 ### 用户手动验收
 
-1. 先由用户执行纯Mock和相邻回归；本轮Codex只写用例，不运行：
+1. 常规交付由用户执行纯Mock和相邻回归；专项授权的实际执行结果另行记录：
 
 ```powershell
 conda activate dkf-agent
@@ -207,4 +207,97 @@ python -m scripts.stage28_formula_acceptance --input $bindingPath --execute
 python -m scripts.stage28_formula_acceptance --input $bindingPath --execute --show-content
 ```
 
-反向检查：重复变量/冲突输入须失败；零值不得当缺参；错误单位/不存在引文须失败；移除参数不得自动从上下文补值。零分母在本阶段仍只绑定、绝不求值。确认公式含义、参数主体/时间口径和单位后再反馈；自由文本自动识别、通用单位系统及阶段29计算尚未实现。
+反向检查：重复变量/冲突输入须失败；零值不得当缺参；错误单位/不存在引文须失败；移除参数不得自动从上下文补值。零分母在绑定入口仍不求值。确认公式含义、参数主体/时间口径和单位后再反馈；自由文本自动识别、通用单位系统尚未实现，计算必须另行显式调用阶段29。
+
+### 2026-10-16：英文句末小数绑定修复验收
+
+- 根因：`document_value()`原先在严格数值校验之后，把左右相邻的`.`一律判为数字延续。`267,508.65.`中的value_text本身合法，但右侧英文句号触发`FORMULA_BINDING_SOURCE`；扩大quote无效，因为边界判断读取原`span.text`。
+- 修复：左边界保持原限制；右侧`.`只有在后接已观察到的空白，或位于**整Block**末尾时才作为标点放行。整块末尾通过既有`block_text_hash`与片段文本SHA256一致确认；部分Block片段恰好截在`.`时保守拒绝，防止隐藏后续数字。没有简单从禁止字符中删除`.`，没有裁剪原文或改写引文。
+- `number_literal()`、引文/数值唯一性、Block/Chunk字符映射、READY/知识库/Hash/代次校验均保留；阶段27提取逻辑未修改，不新增依赖/迁移或计算。
+- 新增47组参数化Mock回归：两种真实问题金额的字面形式（仅内存字符串）、句中整数/小数、合法千分位、短/长quote、句号后空白/换行、合法带符号完整数值；逐项核对规范化结果、quote/value引用及Block/Chunk双端偏移，原文/元数据不变。
+- 反例包括小数截断、年份/千分位子串、科学计数、剥离正负号、不完整值、点分数字/省略号/紧邻字符、部分Block隐藏延续、无引文/重复引文/重复value、坏Block/Hash及跨库。所有反例保留明确错误，不跳过或弱化断言。
+
+本轮实际执行（Conda `dkf-agent`，禁用联网资源下载，使用全新隔离临时目录；未连接真实数据库/模型/云服务）：
+
+```powershell
+python -m pytest tests/test_formula_binding.py tests/test_formula_binding_acceptance.py tests/test_evidence.py tests/test_formula.py tests/test_formula_acceptance.py -q -ra
+```
+
+最终结果：**252 passed，1.62秒**。执行时额外使用`-p no:cacheprovider --basetemp <全新隔离目录>`规避既有Windows缓存/临时目录权限问题，未改变测试文件范围。首轮250通过后，补充两个部分Block末尾用例，再完成最终252项回归。
+
+边界：这是保守的词法标点识别，不是自然语言语义断句；句号紧接引号/右括号、无空白的下一句、点分版本号或省略号仍保守拒绝。部分来源若截在句号、又无法证明整块结束，也不放行；不补读/修补来源或猜测后续字符。真实业务参数/单位/期间是否正确仍需人工核验。
+
+用户下一步：使用**原有**阶段28绑定请求重跑`stage28_formula_acceptance --input ... --execute --show-content`，核对两种金额及原始引文/偏移；该入口只读来源、不请求LLM，无需重新提取公式、修改证据或再调用MinerU。此处Mock通过不是实际原文复测或阶段28全部验收通过。
+
+## 阶段29：公式安全计算
+
+本轮只交付代码、测试用例和静态检查，**未运行阶段29 pytest、计算/数据库验收或真实API**。既有阶段28未提交的句末数值修复保留，不改绑定/提取语义，不提前实现Knowledge Agent。
+
+### 入口、输入与来源
+
+```python
+from app.services.formula_calculation import calculate_formula
+
+# Python调用示意：value只能是已有FormulaBindingRequest或FormulaBindingResult，不接受裸字符串。
+result = calculate_formula(value)
+```
+
+- 输入请求时，复用阶段28绑定服务核对当前ACTIVE/READY、Hash/代次、符号、引文及数值/单位偏移；结果输入先从user_input原字面值或document_evidence原引文重建请求，重新绑定后整体比对。篡改value/label/unit/来源/偏移、过期/越界或重复冲突仍失败，不信任仅结构合法的JSON。
+- 先前结果只有定义，没有数值输入时仍返回need_variables；`required_variables`准确，result/substituted_formula/calculation_id/engine_version为null，steps为空。缺参不导入SymPy、不猜值或调用模型补全。
+- 不重新从LaTeX/OCR识别公式，消费已有阶段27受限normalized_formula及原Raw Formula来源；绑定前后均保留manual_pending语义/单位状态。各源为既有只读短快照，不是跨文档全局事务或永远有效的引用。
+
+### 安全计算与可复现规则
+
+1. 复用`normalize_expression`的最多1024字符、128个AST节点、深度16、32个小写符号限制；AST实际符号必须与原定义及代入集合完全一致，不把pi/e等名称解释为隐式常量。
+2. 仅逐节点处理常量/变量、一元正负、加减乘除。调用显式SymPy Symbol、Rational、Add、Mul与内部倒数Pow对象；传给Rational的是严格十进制拆出的整数分子/分母，**不将用户字符串交给SymPy解析**。
+3. 禁用eval/exec、sympify/parse_expr/parse_latex/lambdify；不支持函数、属性、索引、用户幂、科学计数或任意代码。AST读取使用标准库解析，不执行Python字节码。
+4. 按原AST后序对SymPy有理数执行运算，在**每个原始除法**前检查分母是否为零；`a/a`、`0*(1/a)`或`1/a-1/a`在a=0时均失败，不能先消项再宣称结果为0/1。不调用通用simplify，不返回部分结果。
+5. 每一步结果必须有限有理数，分子/分母各最多4096二进制位；超限立即失败。不依赖模型、线程取消或超时来执行任意大计算，当前有界算术不是通用SymPy沙箱。
+6. 全程不使用float求值。`result.exact`为最简精确整数/分数；`result.decimal`是最多12位小数的ROUND_HALF_EVEN展示，`rounded`标明是否有舍入。使用整数商余数决定末位，舍入展示不参加后续步骤，不依赖外部Decimal上下文。
+7. `substitution`保留原规范数值，`substituted_formula`保留AST运算优先级，steps记录每步操作、精确操作数及结果。记录实际运行的SymPy版本，calculation_id绑定完整定义/来源/参数、算法及引擎版本；同输入/来源/版本可复现。ID不是可信签名，不保证不同SymPy版本有同一ID。
+
+### 返回与失败
+
+返回`FormulaCalculationResult`，至少包含：
+
+| 字段 | 内容 |
+|---|---|
+| formula / variables | 原公式定义与绑定记录，原件及变量名/标签/值/单位不改 |
+| substitution / substituted_formula | 变量到数值字符串的映射及可解释代入算式 |
+| result | exact / decimal / rounded / decimal_places / rounding；缺参为null |
+| formula_source / variable_sources | 既有完整Evidence及用户输入/文档引用来源，页/字符偏移保留 |
+| steps / engine_version / calculation_id | 有界逐步算术、实际引擎版本及稳定输入身份 |
+| required_variables | 未提供的准确符号，不填零、不扩大来源 |
+| calculation_scope / semantic_validation / unit_validation / result_unit | arithmetic_only / manual_pending / manual_pending / null |
+
+**success只证明给定数值下机械算术完成，不证明公式语义、参数主体/期间、量纲或业务结论正确。** 不自动转换万元/元、货币、百分数或推断结果单位；例如带`%`的输入数值20仍按20代入，是否应预先给0.2由人工确认原式口径。输入单位不一致时仍只是给定数值的数学计算，不能当成合法金额/比例结论；必须在执行前人工统一单位、核对公式与期间。
+
+安全错误为`FORMULA_CALC_INPUT / SOURCE / SYMBOLS / EXPRESSION / ZERO_DIVISION / LIMIT / DEPENDENCY / RESULT`，并保留原`FORMULA_BINDING_* / EVIDENCE_*`。错误不洗成need_variables，不自动重提取/重试，不输出表达式/参数或异常原文。没有新环境变量、依赖、业务表/迁移、HTTP API或Worker任务；SymPy已在environment.yml声明，检查到本地安装目录为1.14.0，**未由Codex加载/运行或安装**。
+
+日志复用每日单文件及集中注册formula-calculation-cli→Formula Calculation CLI。事件formula_calculation.started/finished/need_variables/failed只含UUID、数量、阶段、状态、耗时/固定错误码；不记录原式、变量名/值/单位、代入、步骤、结果或正文。API/Worker角色/协议不变。
+
+### 用户手动验收
+
+先执行用例（Codex仅编写，未运行）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_formula_calculation.py tests/test_formula_calculation_acceptance.py tests/test_formula_binding.py tests/test_formula_binding_acceptance.py tests/test_formula.py tests/test_formula_acceptance.py tests/test_evidence.py tests/test_business_logging.py -q -ra
+```
+
+覆盖九类目标公式、精确小数/循环分数、半偶舍入、常量及白名单符号、缺参无引擎、原始分母零值/嵌套除法/乘零消项、恶意表达式/超限、值/单位/来源篡改、过期/跨库/非READY、稳定ID/深复制、无LLM/数据库写入、日志脱敏及CLI默认不执行。Mock和本地算术用例不证明真实公式业务语义正确。
+
+准备已有PostgreSQL及阶段28真实请求，不需要API/GPU/Worker/Redis；无需再次调用阶段27、MinerU或下载模型。确认原式及单位/期间后，由用户手动运行：
+
+```powershell
+python -c "import sympy; print(sympy.__version__)"
+python -m scripts.stage29_formula_acceptance
+$bindingPath = Read-Host '已有阶段28绑定请求JSON路径（不是终端日志/绑定结果JSON）'
+python -m scripts.stage29_formula_acceptance --input $bindingPath --execute --show-content
+```
+
+默认dry-run不读输入/配置、查来源、导入SymPy或计算；执行模式只读原请求（上限2MB），不覆盖任何文件。默认仅摘要，`--show-content`才在可信终端显示完整参数/结果/来源；含正文及数值，不重定向至可提交文件或业务日志。CLI只接收FormulaBindingRequest；已有FormulaBindingResult在Python统一入口直接使用即可。
+
+预期参数齐全时success，逐项核对exact、decimal/rounded、代入步骤及原始公式/参数来源；同请求重复执行（无云费用）ID/步骤相同。缺参为need_variables、退出码1；非法来源/除零/超限为明确错误、无半份结果。不要为测试篡改真实源数据；零分母和注入反例仅运行上述Mock，真实数据验收继续只读。
+
+下一步由用户反馈算术回归及已有真实来源验收；阶段29未验收通过，不自动接入阶段30 Knowledge Agent，也不将机械计算结果直接当成LLM业务回答。

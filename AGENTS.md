@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**28公式参数识别与绑定：已补显式用户值/文档引文绑定、当前来源复核和精确缺参契约，用例仅编写，待用户验收；不进入29计算。阶段26语言实验未接入生产，新云批次/真实恢复及其他此前待办保留。**
+当前阶段：**29公式安全计算：已补既有绑定重核、AST白名单/SymPy精确四则、逐步除零检查及可复现来源结果，用例仅编写，待用户验收；不进入30 Agent。阶段28句末数值修复已有252项Mock回归，真实验收及其他此前待办保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -53,12 +53,13 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 25 | 已补八个文档级管理接口、逐阶段恢复、缓存Reindex至READY、异步自有文件/DB级联删除及共享缓存保护；新迁移/Mock/DB/Worker待验收 |
 | 26 | 缓存命中增量真实验收通过，相关隔离DB回归93通过；补只读语言策略实验，192项Mock/相邻回归及30题真实GPU测量完成；生产未集成，独立文档留出集/新云批次及真实超时恢复待验收 |
 | 27 | 已补公式提取服务、原式/变量/引用严格契约、四则语法规范化与人工验收CLI；测试未运行，真实LLM/数学语义待验收 |
-| 28 | 已补用户/证据参数绑定、严格十进制、数值/单位双端字符来源及need_variables；不猜值/换算/计算，无新增依赖/迁移，Mock及真实来源待用户验收 |
-| 29 及后续 | 未开展，等待用户确认 |
+| 28 | 已补用户/证据参数绑定、严格十进制、双端字符来源及need_variables；句末小数修复五文件252项Mock通过，真实来源/语义验收待用户确认 |
+| 29 | 已补显式SymPy有理数计算、变量白名单、每步零分母/资源上限、精确结果/舍入展示/来源及稳定计算ID；用例仅编写，无云/业务写入，待验收 |
+| 30 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
-- 用户已指定推进阶段28，此前验收不自动通过；复用阶段27定义及只读Evidence，不改Parser/上传/检索/原RAG Prompt或索引语义，不运行测试/云请求，不推进29。
+- 用户已指定推进阶段29，此前验收不自动通过；复用阶段27/28定义、绑定及只读Evidence，不改Parser/上传/检索/原RAG Prompt或索引语义，不运行测试/云请求，不推进30。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -261,10 +262,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 仅显式extract_formula处理当前ACTIVE/READY指定Chunk中的完整MinerU formula Block；复用EvidenceService的Hash/字符/代次/页语义核对，邻近上下文只取同Chunk相邻两块，缺失/片段不猜测补全。不改原式/OCR，不自动在上传/Query插入付费调用。
 - 唯一LLM工厂尊重LLM_PROVIDER，默认DeepSeek，显式allow_cloud=True才允许公式/上下文外传；一次请求，无自动重试/换提供方。名称/变量含义的原文短引文必须唯一匹配白名单，来源ID/页/章节/bbox由Evidence回填；未知含义为null，不编造值或单位。
 - normalized_formula只做标准库有界AST白名单校验及四则规范化，不求值、不用eval/exec/parse_expr，不调用SymPy；不支持函数/幂/不定项求和等时明确失败或unsupported。formula_id绑定原件/解析/Chunk/Block身份；来源仅为读取快照，不建立第二套真相表或公式缓存。
-- success仅指结构/引用通过，semantic_validation保持manual_pending；数学等价、百分比口径与名称翻译须人工核验，不能用合法引文宣称语义验真。提取入口不绑定值，安全计算仍留阶段29；日志复用每日文件与注册formula-cli角色，禁止记录原式、规范式、变量含义、上下文或模型原文。
+- success仅指结构/引用通过，semantic_validation保持manual_pending；数学等价、百分比口径与名称翻译须人工核验，不能用合法引文宣称语义验真。提取入口不绑定/计算，计算仅走阶段29显式入口；日志复用每日文件与注册formula-cli角色，禁止记录原式、规范式、变量含义、上下文或模型原文。
 - 阶段28只消费已提取定义：显式用户参数标为user_input并保留input_id/原值；文档参数须同kb、显式doc/chunk/block及唯一引文，由EvidenceService重新核对READY/Hash/代次/页语义。公式快照/原式/变量/引用须与当前来源一致，同文档多Chunk代次冲突全批拒绝，不自动重提取/检索/调用LLM。
 - 仅识别严格有限十进制与合法千分组，精确字符串无隐式float/舍入；零值有效、缺值返回need_variables及准确符号。未知/重复/冲突输入失败，不猜值、不填零、不默认覆盖；单位不明保留null，有文档单位须在同引文中紧邻数值，不猜表头单位或跨币种/百分比换算。
 - 参数来源保持数值/单位与Block/Chunk双端字符引用及原页语义；semantic_validation/unit_validation保持manual_pending，不证明期间、量纲或参数含义正确。复用formula_binding白名单过程/数量日志和formula-binding-cli集中角色，禁止记录参数名/值/单位/正文；阶段28不求值、不写库、不自动收费。
+- 阶段29只接受FormulaBindingRequest/Result，复用阶段28当前来源核对；已有结果须从raw_value/文档引文重建并整份比对，不信任篡改的value/偏移。缺参保留need_variables，不导入计算引擎或填值，不重提取公式/检索/付费。
+- 白名单有界AST逐节点构造SymPy Symbol/Rational/Add/Mul及内部倒数，仅允许原四则/一元正负。禁止eval/exec、sympify/parse_expr/parse_latex/lambdify、函数/属性/索引/用户幂；每个原始除法先检查数值分母，不能靠消项/乘零绕过。各中间有理数分子/分母至多4096二进制位，不返回半份结果。
+- 结果保留精确分数、最多12位半偶舍入展示、代入映射/算式/步骤、实际SymPy版本及公式/变量来源；同输入/来源/引擎版本有稳定calculation_id。仅机械算术，不推断/换算单位或百分比，语义及单位仍manual_pending。复用formula_calculation脱敏事件和formula-calculation-cli，不记录数值、算式、结果或正文，不写业务库/缓存。
 
 ### Admin文档管理与动态增量
 
