@@ -20,7 +20,9 @@ RESULT_ROOT = TEST_ROOT / "results"
 PRESET_ROOT = PROJECT_ROOT / "data/knowledge_base/preset"
 MIB = 1024 ** 2
 VERSION = "ohr-selection-v1"
-DOMAINS = {"finance", "academic", "textbook", "law", "manual", "newspaper", "administration"}
+# 官方实际键为 news；newspaper 仅保留显式历史输入/冻结计划兼容，不占默认第八个领域。
+DOMAINS = {"finance", "academic", "textbook", "law", "manual", "news", "administration"}
+SUPPORTED_DOMAINS = DOMAINS | {"newspaper"}
 EVIDENCE = {"plain_text", "table", "formula", "chart", "reading_order"}
 EVIDENCE_ALIASES = {"text": "plain_text"}
 SOURCES = {
@@ -127,7 +129,7 @@ def plain_path(path, *, beneath=None):
 
 
 def qa_rows(value):
-    """保留原 QA；仅 text 显式映射 plain_text，multi 单独报告且不进入五类抽样。"""
+    """保留原 QA 与实际 news 身份；text 映射 plain_text，multi 不进入五类抽样。"""
 
     if not isinstance(value, list) or not 1 <= len(value) <= 100000:
         raise PreparationError("OHR_QA")
@@ -145,7 +147,7 @@ def qa_rows(value):
                 continue
             identity = safe_name(row["doc_name"])
             domain = row["doc_type"].casefold()
-            if (domain not in DOMAINS or len(identity.parts) < 2
+            if (domain not in SUPPORTED_DOMAINS or len(identity.parts) < 2
                     or identity.parts[0] != domain or row["doc_name"].lower().endswith(".pdf")):
                 rejected["ambiguous_source_identity"] += 1
                 continue
@@ -519,7 +521,7 @@ def preview(qa_path, zip_path, results, limits, domains):
     """
 
     limits.validate()
-    if not domains or not set(domains) <= DOMAINS:
+    if not domains or not set(domains) <= SUPPORTED_DOMAINS:
         raise PreparationError("OHR_LIMIT")
     results = plain_path(results, beneath=RESULT_ROOT)
     targets = [results / name for name in ("selection_plan.json", "selection_report.json", "qa_reference.jsonl")]
@@ -565,7 +567,7 @@ def checked_plan(value):
             identity = safe_name(item["doc_name"])
             safe_name(item["zip_member"])
             destination = "ohr_bench/" + item["doc_name"] + ".pdf"
-            if (identity.parts[0] != item["domain"] or item["domain"] not in DOMAINS
+            if (identity.parts[0] != item["domain"] or item["domain"] not in SUPPORTED_DOMAINS
                     or item["destination_file"] != destination or item["doc_name"] in identities
                     or item["sha256"] in hashes or destination.casefold() in destinations
                     or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
@@ -673,7 +675,7 @@ def build_parser():
     parser.add_argument("--max-total-pages", type=int, default=200)
     parser.add_argument("--max-inspect-mb", type=int, default=256)
     parser.add_argument("--qas-per-type", type=int, default=3)
-    parser.add_argument("--domains", nargs="+", choices=sorted(DOMAINS), default=sorted(DOMAINS))
+    parser.add_argument("--domains", nargs="+", choices=sorted(SUPPORTED_DOMAINS), default=sorted(DOMAINS))
     return parser
 
 

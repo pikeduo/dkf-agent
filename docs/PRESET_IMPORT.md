@@ -1,5 +1,11 @@
 # 预置知识库批量导入
 
+## 阶段32固定评测数据（独立于下述阶段16历史流程）
+
+当前正式评测数据只使用OHR/OCB，不再提取Omni或构建其QA。`data/dataset/stage32_run_01/`已保存各100份原件，OHR3588题、OCB499题；文档名单和双向映射在manifests/，QA原始字段及评分依据在qa/，提取/校验报告在reports/。原件CRC/Hash、PDF真实证据页、全依赖与每文件至少一题已核验。数据未上传或导入知识库，未运行检索/RAG。
+
+新增`scripts/prepare_stage32_dataset.py`默认dry-run；本轮已按单独授权执行过`--execute --confirm-local-use --run stage32_run_01`，不要重跑覆盖。OCB739条官方断言仍需人工判分；32条Domain任务不进正式QA。3份PDF超200页，不自动拆分或发云。阶段33～36按固定file_id/SHA及两个JSONL读取；新评测或云调用须另获授权。旧阶段16工具、三基准资料、十份/旧Office/七标签验收标准及正式preset/manifest不改变。
+
 阶段 16 只准备已有数据链路可消费的默认知识库，不新增检索或问答接口。导入脚本复用文件存储、自动 Router、Parse Cache、Chunk、Embedding 与 pgvector 入库；不直接解析或加载模型，不创建第二套真相表。真实素材、清单、脚本运行、测试与费用验收均由用户完成。
 
 ## 优先使用：阶段 16/17 小样本联合冒烟

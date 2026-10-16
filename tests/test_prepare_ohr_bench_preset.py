@@ -301,9 +301,9 @@ def test_multi_is_separate_not_guessed_as_five_categories():
     assert inventory["multi_policy"] == "reported_separately_not_mapped_not_selected"
 
 
-def test_six_domains_report_zero_newspaper_without_manufacturing_qa():
-    """用户选择六领域时不要求虚构 Newspaper，仍明确记录源零 QA、排除及未覆盖。"""
-    requested = tool.DOMAINS - {"newspaper"}
+def test_six_domains_report_zero_news_in_stub_without_manufacturing_qa():
+    """元数据Stub缺news时如实报告；真实官方键使用news，不误称实际新闻QA为零。"""
+    requested = tool.DOMAINS - {"news"}
     pool = [item for item in metadata_pool() if item["domain"] in requested]
     extra_rows, _ = tool.qa_rows([schema_row("extra-text", "finance/extra_schema", "text")])
     pool.append({"doc_name": "finance/extra_schema", "domain": "finance",
@@ -318,20 +318,20 @@ def test_six_domains_report_zero_newspaper_without_manufacturing_qa():
     plan, report, refs = tool.build_artifacts(selected, source, tool.Limits(), requested,
         len(pool), failures, {"multi_evidence_unsupported": 1}, inspection, qa_inventory=inventory)
     assert len(plan["documents"]) == 7 and plan["gaps"]["domain_shortfall"] == 0
-    assert inventory["raw_domain_counts"]["newspaper"] == 0
-    assert report["domain_coverage"]["source_domains_without_qa"] == ["newspaper"]
-    assert report["domain_coverage"]["excluded_by_user"] == ["newspaper"]
-    assert "newspaper" in report["domain_coverage"]["not_selected"]
+    assert inventory["raw_domain_counts"]["news"] == 0
+    assert report["domain_coverage"]["source_domains_without_qa"] == ["news"]
+    assert report["domain_coverage"]["excluded_by_user"] == ["news"]
+    assert "news" in report["domain_coverage"]["not_selected"]
     assert plan["sources"] == source  # 统计不改旧来源摘要契约。
     references = [json.loads(line) for line in refs.splitlines()]
-    assert all(row["doc_type"] != "newspaper" for row in references)
+    assert all(row["doc_type"] != "news" for row in references)
     text = next(row for row in references if row["evidence_source"] == "text")
     assert text["_ohr_reference"]["category"] == "plain_text"
 
 
 def test_default_seven_domains_still_reports_domain_shortfall():
-    """使用完整来源摘要 Stub 验证七领域目标；缺 Newspaper 仍记缺口，不改变用户范围。"""
-    pool = [item for item in metadata_pool() if item["domain"] != "newspaper"]
+    """使用完整来源摘要Stub验证七领域目标；缺news仍记缺口，不改变用户范围。"""
+    pool = [item for item in metadata_pool() if item["domain"] != "news"]
     selected, failures, inspection = tool.select_documents(pool, None, tool.Limits(count=6),
         inspector=metadata_inspector, reader=marker_reader)
     # 七份目标仍要求尽量覆盖七领域；这里仅构造元数据，不生成或补齐源文件。
@@ -363,7 +363,18 @@ def test_cli_can_choose_six_domains_and_run03_without_touching_old_plan(monkeypa
         return SimpleNamespace(max_upload_size_mb=50)
 
     monkeypatch.setattr(config, "get_settings", settings_stub)
-    requested = sorted(tool.DOMAINS - {"newspaper"})
+    requested = sorted(tool.DOMAINS - {"news"})
     assert tool.main(["--confirm-official-source", "--domains", *requested,
         "--results-dir", "docs/test/ohr_bench_preset/results/run-03"]) == 2
     assert seen["domains"] == set(requested) and seen["results"].name == "run-03"
+
+
+def test_official_news_domain_is_accepted_without_changing_raw_qa():
+    """官方news进入默认七域，保留原始doc_name/doc_type，不伪造newspaper身份。"""
+    raw = schema_row("news-stub", "news/schema_stub", "text")
+    before = copy.deepcopy(raw)
+    groups, rejected = tool.qa_rows([raw])
+    assert not rejected and groups[raw["doc_name"]][0]["domain"] == "news"
+    assert groups[raw["doc_name"]][0]["original"] == before and raw == before
+    assert "news" in tool.DOMAINS and "newspaper" not in tool.DOMAINS
+    assert "newspaper" in tool.SUPPORTED_DOMAINS

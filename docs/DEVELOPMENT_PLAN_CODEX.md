@@ -3414,6 +3414,16 @@ LangChain Tool / Prompt Adapter Test
 
 # 38. 阶段 32：RAG 正式评测集（用户执行评测）
 
+## 当前固定数据版本（用户本轮授权本地提取，不授权问答执行）
+
+本阶段改为仅使用OHR-Bench和Microsoft OCB，不再提取Omni或构建其QA。已生成`data/dataset/stage32_run_01/`：OHR100份PDF/3588条官方QA，OCB100份Office/499条File Fidelity QA，合计200原件/4087题。官方QA先匹配完整依赖，再经原件完整性/Hash和OHR真实证据页校验后选择；不以QA条数冒充文件数、不为旧Office或格式配额下载凑数。
+
+OCB保留原始expected_assertions、weights、track、reference_files和Parquet行号，expected_answer=null；739条入选官方断言供后续人工逐项判分，未实现自动答案评分。另32条Domain任务/1138条断言因RAG适用性需审，不纳入正式QA分母。OHR保留原始0-based证据页和1-based投影，news兼容已补；multi仍按现有未支持规则单列排除，不伪造拆题。
+
+入口`scripts/prepare_stage32_dataset.py`默认dry-run；真实提取必须显式`--execute --confirm-local-use --run stage32_run_01`，本轮已按用户单独授权执行，**不要重跑覆盖**。新实验必须另选未存在run，不自动复制更多原件或追加到冻结目录。输出包含documents、qa、manifests和reports；双向校验PASS仅代表200原件/官方QA完整，缺依赖、孤立文件、重复Hash/ID均0，不代表解析或回答正确。OHR3份超过200页，后续整份云解析能力须另审，不改原件或自动拆分。
+
+阶段33～36读取两个QA JSONL、文档manifest及qa_file_mapping.csv，以项目根目录解析source_file_paths，使用稳定file_id/SHA、官方QA ID/行号和OHR页码；不读取业务preset或复用不完整QA。真实上传/检索/RAG/云费用和性能评测仍须用户另行授权。原先10～50题的最低设计目标保留为历史建议，不限制当前固定官方题库规模。
+
 至少：
 
 ```text

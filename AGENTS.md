@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**30 Knowledge Agent及LLM Fallback补充：已补有限图与统一工厂的显式双方授权单次custom→deepseek切换、HTTP分类及Mock用例；未执行，待用户验收，不进入31。阶段29及此前待办保留。**
+当前阶段：**32固定评测数据：用户单独授权本地提取OHR/OCB各100份，关联3588/499条官方QA，双向身份/页码/Hash校验通过；不含Omni，不执行33～36。阶段30/31及此前未完成的业务验收保留，不自动视为通过。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -56,11 +56,14 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 28 | 已补用户/证据参数绑定、严格十进制、双端字符来源及need_variables；句末小数修复五文件252项Mock通过，真实来源/语义验收待用户确认 |
 | 29 | 已补显式SymPy有理数计算、变量白名单、每步零分母/资源上限、精确结果/舍入展示/来源及稳定计算ID；用例仅编写，无云/业务写入，待验收 |
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
-| 31 及后续 | 未开展，等待用户确认 |
+| 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
+| 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
+| 33 及后续 | 未执行，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
-- 用户已指定推进阶段30，此前验收不自动通过；LangGraph仅封装原Search/Query/Formula服务，不改Parser/上传/检索/原RAG Prompt或索引语义，不运行测试/云请求，不推进31。
+- 阶段30的LangGraph仅封装原Search/Query/Formula服务，不改Parser/上传/检索/原RAG Prompt或索引语义；此前业务验收不会因阶段32数据提取自动通过，后续模型/云端/测试仍须另行授权。
+- 用户后续单独授权阶段32本地数据提取，固定于`data/dataset/stage32_run_01/`，仅OHR/OCB；历史阶段16三基准工具/素材保留，不再为本轮处理Omni。正式QA必须全依赖在新目录存在且Hash一致，每原件至少一题；断言不拼答案，Domain适用性未审不纳入。3份OHR超200页，本地可读不代表可整份发MinerU；不自动拆分、上传、评测或覆盖旧run。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
