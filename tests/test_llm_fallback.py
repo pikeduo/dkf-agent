@@ -136,7 +136,13 @@ def test_fallback_disabled_keeps_single_selected_provider_behavior():
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("system,user", [("", "q"), ("s", " "), (None, "q"), ("s", "x" * 60001)])
+# 使用短标识，避免原始长输入进入用例名称并超出 Windows 环境变量长度限制。
+@pytest.mark.parametrize("system,user", [
+    pytest.param("", "q", id="empty-system"),
+    pytest.param("s", " ", id="blank-user"),
+    pytest.param(None, "q", id="non-string-system"),
+    pytest.param("s", "x" * 60001, id="over-budget"),
+])
 def test_invalid_or_over_budget_input_never_sends_or_switches_provider(system, user):
     """普通参数或完整上下文预算错误不是备用理由，主备请求数均为零。"""
     calls = []
