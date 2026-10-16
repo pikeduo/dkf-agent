@@ -1,7 +1,9 @@
-"""提供方无关的单次 Chat Completions 边界；不重试、不切换提供方、不记录正文。"""
+"""统一Chat边界：每提供方单次HTTP；仅显式双方授权时允许一次custom→deepseek。"""
 
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import perf_counter
 
 import httpx
@@ -10,12 +12,14 @@ from app.core.business_logging import log_event
 from app.core.config import Settings, get_settings
 
 MAX_RESPONSE_BYTES = 262144
+CLOUD_CALL_ALLOWED: ContextVar[bool] = ContextVar("llm_cloud_call_allowed", default=False)
 ERRORS = {
     "LLM_CONFIG": "LLM 提供方配置或密钥不可用，请人工检查本地配置",
     "LLM_INPUT": "LLM 输入为空、无效或超过本地预算",
     "LLM_AUTH": "LLM 鉴权失败，请人工检查选中提供方的密钥与权限",
     "LLM_QUOTA": "LLM 余额或配额不足",
-    "LLM_RATE_LIMIT": "LLM 限流，本次没有自动追加请求",
+    "LLM_RATE_LIMIT": "LLM 限流；仅显式授权的Fallback策略可追加一次备用请求",
+    "LLM_CLOUD_PERMISSION": "本次未明确允许云调用，未请求主模型或备用模型",
     "LLM_HTTP": "LLM HTTP 请求未成功，请查看安全状态码",
     "LLM_NETWORK": "LLM 网络请求未完成；可能已产生费用，请先人工核对",
     "LLM_RESPONSE": "LLM 返回结构无效或超限，未返回部分回答",
@@ -26,11 +30,22 @@ ERRORS = {
 class LLMError(Exception):
     """固定错误分类与提供方枚举，不承载地址、凭据或上游原文。"""
 
-    def __init__(self, code: str, *, provider: str | None = None):
-        """仅允许安全错误码和已注册提供方，未知输入不回显。"""
+    def __init__(self, code: str, *, provider: str | None = None, status_code: int | None = None):
+        """仅保留安全码、固定提供方及真实HTTP状态，不能携带上游响应正文。"""
         self.code = code if code in ERRORS else "LLM_RESPONSE"
         self.provider = provider if provider in {"deepseek", "custom"} else None
+        self.status_code = status_code if type(status_code) is int and 100 <= status_code <= 599 else None
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
+
+
+@contextmanager
+def llm_cloud_call(*, allow_cloud: bool = False):
+    """由已有业务许可建立本次请求作用域；并发隔离，异常/嵌套退出后恢复，不持久授权。"""
+    token = CLOUD_CALL_ALLOWED.set(allow_cloud is True)
+    try:
+        yield
+    finally:
+        CLOUD_CALL_ALLOWED.reset(token)
 
 
 def strict_json(text: str | bytes):
@@ -79,9 +94,9 @@ class ChatCompletionService:
         """提供完整 Prompt 字符预算，不冒充精确 token 限制。"""
         return self._context_chars
 
-    def _error(self, suffix: str) -> LLMError:
-        """将内部安全类别转换为选中提供方错误，子类可保留历史错误码。"""
-        return LLMError("LLM_" + suffix, provider=self.provider)
+    def _error(self, suffix: str, *, status_code: int | None = None) -> LLMError:
+        """转换安全错误并保留HTTP状态，禁止将所有HTTP错误都判为可切换。"""
+        return LLMError("LLM_" + suffix, provider=self.provider, status_code=status_code)
 
     def validate_config(self) -> None:
         """只读检查密钥与供应商端点；预检绝不创建客户端或发送请求。"""
@@ -106,7 +121,7 @@ class ChatCompletionService:
             "response_format": {"type": "json_object"}}
 
     def complete(self, system_prompt: str, user_content: str) -> str:
-        """只向选中端点发送一次请求；任何失败不重试、不回退、不发布部分回答。"""
+        """只向自身端点发送一次请求；不自行重试或切换，由工厂包装器决定备用策略。"""
         started, status_code = perf_counter(), None
         try:
             self.validate_config()
@@ -126,7 +141,7 @@ class ChatCompletionService:
                     status_code = response.status_code
                     if status_code != 200:
                         suffix = {401: "AUTH", 403: "AUTH", 402: "QUOTA", 429: "RATE_LIMIT"}.get(status_code, "HTTP")
-                        raise self._error(suffix)
+                        raise self._error(suffix, status_code=status_code)
                     body = bytearray()
                     for part in response.iter_bytes():
                         if len(body) + len(part) > MAX_RESPONSE_BYTES:
@@ -150,22 +165,114 @@ class ChatCompletionService:
             return content
         except Exception as exc:
             error = exc if isinstance(exc, LLMError) else self._error(
-                "NETWORK" if isinstance(exc, httpx.HTTPError) else "RESPONSE")
+                "NETWORK" if isinstance(exc, httpx.TransportError) else "RESPONSE")
             log_event("llm.failed", level=logging.WARNING, provider=self.provider, model_name=self.model_name,
                       error_code=error.code, status_code=status_code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 
 
-def create_llm_service(settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None) -> ChatCompletionService:
-    """只实例化全局选择器指定的服务；构造失败不尝试另一方，不产生请求。"""
+class FallbackLLMService:
+    """冻结两个独立服务；每次调用最多两次HTTP，无循环、同方重试或可变的实际提供方状态。"""
+
+    def __init__(self, primary: ChatCompletionService, backup: ChatCompletionService):
+        """只接受custom→deepseek，不读取第三家配置、不在构造时联网。"""
+        if primary.provider != "custom" or backup.provider != "deepseek":
+            raise LLMError("LLM_CONFIG")
+        self._primary, self._backup = primary, backup
+
+    @property
+    def provider(self):
+        """兼容现有元数据：表示计划主提供方；本次实际使用方以结束事件为准。"""
+        return self._primary.provider
+
+    @property
+    def model_name(self):
+        """返回计划主模型名，不能用共享实例字段记录并发请求实际使用方。"""
+        return self._primary.model_name
+
+    @property
+    def max_tokens(self):
+        """保留主模型元数据，各HTTP请求仍用本提供方的独立输出预算。"""
+        return self._primary.max_tokens
+
+    @property
+    def context_chars(self):
+        """完整提示词必须同时符合两方本地预算，不裁剪或改写备用上下文。"""
+        return min(self._primary.context_chars, self._backup.context_chars)
+
+    def validate_config(self):
+        """开启时预检两方端点与密钥，备用无效则任何请求前安全失败。"""
+        self._primary.validate_config()
+        self._backup.validate_config()
+
+    def _check_content(self, value, service):
+        """JSON-mode内容仍须严格为对象；非法JSON不是重试/换模型理由，业务字段由原服务校验。"""
+        try:
+            if not isinstance(strict_json(value), dict):
+                raise ValueError
+        except Exception:
+            raise service._error("RESPONSE") from None
+
+    def complete(self, system_prompt: str, user_content: str) -> str:
+        """本次许可+启用配置才最多切换一次；两方收到相同原Prompt，超时不代表未计费。"""
+        started, actual, count = perf_counter(), self._primary, 0
+        try:
+            if CLOUD_CALL_ALLOWED.get() is not True:
+                raise LLMError("LLM_CLOUD_PERMISSION", provider=self.provider)
+            self.validate_config()
+            try:
+                content = self._primary.complete(system_prompt, user_content)
+            except LLMError as error:
+                eligible = error.provider == "custom" and (
+                    error.code == "LLM_NETWORK"
+                    or error.code == "LLM_RATE_LIMIT" and error.status_code == 429
+                    or error.code == "LLM_HTTP" and error.status_code is not None and 500 <= error.status_code <= 599)
+                if not eligible:
+                    raise
+                count, actual = 1, self._backup
+                log_event("llm.fallback_started", provider=actual.provider, model_name=actual.model_name,
+                    error_code=error.code, status_code=error.status_code, fallback_count=count)
+                backup_started = perf_counter()
+                try:
+                    content = actual.complete(system_prompt, user_content)
+                    self._check_content(content, actual)
+                except LLMError as backup_error:
+                    log_event("llm.fallback_failed", level=logging.WARNING, provider=actual.provider, model_name=actual.model_name,
+                        error_code=backup_error.code, status_code=backup_error.status_code, fallback_count=count,
+                        duration_ms=(perf_counter() - backup_started) * 1000)
+                    raise
+                log_event("llm.fallback_finished", provider=actual.provider, model_name=actual.model_name,
+                          fallback_count=count, duration_ms=(perf_counter() - backup_started) * 1000)
+            else:
+                self._check_content(content, actual)
+            log_event("llm.call_finished", provider=actual.provider, model_name=actual.model_name,
+                fallback_count=count, duration_ms=(perf_counter() - started) * 1000)
+            return content
+        except LLMError as error:
+            log_event("llm.call_failed", level=logging.WARNING, provider=actual.provider, model_name=actual.model_name,
+                error_code=error.code, status_code=error.status_code, fallback_count=count,
+                duration_ms=(perf_counter() - started) * 1000)
+            raise
+
+
+def create_llm_service(settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None) -> ChatCompletionService | FallbackLLMService:
+    """默认只实例化所选服务；显式启用才冻结独立备用服务，任何构造失败不触发HTTP。"""
     try:
         config = settings if settings is not None else get_settings()
     except Exception:
         raise LLMError("LLM_CONFIG") from None
     if config.llm_provider == "deepseek":
+        if getattr(config, "llm_fallback_enabled", False):
+            raise LLMError("LLM_CONFIG")
         from app.services.deepseek import DeepSeekService
         return DeepSeekService(config, transport=transport)
     if config.llm_provider == "custom":
         from app.services.custom_llm import CustomLLMService
-        return CustomLLMService(config, transport=transport)
+        primary = CustomLLMService(config, transport=transport)
+        if getattr(config, "llm_fallback_enabled", False):
+            if config.llm_fallback_provider != "deepseek":
+                raise LLMError("LLM_CONFIG")
+            from app.services.deepseek import DeepSeekService
+            return FallbackLLMService(primary, DeepSeekService(config, transport=transport))
+        return primary
     raise LLMError("LLM_CONFIG")

@@ -12,7 +12,7 @@ result = query_knowledge_base(kb_id, question, doc_ids=[doc_id], top_k=30, allow
 # 返回项目 RAGAnswer；如未来API需要JSON，可使用 result.model_dump(mode="json")。
 ```
 
-- `app.services.llm.create_llm_service()`只按`LLM_PROVIDER`选一个服务：`DeepSeekService`仅官方，`CustomLLMService`仅自定义API；共用安全HTTP实现，不共用Key/Base URL/模型/输出预算/超时。构造不联网、失败不重试或切换，不引入OpenAI SDK。
+- `app.services.llm.create_llm_service()`默认按`LLM_PROVIDER`选一个服务：`DeepSeekService`仅官方，`CustomLLMService`仅自定义API；不共用Key/Base URL/模型/预算/超时。仅显式启用双方授权Fallback时工厂包装两个独立服务，custom运输故障可转官方一次；构造不联网，无同方重试/OpenAI SDK。
 - `DKFQueryEngine`继承LlamaIndex BaseQueryEngine，组合已有HybridRetriever（各路20/融合默认30）及BGERerankerAdapter（Top5），不重新Parse/Chunk/Embedding/Index。仅Query沿用共享BGE-M3，重排沿用共享Reranker，两者是不同模型。
 - `DKFLLMAdapter`继承CustomLLM，委托工厂选择的项目服务；旧`DKFDeepSeekAdapter`导入/注入调用保持兼容，未注入时也尊重全局选择器。`DKFResponseSynthesizer`仍使用原Node-aware单次Chat，不用默认LLM/PromptHelper/Tokenizer。自由text_chunks、额外source nodes、动态Prompt、Completion及流式入口拒绝；无Refine/tree/map-reduce隐含收费请求。
 - 公共Query/Synthesis/Chat不走默认含正文的callback；不修改全局Settings，不注册Tracing。第三方全局instrumentation仍需用户禁用，不宣称能净化任意外部追踪。
@@ -53,15 +53,15 @@ python scripts/migrate_llm_env.py
 python scripts/migrate_llm_env.py --apply
 ```
 
-迁移完成后两组变量均保留，仅把`LLM_PROVIDER=deepseek`改为`custom`（或反向）并重启API/Query进程；`get_settings()`缓存及已有服务快照不会热切换。PowerShell的同名环境变量优先于`.env`，旧`DEEPSEEK_PROVIDER=sub2api`若仍存在须手动移除；不要把真实Key写进命令行历史。旧HTTP变量不再控制任何正式请求。
+迁移完成后两组变量均保留，修改`LLM_PROVIDER`并重启API/Query进程；切回官方主模型时须同时关闭Fallback，否则初始化拒绝。`get_settings()`及已有服务快照不热切换；PowerShell同名变量优先于`.env`，旧sub2api选择器须手动移除，不把真实Key写进命令历史。旧HTTP变量不再控制正式请求。
 
 用户已确认旧Sub2API真实RAG成功，不代表本轮重构已经验收。默认自定义HTTP被拒绝；仅临时测试可明确设置`CUSTOM_LLM_ALLOW_INSECURE_HTTP=true`，不能通过旧DeepSeek开关放宽。公网HTTP明文暴露Key、问题与证据，正式部署必须使用可信HTTPS；测试使用低额度可撤销密钥、结束后轮换。不会自动修改协议或关闭HTTPS证书校验。
 
-`allow_cloud=True`是向当前选中提供方的本次外传/费用确认，不是版权或鉴权证明；未确认时在检索/模型前拒绝。MinerU上传许可不覆盖LLM，提供方切换后须重新确认接收方受信任及内容可外传；不因另一提供方可用而自动回退。
+`allow_cloud=True`是向已授权提供方的本次外传/费用确认，不是版权或鉴权证明；启用Fallback时还须确认custom和官方DeepSeek双方均可信并允许外传。未确认时在检索/模型前拒绝；MinerU许可不覆盖LLM。默认不因另一方可用就切换，唯一例外见下节显式配置。
 
 安全错误：官方保持既有`DEEPSEEK_*`码兼容，自定义使用`LLM_CONFIG / INPUT / AUTH / QUOTA / RATE_LIMIT / NETWORK / HTTP / RESPONSE / TRUNCATED`（各项均带`LLM_`前缀）。`LLMError`统一捕获两者；HTTP接口只返回固定code/message，不透传异常正文。鉴权401/403、配额402、限流429分别分类，其余非200（含跳转）为HTTP错误。
 
-每次有证据的合成最多一个POST；响应超时可能已经计费，鉴权/限流/网络/供应商5xx均不自动重试。手动重跑会产生新请求，先核对账户记录；本阶段无持久化回答Cache/请求Outbox/exactly-once保证。HTTP每阶段超时默认60秒（连接10秒），不是检索+推理+云调用的总耗时保证。
+Fallback关闭时每次合成最多一个POST；启用后只对允许的运输故障最多两个POST，任何提供方均不自行重试。主请求超时可能已经计费，备用也可能额外计费；手动重跑仍是新请求，先核对账户记录。没有回答Cache/请求Outbox/exactly-once保证。双方独立超时顺序累加，不是检索+推理+云调用的总时限。
 
 上下文预算包括固定Prompt和完整问题/最终文本，按字符而非精确token计算；默认60000字符。超限报错，不偷偷丢候选/剪正文/截断表格公式；供应商真实token上限仍可能拒绝。max_tokens为输出预算，默认2048；finish_reason不是stop时整体拒绝，不把截断回答发布为成功。响应最大256KiB。
 
@@ -110,9 +110,73 @@ python -m scripts.stage22_rag_acceptance
 python -m scripts.stage22_rag_acceptance --kb-id "真实知识库UUID" --doc-id "真实READY文档UUID"
 ```
 
-脚本先只读预检选中提供方（不读取另一方Key、不发请求），输出固定provider和模型；缺配置/未经允许的HTTP即停止。原无云许可保护、一次真实问答、Citation/不足验收不变；**执行该脚本的真实问答步骤会产生费用**。分别手动切换两种提供方验收，但不要为诊断失败盲目重跑。本轮没有执行脚本、Mock或真实请求。
+脚本先预检所需配置，不发请求；默认只读选中方，Fallback开启则预检双方，并提示可能两次收费。显示的是计划主provider/model，本次实际返回方查llm.call_finished日志。原无云许可保护和Citation/不足验收不变；**执行真实问答会产生费用**，不要为诊断失败盲目重跑。本轮没有执行脚本、Mock或真实请求。
 
-1. 使用已有独立ACTIVE测试库及READY文档，不重传、不重新解析或消耗MinerU。确认实际匹配的本地BGE-M3、Reranker和PostgreSQL已可用；按README准备DeepSeek密钥及账号模型权限。
+## 显式授权的一次Fallback
+
+本轮补充只交付代码/HTTPX Mock和静态检查，用户明确选择自行运行pytest；不声明真实切换或回归已通过。无新依赖/迁移/数据改写，API、Agent Tool、RAG和公式服务接口保持不变。
+
+在`.env`模型组编辑，保留已有双方独立配置与真实Key，不要把Key写入命令历史：
+
+```dotenv
+LLM_PROVIDER=custom
+# true确认双方均可接收同一问题/证据/公式，并承担主超时后可能已计费及备用额外费用。
+LLM_FALLBACK_ENABLED=true
+LLM_FALLBACK_PROVIDER=deepseek
+```
+
+代码和`.env.example`默认false；本轮本地`.env`也保留false，须用户审阅后显式开启。官方作为主方时须关闭Fallback；同方/反向配置初始化拒绝。开启后双方配置必须都有效，调用前预检任一失败则不产生HTTP请求；关闭时保持未选中Key可空的旧行为。配置快照不热更新，修改后重启相关用户进程。
+
+| 主方结果 | 行为 |
+|---|---|
+| 完整响应 | 不用备用；JSON/Citation/公式按原规则校验 |
+| 连接失败、连接/读取超时、运输协议故障 | 允许唯一一次DeepSeek备用 |
+| HTTP 500～599 | 保留真实状态，允许备用 |
+| HTTP 429 | 立即尝试一次已授权备用，不等待后重试custom |
+| HTTP 400/401/403/402/408/其他4xx及3xx | 不备用；429是唯一4xx例外，余额不足不能借备用隐藏 |
+| 配置/参数/上下文错误、截断/坏JSON/结构、非法引用、模型判不足或公式不支持 | 不备用，不自动修补内容 |
+| 备用任意失败 | 返回备用的安全DEEPSEEK_*错误，停止；Agent仍映射AGENT_TOOL |
+
+`LLMError.status_code`只保存真实整数状态，不读取供应商错误正文。不能单凭LLM_HTTP决定备用。双方messages/原系统Prompt/用户上下文、JSON-mode、非流式和temperature保持相同；model、Key、端点、输出budget、timeout及官方thinking参数各自独立，不裁剪最终证据或改写公式。
+
+原RAG/Formula在已验证allow_cloud后使用短生命周期`llm_cloud_call` ContextVar许可域；异常/嵌套结束恢复，异步线程仍按业务保护。工厂返回的Fallback服务若在该域外直接complete则LLM_CLOUD_PERMISSION，零HTTP；配置true本身不授予本次许可。低层直接调用需显式业务域：
+
+```python
+from app.services.llm import create_llm_service, llm_cloud_call
+
+# Python调用示意，只有调用方已确认本次双方外传/费用才允许True。
+with llm_cloud_call(allow_cloud=True):
+    content = create_llm_service().complete(system_prompt, user_content)
+```
+
+这不是用户鉴权，不代替原API/RAG/Formula的许可检查。原SDK单提供方底层接口保持兼容；不要用直接构造CustomLLMService绕过工厂策略。阶段28/29无LLM路径不受影响。
+
+事件链为主llm.failed（主model/安全code）→llm.fallback_started→备用llm.finished或failed→llm.fallback_finished或failed→llm.call_finished或failed。调用结束事件的provider/model是实际返回方；wrapper.provider/model_name元数据仍表示计划主方，不存跨请求可变last_provider。fallback_count最多1，事件沿原agent_run_id/request_id关联；任何finished只表示传输/严格JSON通过，不证明后续引用或业务正确。日志无Key/URL/Prompt/正文/答案或上游错误原文。
+
+### 用户手动Mock与真实验收
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_llm_fallback.py tests/test_llm_fallback_integration.py tests/test_llm_service.py tests/test_deepseek_service.py tests/test_stage22_rag_acceptance.py tests/test_rag_synthesis.py tests/test_rag_query_engine.py tests/test_formula.py tests/test_knowledge_agent.py tests/test_business_logging.py -q -ra
+```
+
+仅MockTransport/内存Stub；缺core/LangGraph导致skip不算通过。覆盖主成功/超时/5xx/429、非429的4xx不切换、关闭/未授权/备用坏配置零请求、两次失败/备用坏JSON停止、同messages/独立密钥、Agent真实图+内存Retriever/评分、公式原式/变量/引文和非法Citation不追加模型、日志脱敏。
+
+真实验收使用原有READY数据，不重新解析/向量化；先停止同卡其他GPU任务并按README准备原模型/数据库。审阅配置与两方费用后，可对已有阶段30请求执行一次：
+
+```powershell
+notepad .env
+$agentRequest = Read-Host '已有阶段30请求JSON路径（本次allow_cloud=true，非内部State）'
+python -m scripts.stage30_agent_acceptance --input $agentRequest --execute --show-content
+# 或单独选择已有库/文档，执行原阶段22验收；不要为了诊断连续运行两条收费命令。
+# python -m scripts.stage22_rag_acceptance
+```
+
+主服务正常时应只有custom请求，无fallback_started；主服务自然发生允许故障时才验证DeepSeek备用，最多两次HTTP。不要为验收在生产库篡改URL/密钥或反复制造收费超时；稳定故障由Mock验证。核对日志实际provider=deepseek、原Citation/公式/范围仍正确，账户可能有两次计费。客户端总超时需覆盖检索与双方独立超时，断连不保证后台停止；失败后不要立刻重发。真实故障切换、账户计费及质量仍待用户验收。
+
+## 原阶段22真实验收的详细检查
+
+1. 使用已有独立ACTIVE测试库及READY文档，不重传、不重新解析或消耗MinerU。确认实际匹配的本地BGE-M3、Reranker和PostgreSQL已可用；按README准备所需双方密钥及模型权限。
 2. 先停止同卡GPU Worker/其他模型测试进程；8GB显存可能同时驻留两个不同模型，不保证长候选可用。OOM/真实token超限时查安全码，不静默回退CPU/删证据，不重做文档向量。
 3. 对已有可靠QA选一条，只发一次；输出含答案业务内容，仅在本机可信终端查看，不粘贴到公开日志/报告。以下命令使用真实输入，不生成或伪造问题：
 
@@ -128,7 +192,7 @@ configure_logging(get_settings(), role='rag-cli')
 kb_id = UUID(input('已有ACTIVE测试库UUID：').strip())
 doc_id = UUID(input('已有READY文档UUID：').strip())
 question = input('真实问题：')
-if input('确认问题/证据允许DeepSeek外传并接受本次费用，输入YES：') != 'YES':
+if input('确认当前配置所需提供方（Fallback启用时双方）可接收问题/证据并接受可能两次费用，输入YES：') != 'YES':
     raise SystemExit('未授权，不执行问答')
 result = query_knowledge_base(kb_id, question, doc_ids=[doc_id], allow_cloud=True)
 print('status=', result.status, 'insufficient=', result.insufficient_evidence,

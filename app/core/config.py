@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     reranker_use_fp16: bool = True
     # RAG 仅通过全局选择器选提供方；未选中提供方的空密钥不影响服务启动。
     llm_provider: Literal["deepseek", "custom"] = "deepseek"
+    # 开启即确认两方数据外传与可能重复收费；仍须每次业务allow_cloud=true。
+    llm_fallback_enabled: bool = False
+    llm_fallback_provider: Literal["deepseek"] = "deepseek"
     deepseek_api_key: SecretStr = SecretStr("")
     # 旧 official 配置可继续使用；旧 sub2api 必须显式迁移，不能误发旧网关密钥。
     deepseek_provider: Literal["official", "sub2api"] | None = None
@@ -115,9 +118,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_unmigrated_gateway(self) -> "Settings":
-        """旧网关共享字段可能持有另一把密钥，必须拒绝而不是推测新提供方。"""
+        """拒绝旧网关共享密钥及重复/反向Fallback配置，不猜测提供方或构造循环。"""
         if self.deepseek_provider == "sub2api":
             raise ValueError("旧 DEEPSEEK_PROVIDER=sub2api 必须迁移到独立 CUSTOM_LLM_* 和 LLM_PROVIDER=custom")
+        if self.llm_fallback_enabled and self.llm_provider != "custom":
+            raise ValueError("Fallback仅允许custom到deepseek；官方作为主提供方时必须关闭")
         return self
 
 

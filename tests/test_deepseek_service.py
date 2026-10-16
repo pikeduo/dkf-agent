@@ -15,7 +15,7 @@ from app.services.deepseek import DeepSeekError, DeepSeekService, MAX_RESPONSE_B
 
 def settings(**values):
     """创建不读取本地 .env 的安全 Mock 配置，密钥不是用户真实值。"""
-    defaults = {"llm_provider": "deepseek", "deepseek_provider": None,
+    defaults = {"llm_provider": "deepseek", "llm_fallback_enabled": False, "deepseek_provider": None,
                 "deepseek_api_key": SecretStr("mock-secret"), "deepseek_model": "deepseek-flash",
                 "deepseek_api_base_url": "https://api.deepseek.com", "deepseek_max_tokens": 2048,
                 "deepseek_timeout_seconds": 60, "rag_max_context_chars": 60000}

@@ -19,7 +19,7 @@ from app.services.llm import LLMError, create_llm_service
 def isolated_llm_environment(monkeypatch):
     """避免用户终端旧选择器或真实 Key 污染纯内存配置断言。"""
     for name in Settings.model_fields:
-        if name.startswith(("deepseek_", "custom_llm_")) or name in {"llm_provider", "rag_max_context_chars"}:
+        if name.startswith(("deepseek_", "custom_llm_", "llm_")) or name == "rag_max_context_chars":
             monkeypatch.delenv(name.upper(), raising=False)
 
 
@@ -63,6 +63,7 @@ def test_factory_only_reads_selected_fields_and_sends_one_isolated_request(provi
     class SelectedConfig:
         """只公开所选字段，不允许共享配置退回另一方。"""
         llm_provider = provider
+        llm_fallback_enabled = False
         rag_max_context_chars = config.rag_max_context_chars
 
         def __getattr__(self, name):

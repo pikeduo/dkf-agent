@@ -12,7 +12,7 @@ DEFAULT_DOC = "f5d85573-2971-4d01-a3cb-365f4df97aaa"
 
 
 def main() -> int:
-    """预检所选提供方配置和外传保护，再执行原有单次问答及引用验收。"""
+    """预检所需提供方和外传保护；一次逻辑问答按显式Fallback配置最多两次HTTP。"""
     parser = argparse.ArgumentParser(description="阶段22：真实 LLM RAG 问答验收")
     parser.add_argument("--question", help="测试问题；不填写则在终端输入")
     parser.add_argument("--kb-id", default=DEFAULT_KB, help="知识库UUID")
@@ -59,6 +59,9 @@ def main() -> int:
     configure_logging(settings, role="rag-cli")
 
     print("LLM_PROVIDER =", service.provider, "MODEL =", service.model_name)
+    if settings.llm_fallback_enabled:
+        print("FALLBACK_PROVIDER =", settings.llm_fallback_provider)
+        print("已启用双方授权Fallback：主超时可能已计费，备用可能额外收费；实际返回方见llm.call_finished。")
     # 不会触发检索、加载GPU模型或请求LLM：先验证未授权保护。
     try:
         query_knowledge_base(kb_id, question, doc_ids=[doc_id], allow_cloud=False)

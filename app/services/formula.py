@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 from app.core.business_logging import log_event
 from app.schemas.evidence import EvidenceTrace
 from app.schemas.formula import FormulaReference, FormulaSemanticResult, FormulaVariableMeaning
-from app.services.llm import LLMError, create_llm_service, strict_json
+from app.services.llm import LLMError, create_llm_service, llm_cloud_call, strict_json
 from app.services.rag.evidence import EvidenceError, EvidenceService
 
 VERSION = "formula-semantic-v1"
@@ -245,7 +245,7 @@ class FormulaService:
         self._llm = llm_service
 
     def extract_formula(self, kb_id, chunk_id, block_id, *, doc_id=None, allow_cloud=False) -> FormulaSemanticResult:
-        """核对指定范围原式及邻近证据后单次结构化；返回来源快照，不绑定参数或执行计算。"""
+        """核对原式后单次逻辑结构化；显式配置可一次备用，原式/变量/来源校验不变。"""
         started, scope, stage = perf_counter(), {}, "permission"
         try:
             if allow_cloud is not True:
@@ -272,7 +272,8 @@ class FormulaService:
             if type(llm.context_chars) is not int or len(FORMULA_SYSTEM_PROMPT) + len(payload) > llm.context_chars:
                 raise FormulaError("FORMULA_CONTEXT_LIMIT")
             log_event("formula.synthesis_started", **scope, block_count=len(spans))
-            text = llm.complete(FORMULA_SYSTEM_PROMPT, payload)
+            with llm_cloud_call(allow_cloud=allow_cloud):
+                text = llm.complete(FORMULA_SYSTEM_PROMPT, payload)
             stage = "output"
             result = _bind(text, trace, block_id, target, spans)
             event = {"success": "formula.finished", "insufficient_evidence": "formula.insufficient",

@@ -12,10 +12,10 @@ ERRORS = {code.replace("LLM_", "DEEPSEEK_", 1): message for code, message in LLM
 class DeepSeekError(LLMError):
     """兼容既有官方调用者，同时允许上层统一捕获 LLMError。"""
 
-    def __init__(self, code: str):
-        """仅保留官方安全错误码，不包含密钥、URL 或上游正文。"""
+    def __init__(self, code: str, *, status_code: int | None = None):
+        """仅保留官方安全码/HTTP状态，不包含密钥、URL或上游正文。"""
         safe = code if code in ERRORS else "DEEPSEEK_RESPONSE"
-        super().__init__(safe.replace("DEEPSEEK_", "LLM_", 1), provider="deepseek")
+        super().__init__(safe.replace("DEEPSEEK_", "LLM_", 1), provider="deepseek", status_code=status_code)
         self.code = safe
         self.args = (f"{safe}：{ERRORS[safe]}",)
 
@@ -34,9 +34,9 @@ class DeepSeekService(ChatCompletionService):
         except Exception:
             raise DeepSeekError("DEEPSEEK_CONFIG") from None
 
-    def _error(self, suffix: str) -> DeepSeekError:
-        """保留官方服务原有错误码，便于已有 API 调用者排障。"""
-        return DeepSeekError("DEEPSEEK_" + suffix)
+    def _error(self, suffix: str, *, status_code: int | None = None) -> DeepSeekError:
+        """保留原官方错误码及HTTP状态，不在官方服务内部再次Fallback。"""
+        return DeepSeekError("DEEPSEEK_" + suffix, status_code=status_code)
 
     def _validate_endpoint(self) -> None:
         """官方模式仅允许固定 HTTPS 官方根地址，旧 HTTP 开关无效。"""

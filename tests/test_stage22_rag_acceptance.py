@@ -10,13 +10,14 @@ from app.services.rag.synthesis import RAGError, insufficient_answer
 from scripts import stage22_rag_acceptance as tool
 
 
-@pytest.mark.parametrize("provider", ["deepseek", "custom"])
-def test_existing_entry_uses_selected_configuration_and_one_allowed_query(provider, monkeypatch, capsys):
-    """旧正式入口可用，未选中Key可空；配置预检不联网，真实步骤由Stub代替。"""
+@pytest.mark.parametrize("provider,fallback", [("deepseek", False), ("custom", False), ("custom", True)])
+def test_existing_entry_uses_selected_configuration_and_one_allowed_query(provider, fallback, monkeypatch, capsys):
+    """旧入口及显式备用预检可用；预检不联网，逻辑问答由Stub替代并提示潜在两次收费。"""
     from app.core import config, business_logging
     from app.services.rag import query
     settings = Settings(_env_file=None, llm_provider=provider, deepseek_provider=None,
-        deepseek_api_key="official-fake" if provider == "deepseek" else "",
+        llm_fallback_enabled=fallback, llm_fallback_provider="deepseek",
+        deepseek_api_key="official-fake" if provider == "deepseek" or fallback else "",
         deepseek_api_base_url="https://api.deepseek.com",
         custom_llm_api_key="custom-fake" if provider == "custom" else "",
         custom_llm_api_base_url="https://custom.example/v1")
@@ -38,6 +39,7 @@ def test_existing_entry_uses_selected_configuration_and_one_allowed_query(provid
     assert [item["allow_cloud"] for item in calls] == [False, True]
     output = capsys.readouterr().out
     assert f"LLM_PROVIDER = {provider}" in output and "STAGE22_STRUCTURE_PASS" in output
+    assert ("FALLBACK_PROVIDER = deepseek" in output) is fallback
     assert not any(value in output for value in ("PRIVATE_QUESTION", "official-fake", "custom-fake", "custom.example"))
 
 

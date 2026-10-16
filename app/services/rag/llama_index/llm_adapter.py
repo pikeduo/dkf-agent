@@ -8,7 +8,7 @@ from llama_index.core.callbacks import CallbackManager
 from llama_index.core.llms.custom import CustomLLM
 from pydantic import PrivateAttr
 
-from app.services.llm import ChatCompletionService, create_llm_service
+from app.services.llm import ChatCompletionService, FallbackLLMService, create_llm_service
 from app.services.rag.synthesis import RAGError, RAG_SYSTEM_PROMPT
 
 
@@ -17,7 +17,7 @@ class DKFLLMAdapter(CustomLLM):
 
     _service: Any = PrivateAttr()
 
-    def __init__(self, service: ChatCompletionService | None = None):
+    def __init__(self, service: ChatCompletionService | FallbackLLMService | None = None):
         """显式注入服务或由工厂读取选择器，构造不发请求、不设置全局 LLM。"""
         super().__init__(callback_manager=CallbackManager([]))
         self._service = service if service is not None else create_llm_service()
@@ -39,7 +39,7 @@ class DKFLLMAdapter(CustomLLM):
         return "DKFLLMAdapter"
 
     def chat(self, messages: list[ChatMessage], **kwargs) -> ChatResponse:
-        """仅委托审查后的系统 Prompt 与最终证据上下文，保持单次请求限制。"""
+        """仅委托原Prompt/证据；同一逻辑调用的唯一备用策略只由项目工厂实现。"""
         if (kwargs or not isinstance(messages, list) or len(messages) != 2
                 or not all(isinstance(message, ChatMessage) for message in messages)
                 or messages[0].role != MessageRole.SYSTEM or messages[1].role != MessageRole.USER

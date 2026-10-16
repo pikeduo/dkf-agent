@@ -16,7 +16,7 @@ result = extract_formula(kb_id, chunk_id, block_id, doc_id=doc_id, allow_cloud=T
 1. EvidenceService在独立只读REPEATABLE READ快照中限定ACTIVE库、READY文档、kb_id/chunk_id及可选doc_id，沿用原件Hash、解析/切片代次、Block Hash、Unicode字符和页语义全部检查。
 2. 必须显式选定该Chunk中的唯一MinerU `formula` Block，来源为mineru_cloud、start_char=0且片段Hash等于整Block Hash；长公式的局部切片、普通文本或Native table内的单元格公式不当成完整输入。
 3. 模型只获得所选原式及同Chunk、原block_index前后两块内的title/text/table片段。不额外读全文、跨文档检索、补OCR或读取文件；如果Chunk没有相邻说明，不自动扩大范围。其他formula不会被当成上下文补当前原式。
-4. 现有create_llm_service按LLM_PROVIDER选定服务，默认DeepSeek官方；custom同样复用独立Key/模型/地址与HTTP安全边界。仅一次JSON-mode请求，无自动重试、提供方切换、Refine或收费Fallback。完整Prompt超过既有RAG_MAX_CONTEXT_CHARS时直接失败，不裁剪。
+4. create_llm_service默认选一个独立配置的提供方；仅LLM_FALLBACK_ENABLED=true、备用为官方deepseek且本次allow_cloud=true时，custom运输故障/5xx/429允许一次备用。原式、相邻上下文、系统Prompt及JSON要求完全相同；主超时可能已计费，备用可能再收费。普通4xx/坏JSON/截断/原式变量引文不合法/公式不支持或证据不足不触发切换，无Refine或同方重试。完整Prompt超预算直接失败，不裁剪；配置与手动命令见[Fallback说明](DEEPSEEK_RAG.md#显式授权的一次fallback)。
 5. 本地严格校验JSON、原式一致、变量集合及原文引用；source只由已核对Evidence填入，模型不能生成文件名、页码、路径、Hash或来源UUID。不修改Block/Chunk/Embedding/Index、原RAG Prompt或MinerU Adapter。
 
 ## 输出与稳定性
@@ -71,7 +71,7 @@ conda activate dkf-agent
 python -m pytest tests/test_formula.py tests/test_formula_acceptance.py tests/test_evidence.py tests/test_llm_service.py tests/test_deepseek_service.py tests/test_business_logging.py -q -ra
 ```
 
-用例只构造内存来源字段、响应和MockTransport，不生成真实文档、不连数据库/GPU/云端。覆盖九类公式、原式不改、名称/含义字符反查、变量/表达式一致、规范化与稳定ID、PDF/图片/Office页语义、代次/Hash/非READY/越界、长公式片段拒绝、严格JSON/引用、上下文预算、两提供方配置复用、失败不切换/重试、日志脱敏及CLI授权门。Mock通过不证明真实公式语义正确。
+用例只构造内存来源字段、响应和MockTransport，不生成真实文档、不连数据库/GPU/云端。覆盖九类公式、原式不改、名称/含义字符反查、变量/表达式一致、规范化与稳定ID、PDF/图片/Office页语义、代次/Hash/非READY/越界、长公式片段拒绝、严格JSON/引用、上下文预算、两提供方配置复用、默认不切换/不重试、日志脱敏及CLI授权门。新增Fallback集成Mock还验证运输故障可切换，但备用改原式/变量/引文或坏JSON仍拒绝；只编写未执行。Mock通过不证明真实公式语义正确。
 
 ### 2. 从已有READY文档选择真实公式
 

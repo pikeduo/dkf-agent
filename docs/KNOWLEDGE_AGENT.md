@@ -46,6 +46,12 @@ State仅为可JSON序列化的原请求、question/kb/doc/intent、selected_rout
 
 固定错误：AGENT_INPUT（请求/配置）、AGENT_PERMISSION（本次云许可）、AGENT_ROUTE、AGENT_STEPS、AGENT_DEPENDENCY、AGENT_TOOL、AGENT_RESULT、AGENT_INTERNAL。底层服务已有安全错误事件沿agent_run_id关联，原文/Key/连接串不进入返回。
 
+### 统一LLM Fallback（默认关闭）
+
+Agent图和Tool接口不变；Query及首次公式提取使用原统一工厂。仅配置`LLM_PROVIDER=custom`、`LLM_FALLBACK_ENABLED=true`、`LLM_FALLBACK_PROVIDER=deepseek`并确认双方数据外传及可能双重费用、且本次allow_cloud=true时，允许网络/超时/5xx/429触发一次官方备用。开启时双方配置调用前均须有效；本轮本地开关仍false，待用户确认开启。
+
+备用收到相同Prompt/上下文/JSON要求并继续原Citation或公式校验。400/401/403/402/408等非429的4xx、坏JSON、引用/参数错误、证据不足或不支持公式不切换；备用再失败仍AGENT_TOOL，不回custom或重跑Agent。一次Tool可含最多两个LLM POST，但Graph步骤不增加，检索/重排不重跑。超时可能已计费，不表示可以无成本重试。详情、Mock及单次真实命令见[Fallback验收](DEEPSEEK_RAG.md#显式授权的一次fallback)；新增用例未执行，真实切换/质量待用户验收。
+
 日志使用`knowledge-agent-cli`集中角色和原每日日志，只新增agent_run_id、固定selected_route/tool_name/final_status、有界step_count与tool_duration_ms。Agent在本次调用的Context中关联原request_id并在结束时恢复；不记录问题、原式、参数、正文、答案或完整State。调用边界按[官方tracing_context机制](https://docs.langchain.com/langsmith/trace-without-env-vars)显式enabled=False，callbacks=[]，不启用LangSmith远端追踪；用户仍须关闭自行注入的第三方全局Instrumentation/SQL echo。
 
 没有持久化Agent历史、请求幂等键、鉴权、总超时/取消保证或exactly-once。工具调用已收费后进程崩溃/客户端超时，不代表未发生；**不得自动重发**。先核对账户与原日志；已有公式定义应复用，缺参后也不必再次提取。无旧定义可用时重跑提取可能再次收费，必须用户确认。无MinerU调用、新向量生成或业务写入。

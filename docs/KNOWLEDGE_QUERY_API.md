@@ -9,7 +9,7 @@
 | POST /api/knowledge/search | 同范围Hybrid（各路默认20）→RRF Top-K→本地BGE Top5 | KnowledgeSearchResponse：status=success/empty，evidence列表 |
 | POST /api/knowledge/query | 原RAG Service→LlamaIndex合成→工厂选定DeepSeekService/CustomLLMService | 原RAGAnswer：status/answer/citations/insufficient_evidence |
 
-API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型。搜索服务仅显式调用时导入原Hybrid/Node/Reranker Adapter，Query委托原`query_knowledge_base()`；框架换型仅影响服务内部。成功返回原业务ID/文件名/正文/页/章节、完整metadata/source_spans及原三类分数，不返回向量或模型对象，不把分数当概率。
+API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型。搜索仅显式调用时导入原Hybrid/Reranker Adapter，Query委托原`query_knowledge_base()`；成功返回原业务ID/正文/页/章节、metadata/source_spans及原三类分数，不把分数当概率。统一LLM工厂现可按[显式双方授权Fallback](DEEPSEEK_RAG.md#显式授权的一次fallback)在custom运输故障/5xx/429后调用官方一次；默认关闭，仍需本次allow_cloud=true。接口不变，不对坏引用/JSON或证据不足切换，备用失败保留安全错误，不重试Agent或重新检索。
 
 请求均为JSON：kb_id非零UUID、question为非空原文本（最多32768字符，拒绝非法控制符/Unicode）、doc_ids可省略/null或1～100个非零UUID（去重排序；空数组拒绝）、top_k可省略，默认30/严格整数1～100。**top_k是融合候选上限，最终最多min(5,候选数)，不是要求返回top_k条Evidence。** 不支持额外Query rewrite/解析模式/模型对象/外部Query向量。
 
@@ -27,7 +27,7 @@ API只依赖项目Schema和KnowledgeService，不导入/返回LlamaIndex类型�
 | 403 | RAG_CLOUD_PERMISSION |
 | 409 | RAG_EVIDENCE（冲突/无效来源） |
 | 413 | RAG_CONTEXT_LIMIT（完整上下文超预算） |
-| 429 | DEEPSEEK_RATE_LIMIT / LLM_RATE_LIMIT（不自动重试或切换提供方） |
+| 429 | DEEPSEEK_RATE_LIMIT / LLM_RATE_LIMIT（默认不重试；仅启用双方授权策略时主custom的429可一次备用，备用失败后不再切换） |
 | 502 | KNOWLEDGE_RESULT / RAG_OUTPUT / RAG_SYNTHESIS / 上游无效或截断响应 |
 | 503 | 检索/重排、部署/鉴权/配额/网络不可用；核对返回固定错误码 |
 | 500 | KNOWLEDGE_INTERNAL（未预期错误，不透传原文） |
@@ -72,7 +72,7 @@ $search | ConvertTo-Json -Depth 20
 
 ## 4. 用户明确许可后真实问答（可能收费）
 
-在同一终端保留上一步body，先按README配置所选LLM提供方的独立Key/模型/预算并重启API。官方保留DEEPSEEK_*错误码，自定义使用LLM_*；两者都不在失败后切换提供方。**以下命令只有用户确认后才发送一次请求，Codex不会执行。**
+在同一终端保留上一步body，先按README配置所需LLM独立Key/模型/预算并重启API。官方保留DEEPSEEK_*错误码，自定义使用LLM_*；默认不切换，仅显式双方授权策略允许主custom运输故障后一次备用。**以下命令只有用户确认后才发送一次逻辑问答，Fallback启用时最多两次LLM POST，Codex不会执行。**
 
 ```powershell
 if ((Read-Host '确认本次问题与最终正文允许发给当前所选LLM提供方并接受一次费用？输入YES') -ne 'YES') { throw '未授权，不发送问答' }

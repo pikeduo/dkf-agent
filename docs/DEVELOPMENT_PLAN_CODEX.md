@@ -10,6 +10,7 @@
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
 > 本轮仅在原业务Service外建立确定的Knowledge Agent，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
+> LLM补充：统一工厂已编写默认关闭的显式双方授权一次custom→deepseek Fallback，仍须每次allow_cloud=true；仅运输故障/5xx/429切换，原引用/公式校验及Agent步骤不变。用户自行运行Mock，未执行真实请求；配置与费用见[LLM说明](DEEPSEEK_RAG.md#显式授权的一次fallback)。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 

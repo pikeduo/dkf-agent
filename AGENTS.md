@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**30 Knowledge Agent：已补有限LangGraph工作流、原业务薄Tool、范围/来源/云许可保护、纯JSON状态和安全观测，用例仅编写待用户验收；不进入31。阶段29及此前真实验收与其他待办保留。**
+当前阶段：**30 Knowledge Agent及LLM Fallback补充：已补有限图与统一工厂的显式双方授权单次custom→deepseek切换、HTTP分类及Mock用例；未执行，待用户验收，不进入31。阶段29及此前待办保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -55,7 +55,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 27 | 已补公式提取服务、原式/变量/引用严格契约、四则语法规范化与人工验收CLI；测试未运行，真实LLM/数学语义待验收 |
 | 28 | 已补用户/证据参数绑定、严格十进制、双端字符来源及need_variables；句末小数修复五文件252项Mock通过，真实来源/语义验收待用户确认 |
 | 29 | 已补显式SymPy有理数计算、变量白名单、每步零分母/资源上限、精确结果/舍入展示/来源及稳定计算ID；用例仅编写，无云/业务写入，待验收 |
-| 30 | 已补确定性StateGraph、四Tool薄适配、云许可/固定范围/有限步数/失败清空、引用和公式来源透传及人工CLI；未执行图/测试，待验收 |
+| 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
@@ -236,10 +236,10 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 
 ### LLM RAG / Response Synthesis
 
-- `LLM_PROVIDER=deepseek/custom`为唯一正式选择器，默认deepseek；`DeepSeekService`只读`DEEPSEEK_*`，`CustomLLMService`只读`CUSTOM_LLM_*`，Base URL/Key/Model/预算/超时不共用，未选中Key可空。旧official兼容，旧sub2api未迁移必须报错，不推测密钥归属或静默换接收方。
-- LlamaIndex `DKFLLMAdapter`仅包装工厂选定的项目服务；旧Adapter导入保持兼容。HTTP只在共享安全服务实现，不在Query Engine散落客户端。复用既有Hybrid/Reranker，至多5条最终Evidence一次合成，无Refine/自动重试/提供方失败切换或流式半成品。
+- `LLM_PROVIDER=deepseek/custom`为正式主选择器，默认deepseek；两个服务各自冻结本方Base URL/Key/Model/预算/超时，不混用。默认未选中Key可空；Fallback启用时须预检双方配置。旧official兼容，旧sub2api未迁移报错，不推测密钥或静默换接收方。
+- LlamaIndex `DKFLLMAdapter`仅包装统一工厂服务；HTTP不在Query Engine/Agent节点散落。至多5条最终Evidence一次逻辑合成，无Refine/同方重试/流式半成品。唯一切换例外：LLM_FALLBACK_ENABLED=true、主custom/备用deepseek、本次allow_cloud=true且确认双方外传/潜在额外费用时，网络/连接读取超时、HTTP5xx/429允许一次备用，最多2POST。普通4xx（除429）、配置/权限/参数、截断/坏JSON/引用、模型不足/公式不支持均不切换；备用失败即止，不回custom。
 - 自定义API必须受用户信任且兼容JSON-mode；默认禁止HTTP，临时测试仅由用户明确`CUSTOM_LLM_ALLOW_INSECURE_HTTP=true`允许，正式部署须HTTPS。不得关闭TLS验证、不读代理、不跟随跳转；官方始终只接受官方HTTPS。日志只增加固定提供方枚举/安全模型名，禁记完整URL、Key或上游原文。
-- Python问答默认拒绝云调用，调用方明确`allow_cloud=True`前确认问题/最终正文外传权限及费用；模型/Key/预算由本地配置管理。官方HTTPS、TLS、直连/无跳转，超时/HTTP错误/限流不自动重试。
+- Python问答默认拒绝云调用，allow_cloud=True仅在本次外传/费用已确认后使用，Fallback开启还须确认双方。许可通过短生命周期ContextVar传递并在异常/嵌套退出时恢复，不能由工厂构造永久授权。TLS/直连/无跳转保持；主超时不等于未计费，不自动重放Agent。双方收到相同原Prompt/上下文/JSON要求，业务校验仍执行；实际返回方见llm.call_finished，不修改共享服务的last_provider或在日志输出正文/Key。
 - 固定审查Prompt把问题与证据视为数据；仅最终正文与稳定Chunk ID上云，不发送其他候选、私有路径或模型身份。完整上下文超字符预算失败，不截断证据；字符数不冒充供应商token数。
 - LLM返回逐事实及最终ID白名单；引用原文/来源/页码/章节/source_spans/三类分数只从原Node回填。空证据或明确不足才返回insufficient_evidence；检索/模型/HTTP/非法引用/截断失败必须报安全异常，不伪装成功或不足。引用合法仅证明来源存在，忠实度/数字事实及Prompt注入抗性仍须真实人工验收。
 - 逐事实判断支持：允许忠实翻译/概括及有证据的部分回答，明确其余缺口；无关片段或局部冲突不否定独立受支持事实。没有可靠可答内容仍拒答；不得因候选非空/关键词/高分把模型true强制改成false。诊断区分empty_final_evidence与model_judged_insufficient，不保留模型拒答原文或为误拒答自动重试。
@@ -255,13 +255,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 ### Knowledge Query API
 
 - /api/knowledge/search和/query只用DKF请求/响应与KnowledgeService，不导入/返回LlamaIndex类型。每次固定kb_id/doc_ids，Top-K是融合候选上限（默认30、1～100），最终沿用Top5重排；不重Parse/Embedding/Index，不扩大范围或创建新存储。
-- /query的allow_cloud默认false，请求明确true才允许已有单次云合成；/search不调用LLM。异常不是空集/证据不足；输入/响应验证错误只返固定安全code/message，不回显input/ctx/正文或上游原文，不自动重试收费。
+- /query的allow_cloud默认false，明确true才允许已有逻辑云合成；Fallback启用时须确认双方，最多按上述策略2POST；/search不调用LLM。异常不是空集/不足，错误只返固定安全code/message，不回显正文/上游原文，不对同方自动重试或重放Agent。
 - API同步工作在线程池执行，模型由项目共享服务惰性加载；模型/API部署与验收由用户执行。现阶段无鉴权/RBAC/请求幂等或取消保证，仅本机/可信内网使用；云许可标记不是用户权限，HTTP请求重跑可能再次收费。
 
 ### 公式语义结构化
 
 - 仅显式extract_formula处理当前ACTIVE/READY指定Chunk中的完整MinerU formula Block；复用EvidenceService的Hash/字符/代次/页语义核对，邻近上下文只取同Chunk相邻两块，缺失/片段不猜测补全。不改原式/OCR，不自动在上传/Query插入付费调用。
-- 唯一LLM工厂尊重LLM_PROVIDER，默认DeepSeek，显式allow_cloud=True才允许公式/上下文外传；一次请求，无自动重试/换提供方。名称/变量含义的原文短引文必须唯一匹配白名单，来源ID/页/章节/bbox由Evidence回填；未知含义为null，不编造值或单位。
+- 唯一LLM工厂尊重主LLM_PROVIDER，显式allow_cloud=True才允许公式/上下文外传；默认单请求，仅上述显式双方授权策略允许运输故障后一次备用。原式/名称/变量及引文校验不变，坏内容不是切换理由；来源ID/页/章节/bbox由Evidence回填，未知含义为null，不编造值或单位。
 - normalized_formula只做标准库有界AST白名单校验及四则规范化，不求值、不用eval/exec/parse_expr，不调用SymPy；不支持函数/幂/不定项求和等时明确失败或unsupported。formula_id绑定原件/解析/Chunk/Block身份；来源仅为读取快照，不建立第二套真相表或公式缓存。
 - success仅指结构/引用通过，semantic_validation保持manual_pending；数学等价、百分比口径与名称翻译须人工核验，不能用合法引文宣称语义验真。提取入口不绑定/计算，计算仅走阶段29显式入口；日志复用每日文件与注册formula-cli角色，禁止记录原式、规范式、变量含义、上下文或模型原文。
 - 阶段28只消费已提取定义：显式用户参数标为user_input并保留input_id/原值；文档参数须同kb、显式doc/chunk/block及唯一引文，由EvidenceService重新核对READY/Hash/代次/页语义。公式快照/原式/变量/引用须与当前来源一致，同文档多Chunk代次冲突全批拒绝，不自动重提取/检索/调用LLM。

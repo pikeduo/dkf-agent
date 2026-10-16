@@ -52,6 +52,9 @@ RERANKER_MAX_LENGTH=8192
 RERANKER_USE_FP16=true
 # 仅问答需要：独立配置两组，LLM_PROVIDER 默认 deepseek；真实 Key 只填本地 .env。
 LLM_PROVIDER=deepseek
+# 默认关闭；启用须确认custom及官方DeepSeek都可接收数据，并接受最多两次可能计费。
+LLM_FALLBACK_ENABLED=false
+LLM_FALLBACK_PROVIDER=deepseek
 DEEPSEEK_API_BASE_URL=https://api.deepseek.com
 DEEPSEEK_API_KEY=
 DEEPSEEK_MODEL=deepseek-flash
@@ -525,7 +528,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download(repo
 
 `app.services.rag.query.query_knowledge_base(kb_id, question, doc_ids=None, top_k=30, allow_cloud=False)`复用现有Hybrid和BGE Reranker，最多5条最终证据交由LlamaIndex合成，返回项目`RAGAnswer`（answer、citations、insufficient_evidence）。HTTP `/api/knowledge/query`委托同一入口；引用来源/页码由原Chunk回填，不采用模型生成的来源，无证据明确返回不足，不新增迁移或Worker。
 
-两套配置互不共用：`LLM_PROVIDER=deepseek`只使用`DEEPSEEK_*`，默认官方HTTPS、`deepseek-flash`，保留关闭thinking的官方参数；`LLM_PROVIDER=custom`只使用`CUSTOM_LLM_*`，适用于Sub2API或其他兼容Chat Completions的服务，仅发送通用JSON-mode参数。未选中提供方可以没有Key。复用httpx/core，不需OpenAI SDK或新依赖；官方服务仅接受`https://api.deepseek.com`及其`/v1`端点。自定义Base URL为可信服务根地址（如`https://your-gateway.example/v1`），不是完整`/chat/completions`地址，不得包含URL凭据、参数或片段。
+两套配置互不共用：`LLM_PROVIDER=deepseek`使用`DEEPSEEK_*`，默认官方HTTPS、`deepseek-flash`，保留关闭thinking的官方参数；`LLM_PROVIDER=custom`主请求使用`CUSTOM_LLM_*`，适用于Sub2API或其他兼容Chat Completions的服务。Fallback关闭时未选中提供方可无Key；启用时必须配置双方独立Key/地址/模型。复用httpx/core，不需OpenAI SDK或新依赖；官方仅接受`https://api.deepseek.com`及其`/v1`。自定义Base URL为可信根地址（如`https://your-gateway.example/v1`），不是完整`/chat/completions`地址，不得含URL凭据、参数或片段。
 
 首次从旧Sub2API配置迁移，可由用户执行以下**仅改本地配置、不联网**的命令；来源有歧义时停止，不能猜测密钥所属提供方：
 
@@ -535,9 +538,11 @@ python scripts/migrate_llm_env.py
 python scripts/migrate_llm_env.py --apply
 ```
 
-旧`DEEPSEEK_PROVIDER=official`仍兼容；旧`sub2api`必须迁入独立自定义组，否则配置初始化明确拒绝。迁移后只改`LLM_PROVIDER`切换，保留另一组配置及Key，并重启API/问答进程；检查PowerShell同名环境变量是否覆盖`.env`。默认`CUSTOM_LLM_ALLOW_INSECURE_HTTP=false`，当前HTTP地址只有用户显式改为true才能临时测试，**会明文传输密钥、问题与最终证据，禁止正式部署使用**。TLS证书始终校验；均不读环境代理、不跟随跳转，不在失败后切换提供方。新服务的JSON-mode兼容性仍须用户验收。
+旧`DEEPSEEK_PROVIDER=official`仍兼容；旧`sub2api`必须迁入独立自定义组，否则初始化拒绝。手动切回官方时须同时关闭Fallback，并重启API/问答进程；检查PowerShell同名变量是否覆盖`.env`。默认`CUSTOM_LLM_ALLOW_INSECURE_HTTP=false`，当前HTTP地址只有用户显式改为true才能临时测试，**会明文传输密钥、问题与最终证据，禁止正式部署使用**。TLS证书始终校验；均不读代理、不跟随跳转。默认不切换提供方，唯一例外是下述显式授权Fallback。
 
-**显式`allow_cloud=True`表示确认本次问题与最终证据正文可以外传给当前选中LLM且接受费用**；仅下载原件或MinerU许可不等于此许可。失败不自动重试、不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
+如需网络故障时自动切换，在`.env`模型组配置`LLM_PROVIDER=custom`、`LLM_FALLBACK_ENABLED=true`、`LLM_FALLBACK_PROVIDER=deepseek`，并保留双方有效配置。**true表示确认两方均可接收同一问题/证据/公式并接受最多两次潜在费用；每次业务仍须allow_cloud=true。** 仅网络/连接或读取超时、HTTP 5xx、429允许custom→官方DeepSeek一次。普通4xx（含400/401/403/402/408）、坏JSON、截断、非法引用/参数/不支持公式或证据不足不切换；备用再失败直接结束。原Prompt/上下文/JSON要求不变，双方独立模型、Key、输出预算和超时不混用。超时不证明主请求未计费，总等待可能接近两方超时加检索时间；不要因客户端等待过久直接重发。详见[Fallback配置与验收](docs/DEEPSEEK_RAG.md#显式授权的一次fallback)。
+
+**显式`allow_cloud=True`表示确认本次内容可外传给已授权的提供方且接受费用；开启Fallback时包括主备双方**。仅下载原件或MinerU许可不等于此许可。不对同一提供方自动重试，不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
 
 最小使用、Mock/真实问题验收及错误说明见[DeepSeek RAG](docs/DEEPSEEK_RAG.md)。结构合法和引用存在不证明答案忠实或问答准确率已通过，必须对照真实证据人工核验。
 
@@ -555,7 +560,7 @@ python scripts/migrate_llm_env.py --apply
 
 `doc_ids`省略/null表示该库全部合格文档；限定文档时填写1～100个真实UUID，空数组拒绝。`top_k`默认30、严格整数1～100，表示融合候选上限，最终重排最多5条。仅检索ACTIVE库/READY及原检索器要求的有效代次/向量身份，不匹配不扩大范围；空集不证明指定文档存在。
 
-`/search`不调用LLM，返回`{"status":"success或empty","evidence":[...]}`，每条为项目Evidence及原来源/分数；`/query`返回原`RAGAnswer`（status/answer/citations/insufficient_evidence），须**额外传`"allow_cloud":true`**确认本次问题/最终正文可发给当前选中LLM提供方并接受费用，否则403。搜索也会运行本地模型，问答不会自动重试收费或把异常伪装成不足。
+`/search`不调用LLM，返回`{"status":"success或empty","evidence":[...]}`，每条为项目Evidence及原来源/分数；`/query`返回原`RAGAnswer`（status/answer/citations/insufficient_evidence），须**额外传`"allow_cloud":true`**确认本次外传/费用（Fallback启用时含双方），否则403。搜索也运行本地模型；问答不重试同一提供方，备用仅按上述显式策略一次，异常不伪装成不足。
 
 错误统一为`{"detail":{"code":"固定错误码","message":"安全中文说明"}}`：422输入无效、403未确认云外传、409证据冲突、413上下文超限、429供应商限流、502上游响应/输出不合法、503部署/数据库/供应商不可用、500未预期错误。详情不回显问题/正文；暂无鉴权、API限流或请求幂等，仅本机/可信内网使用，不暴露公网。客户端超时不保证取消推理/收费，勿盲目重复发送。具体契约及手动步骤见[Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md)。
 
@@ -569,7 +574,7 @@ PDF沿用物理页与点数bbox，图片为第1页/像素bbox，Office沿用逻�
 
 ### 公式语义结构化
 
-Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`只处理指定READY文档中已有、完整的MinerU公式Block，先核对Evidence，再复用`LLM_PROVIDER`选择的现有服务做一次语义结构化。默认DeepSeek官方；选custom时仍遵守独立配置，不失败换提供方。需手动部署好的PostgreSQL与所选LLM配置，不需要GPU/Redis/Worker、新依赖或迁移；不新增HTTP接口，也不在上传或普通RAG中自动调用。
+Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`只处理指定READY文档中已有、完整的MinerU公式Block，核对Evidence后复用统一LLM工厂做一次逻辑结构化。默认不切换；仅启用上述双方授权Fallback时，运输类故障允许一次备用，原式/变量/来源校验不变。需已部署PostgreSQL与所需LLM配置，不需要GPU/Redis/Worker、新依赖或迁移；不新增HTTP接口，也不在上传或普通RAG中自动调用。
 
 返回公式名称、原式、受限四则表达式、变量/含义及完整来源；未知含义为null，不改OCR原式或伪造页码。**只有明确`allow_cloud=True`才允许公式及相邻正文外传并接受本次费用**，异常不自动重试。结构合法不证明数学等价或语义准确，结果标记`manual_pending`；本功能不绑定变量值、不执行SymPy计算。
 

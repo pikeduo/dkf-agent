@@ -11,7 +11,7 @@ from llama_index.core.schema import NodeWithScore, QueryBundle
 
 from app.core.business_logging import log_event
 from app.schemas.rag import RAGAnswer
-from app.services.llm import LLMError
+from app.services.llm import LLMError, llm_cloud_call
 from app.services.rag.dense import validate_query
 from app.services.rag.llama_index.llm_adapter import DKFLLMAdapter
 from app.services.rag.llama_index.node_adapter import node_to_result
@@ -66,7 +66,7 @@ class DKFResponseSynthesizer(BaseSynthesizer):
 
     def synthesize(self, query: str | QueryBundle, nodes: list[NodeWithScore], *,
                    allow_cloud: bool = False, **kwargs) -> RAGAnswer:
-        """只用最终至多五个已重排原Node；区分空集与模型拒答，不强制改写模型判断或追加请求。"""
+        """最终Node只合成一次；显式授权配置可一次备用，不因拒答或引用错误重新合成。"""
         started = perf_counter()
         try:
             if allow_cloud is not True:
@@ -90,9 +90,10 @@ class DKFResponseSynthesizer(BaseSynthesizer):
             payload = evidence_payload(question, evidence, self._llm.context_chars)
             # 只记录最终证据数量；正文和模型原始拒答内容仍不得进入业务日志。
             log_event("rag.synthesis_started", kb_id=evidence[0].kb_id, chunk_count=len(evidence))
-            response = self._llm.chat([
-                ChatMessage(role=MessageRole.SYSTEM, content=RAG_SYSTEM_PROMPT),
-                ChatMessage(role=MessageRole.USER, content=payload)])
+            with llm_cloud_call(allow_cloud=allow_cloud):
+                response = self._llm.chat([
+                    ChatMessage(role=MessageRole.SYSTEM, content=RAG_SYSTEM_PROMPT),
+                    ChatMessage(role=MessageRole.USER, content=payload)])
             result = bind_answer(response.message.content, evidence)
             log_event("rag.insufficient" if result.insufficient_evidence else "rag.synthesized",
                       kb_id=evidence[0].kb_id, item_count=len(result.citations),
