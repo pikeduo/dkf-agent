@@ -53,6 +53,21 @@ def records(stream):
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
+def test_agent_workflow_fields_only_accept_registered_safe_scalars(events):
+    """新增Agent观测字段仅允许UUID/固定枚举/有界步数/有限耗时，不开放任意请求内容。"""
+    run_id = uuid4()
+    logs.log_event("agent.finished", agent_run_id=run_id, selected_route="knowledge_query",
+        tool_name="query_knowledge_base", step_count=5, tool_duration_ms=2.5, final_status="success",
+        question="PRIVATE_QUERY", evidence="PRIVATE_BODY", formula_results="PRIVATE_RESULT")
+    result = records(events)[0]
+    assert result["agent_run_id"] == str(run_id) and result["step_count"] == 5
+    assert result["selected_route"] == "knowledge_query" and result["tool_name"] == "query_knowledge_base"
+    assert result["tool_duration_ms"] == 2.5 and result["final_status"] == "success"
+    assert "PRIVATE" not in events.getvalue()
+    assert logs.safe_fields({"agent_run_id": "PRIVATE", "selected_route": "PRIVATE", "tool_name": "PRIVATE",
+        "final_status": "PRIVATE", "step_count": True, "tool_duration_ms": float("nan")}) == {}
+
+
 def test_management_task_uses_worker_doc_context_and_safe_registered_event(events):
     """管理任务保留doc/request关联和原Worker角色，不输出私有返回值或另建日志文件。"""
     doc_id, task_id = str(uuid4()), str(uuid4())
@@ -89,6 +104,7 @@ def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
     ("formula-cli", "Formula CLI"),
     ("formula-binding-cli", "Formula Binding CLI"),
     ("formula-calculation-cli", "Formula Calculation CLI"),
+    ("knowledge-agent-cli", "Knowledge Agent CLI"),
     ("preset-cli", "Preset CLI"),
 ])
 def test_registered_process_roles_keep_exact_labels_and_real_pid(role, label):

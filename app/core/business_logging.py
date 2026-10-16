@@ -37,11 +37,13 @@ ROLE_LABELS = MappingProxyType({
     "formula-cli": "Formula CLI",
     "formula-binding-cli": "Formula Binding CLI",
     "formula-calculation-cli": "Formula Calculation CLI",
+    "knowledge-agent-cli": "Knowledge Agent CLI",
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
     "unknown": "未知进程",
 })
 FIELDS = {
+    "agent_run_id", "selected_route", "tool_name", "tool_duration_ms", "step_count", "final_status",
     "request_id",
     "task_id",
     "doc_id",
@@ -109,7 +111,13 @@ FIELDS = {
     "visual_cache_hit_count",
     "operation",
 }
-LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "block_id", "kb_id", "job_id"}
+LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "block_id", "kb_id", "job_id", "agent_run_id"}
+# Agent只允许固定路由/工具/终态，不允许任意字符串借新增观测字段进入日志。
+AGENT_LOG_ENUMS = {
+    "selected_route": {"knowledge_search", "knowledge_query", "formula_request"},
+    "tool_name": {"search_knowledge_base", "query_knowledge_base", "extract_formula", "calculate_formula"},
+    "final_status": {"success", "empty", "insufficient_evidence", "need_variables", "unsupported_formula", "failed"},
+}
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
 PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 FILE_PREFIX = "knowledge-service"
@@ -117,6 +125,14 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "agent.started": "开始单次Knowledge Agent工作流",
+    "agent.routed": "已选择固定Knowledge Agent路由",
+    "agent.step": "Knowledge Agent节点已结束",
+    "agent.tool_started": "开始委托已有业务工具",
+    "agent.tool_finished": "已有业务工具返回，尚需校验最终协议",
+    "agent.tool_failed": "业务工具失败，未自动重试或调用其他收费工具",
+    "agent.tool_skipped": "复用已有公式定义，未重复调用提取模型",
+    "agent.finished": "Knowledge Agent已终结，仅返回项目协议",
     "http.request": "接口请求结束",
     "logging.file_unavailable": "日志目录不可用，已降级到终端",
     "upload.received": "收到文档上传",
@@ -295,6 +311,12 @@ EVENT_LABELS = {
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
+    "agent_run_id": "agent_run_id",
+    "selected_route": "selected_route",
+    "tool_name": "tool_name",
+    "tool_duration_ms": "tool_duration_ms",
+    "step_count": "step_count",
+    "final_status": "final_status",
     "request_id": "request_id",
     "doc_id": "doc_id",
     "chunk_id": "chunk_id",
@@ -415,6 +437,12 @@ def safe_fields(fields: dict) -> dict:
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        if key in AGENT_LOG_ENUMS and (not isinstance(value, str) or value not in AGENT_LOG_ENUMS[key]):
+            continue
+        if key == "step_count" and (type(value) is not int or not 0 <= value <= 32):
+            continue
+        if key == "tool_duration_ms" and (type(value) not in {int, float} or not math.isfinite(value) or value < 0):
             continue
         # 提供方只允许固定枚举，不能把外部地址/任意字符串伪装成角色摘要。
         if key == "provider" and (not isinstance(value, str) or value not in {"deepseek", "custom"}):

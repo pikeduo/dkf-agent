@@ -5,11 +5,11 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段29公式安全计算代码与Mock用例已编写，待用户执行；复用阶段27/28来源与绑定，阶段28句末小数修复252项Mock已通过，真实验收及此前待办保留。** 不自动进入30。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段30已补有限LangGraph工作流、薄Tool、同范围/来源与云许可保护、可序列化协议和Mock用例，未执行；阶段29及此前真实验收待办保留。** 不自动进入31。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
-> 本轮仅增加显式有界SymPy计算服务与人工CLI，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
+> 本轮仅在原业务Service外建立确定的Knowledge Agent，不执行测试/真实请求/模型，不改业务数据库、原RAG Prompt或索引语义。\
 > MinerU 官方 API 文档：`https://mineru.net/apiManage/docs`。  
 > **最高优先级执行禁令：未经用户单独明确授权，Codex 不得安装依赖、替换 PyTorch CUDA、变更 Conda 环境、下载/运行模型、部署 GPU、执行迁移或启动 API/Worker；亦不得运行文档解析测试、生成/渲染样本、执行回归/性能测试或调用真实 API。只交付获授权的代码、文档与手动操作说明，由用户执行验收。**
 
@@ -3196,6 +3196,8 @@ variable_sources
 
 # 36. 阶段 30：Knowledge Agent（LangGraph）
 
+代码与Mock用例已编写、尚未执行。入口`app.agents.knowledge.run_knowledge_agent`使用有限StateGraph，薄Tool委托原Search/Query/Formula Service；显式意图、原kb/doc范围、云许可、配置化节点预算和默认追踪禁用均保留。阶段29及此前验收不自动通过；详见[输入协议与人工验收](KNOWLEDGE_AGENT.md)，不新增HTTP接口或第二套RAG/Agent Runtime，不自动进入阶段31。
+
 ## 目标
 
 在 Retrieval、RAG、Citation 和 Formula Service 已稳定后，使用 **LangGraph** 正式封装 Knowledge Agent。
@@ -3833,7 +3835,7 @@ Codex 必须遵守：
 阶段 12～15：未开始
 阶段 15A：计划中的 LlamaIndex Adapter，等待 pgvector 基线完成后开始
 阶段 16～29：未开始
-阶段 30：计划正式接入 LangGraph Knowledge Agent；LangChain 仅按需作为辅助集成层
+阶段 30：已编写有限 LangGraph Knowledge Agent 与薄Tool，待用户运行验收；LangChain 仅按需作为辅助集成层
 ```
 
 当前已确认解析基线：

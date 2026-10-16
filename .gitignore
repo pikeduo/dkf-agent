@@ -49,6 +49,7 @@ docs/*
 !docs/DOCUMENT_MANAGEMENT.md
 !docs/STAGE26_SUPPLEMENT.md
 !docs/FORMULA_SEMANTICS.md
+!docs/KNOWLEDGE_AGENT.md
 !docs/PRESET_IMPORT.md
 !docs/archive/
 docs/archive/*

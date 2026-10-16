@@ -27,6 +27,8 @@ APP_HOST=0.0.0.0
 APP_PORT=8000
 LOG_LEVEL=INFO
 LOG_DIR=logs
+# Agent有限工作流节点预算（普通路径5步、公式路径6步，允许2～32）。
+KNOWLEDGE_AGENT_MAX_STEPS=8
 
 # 数据库与缓存
 DATABASE_URL=postgresql+psycopg://dkf_user:your_password@127.0.0.1:5432/dkf_agent
@@ -584,6 +586,12 @@ Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc
 `app.services.formula_calculation.calculate_formula(value)`接受已有的`FormulaBindingRequest`或`FormulaBindingResult`，重新核对当前来源后执行受限四则运算，返回精确分数、小数展示、代入步骤及完整来源。使用已声明的SymPy，不使用`eval/exec`或通用字符串求值；缺参不算、零分母安全失败，不请求LLM、不写业务库或推断单位。
 
 用户手动检查`python -c "import sympy; print(sympy.__version__)"`；无需GPU/Redis/Worker、新配置或迁移。`python -m scripts.stage29_formula_acceptance`默认dry-run；复用原阶段28请求文件，加`--input <文件> --execute --show-content`可在可信终端查看计算过程。请先人工核对原式、参数单位/主体/期间；精确算术不等于业务语义已验真。详见[计算说明](docs/FORMULA_SEMANTICS.md#阶段29公式安全计算)。
+
+### Knowledge Agent
+
+Python入口`app.agents.knowledge.run_knowledge_agent(request)`返回项目自有回答、Evidence及公式结果，不暴露框架对象。支持`intent=knowledge_search / knowledge_query / formula_request`，默认auto无公式选择时走Query；指定`kb_id / doc_ids`贯穿已有业务服务。公式必须明确选择已有doc/chunk/block，不按关键词自动猜选；可复用已有公式定义，补参时不重复收费提取。
+
+使用已声明的LangGraph；缺少时由用户在`dkf-agent`环境手动执行`python -m pip install langgraph`，不需要另装AgentExecutor或模型集成。`.env`应用组配置`KNOWLEDGE_AGENT_MAX_STEPS=8`；Query和首次公式提取仍须明确`allow_cloud=true`并确认当前LLM提供方的外传与费用。只检索/复用公式计算不需要云许可；图不自动重试、不持久化敏感State。原HTTP API不变，未新增Agent接口。输入、部署前提与人工操作见[Knowledge Agent说明](docs/KNOWLEDGE_AGENT.md)。
 
 ### 预置知识库导入
 

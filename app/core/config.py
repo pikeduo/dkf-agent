@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_dir: Path = Path("logs")
+    # Knowledge Agent固定有限图；节点预算含校验/路由/工具/返回/终结，不自动循环。
+    knowledge_agent_max_steps: int = Field(default=8, ge=2, le=32)
     database_url: str | None = None
     redis_url: str = "redis://127.0.0.1:6379/0"
     celery_broker_url: str | None = None

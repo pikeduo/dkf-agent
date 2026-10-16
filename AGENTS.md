@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**29公式安全计算：已补既有绑定重核、AST白名单/SymPy精确四则、逐步除零检查及可复现来源结果，用例仅编写，待用户验收；不进入30 Agent。阶段28句末数值修复已有252项Mock回归，真实验收及其他此前待办保留。**
+当前阶段：**30 Knowledge Agent：已补有限LangGraph工作流、原业务薄Tool、范围/来源/云许可保护、纯JSON状态和安全观测，用例仅编写待用户验收；不进入31。阶段29及此前真实验收与其他待办保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -55,11 +55,12 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 27 | 已补公式提取服务、原式/变量/引用严格契约、四则语法规范化与人工验收CLI；测试未运行，真实LLM/数学语义待验收 |
 | 28 | 已补用户/证据参数绑定、严格十进制、双端字符来源及need_variables；句末小数修复五文件252项Mock通过，真实来源/语义验收待用户确认 |
 | 29 | 已补显式SymPy有理数计算、变量白名单、每步零分母/资源上限、精确结果/舍入展示/来源及稳定计算ID；用例仅编写，无云/业务写入，待验收 |
-| 30 及后续 | 未开展，等待用户确认 |
+| 30 | 已补确定性StateGraph、四Tool薄适配、云许可/固定范围/有限步数/失败清空、引用和公式来源透传及人工CLI；未执行图/测试，待验收 |
+| 31 及后续 | 未开展，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
-- 用户已指定推进阶段29，此前验收不自动通过；复用阶段27/28定义、绑定及只读Evidence，不改Parser/上传/检索/原RAG Prompt或索引语义，不运行测试/云请求，不推进30。
+- 用户已指定推进阶段30，此前验收不自动通过；LangGraph仅封装原Search/Query/Formula服务，不改Parser/上传/检索/原RAG Prompt或索引语义，不运行测试/云请求，不推进31。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -69,7 +70,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 ## 2. 技术与本地环境约束
 
 - 当前：Python 3.11、FastAPI、SQLAlchemy/Alembic、PostgreSQL + pgvector、Celery + Redis、PyMuPDF、python-docx、openpyxl、olefile、MinerU 官方精准解析 API V4（默认 `vlm`）。
-- 已接入独立DeepSeek官方/custom兼容API的统一LLM工厂与本地BAAI/bge-reranker-v2-m3；HTTP复用httpx，无OpenAI SDK。后续按计划使用SymPy、LangChain、LangGraph；Docker Compose仅为未来整体部署方案。
+- 已接入独立DeepSeek官方/custom兼容API、本地BAAI/bge-reranker-v2-m3、SymPy受限算术及LangGraph编排边界；LangChain仅辅助运行时，无独立AgentExecutor/RAG。HTTP复用httpx，无OpenAI SDK；Docker Compose仅为未来整体部署方案。
 - BGE-M3 Dense 使用已声明的 sentence-transformers；项目依赖可按第 0 节安装，只从用户部署的本地官方权重加载，CUDA/PyTorch CPU-CUDA 版本替换及模型准备仍由用户执行。
 - BGE Reranker使用已声明Transformers的单标签分类模型，统一由项目RerankerService管理；Adapter不另载模型，不要求FlagEmbedding或框架模型集成。本地Safetensors权重与部署仍由用户准备。
 - LlamaIndex 仅声明已获用户确认的 llama-index-core 0.14.x；作为可选运行时 Adapter 显式导入，core 依赖可按第 0 节安装，首次导入资源缓存准备仍由用户执行，不新增默认 OpenAI 或独立向量存储集成。
@@ -270,6 +271,13 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 白名单有界AST逐节点构造SymPy Symbol/Rational/Add/Mul及内部倒数，仅允许原四则/一元正负。禁止eval/exec、sympify/parse_expr/parse_latex/lambdify、函数/属性/索引/用户幂；每个原始除法先检查数值分母，不能靠消项/乘零绕过。各中间有理数分子/分母至多4096二进制位，不返回半份结果。
 - 结果保留精确分数、最多12位半偶舍入展示、代入映射/算式/步骤、实际SymPy版本及公式/变量来源；同输入/来源/引擎版本有稳定calculation_id。仅机械算术，不推断/换算单位或百分比，语义及单位仍manual_pending。复用formula_calculation脱敏事件和formula-calculation-cli，不记录数值、算式、结果或正文，不写业务库/缓存。
 
+### Knowledge Agent
+
+- LangGraph只负责有限StateGraph/条件边/计步及安全错误；项目KnowledgeTools只委托原Search/Query/Formula Service，不复制SQL、HTTP、检索/模型或计算。不引入第二套Retriever/VectorStore/RAG、AgentExecutor或Coordinator。
+- 显式intent决定路径，auto有公式选择才处理公式，否则Query；公式必须准确doc/chunk/block及显式参数，不按关键词猜公式/值。kb/doc_ids贯穿并复核全部返回范围；Question仅数据，不能生成节点名或权限，非法路由直接失败。复用旧成功定义可跳过提取，但计算仍核对当前来源。
+- Query/首次提取须本次allow_cloud=true，搜索/复用定义计算无云调用。KNOWLEDGE_AGENT_MAX_STEPS限定2～32，默认8，含终结；预算不足Tool前拒绝，无自动循环/重试/收费重放。Tool错误清空半成品，不能伪装不足或成功；无持久化请求幂等，人工重跑可能再次收费。
+- State只含JSON项目数据，不含Session/模型/框架Node/原始异常；对外仅KnowledgeAgentResponse。Citation/原metadata及Formula/EvidenceTrace沿用业务契约，不补页/单位或宣称语义已验真。默认禁用Tracing/callback，不持久化敏感State；日志仅关联agent_run_id、固定路由/Tool/终态、步数耗时，集中knowledge-agent-cli角色。
+
 ### Admin文档管理与动态增量
 
 - 新上传（普通auto/native/mineru及显式云上传）自动建立ingest编排，保留单文件doc_id与原响应契约，按原阶段任务推进至READY；历史文档不自动接管，显式Retry/Reindex/Reparse/Delete及旧逐阶段/预置CLI语义保留。复用现有management字段，不新增业务表/全库重建。
@@ -305,6 +313,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 管理接口、恢复编排、删除所有权及人工验收 | [Admin文档管理](docs/DOCUMENT_MANAGEMENT.md) |
 | 阶段26云miss/费用前置/本地超时与跨语言对照 | [阶段26补充](docs/STAGE26_SUPPLEMENT.md) |
 | 公式提取、表达式语法、语义来源及人工验收 | [公式语义结构化](docs/FORMULA_SEMANTICS.md) |
+| Agent状态/路由、薄Tool、费用与有限图验收 | [Knowledge Agent](docs/KNOWLEDGE_AGENT.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
 | 部署与接口使用 | [README](README.md) |
 
