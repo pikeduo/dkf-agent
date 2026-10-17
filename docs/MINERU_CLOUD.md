@@ -34,18 +34,18 @@
 
 Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
-- V1 仍是唯一正文来源。只对紧邻前一纯正文的连续空占位核对 layout，不使用 full.md/V2 补字，不根据文件名或具体文本判断。
+- V1仍是唯一正文来源。合并目标不必在数组中紧邻占位，但只允许跨越有独立layout证据的header/footer/page_number；其他Text、Title、Table、公式、图片及未知类型不能跳过，不使用full.md/V2补字或按文件名判断。
 - 页内类型、归一化 bbox 必须唯一对应前后父块，index 一致且无重复；空来源必须有删除标记，源段落当前只支持一个非空纯 text span。目标的所有 span 必须按原顺序与这些源 span 的文本/坐标完全对应。坐标容差仅兼容取整，不作为排序依据。
 - 逐字符核对整段 V1，允许段落间空白与 Markdown 标点转义。输出直接切取 V1 原字符串，所有切片拼接须等于原字符串；不模糊匹配、改写 OCR、重复拼入 layout 文字或丢掉额外内容。
-- 每个切片回到原数组位置，保留该项的 page_idx、bbox、类型、source、置信度及稳定 Block ID。跨页只接受相邻后一页且目标 span 明确 cross_page=true；不跨页排序、不按 y 排序，不拆 table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
-- 第一版最多64个连续占位、每组合并 V1 正文最多1 MiB、每页关联父块最多512个。多 span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为 `MERGE_EVIDENCE`；没有合并证据的真空正文/表格/公式仍为 `EMPTY_BLOCK`，失败不落半份 Block、不发布成功缓存。
+- 每个切片按真实原索引集合逐项写回（可非连续），保留数组长度/顺序及夹在其中的边界项，保留page_idx、bbox、类型、source、置信度和稳定Block ID。跨页只接受相邻后一页且目标span明确cross_page=true；不跨页排序、不按y排序，不拆table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
+- 每组最多64个占位与64个边界、V1正文最多1MiB、每页关联父块最多512个。边界须唯一匹配discarded父块、全页index无冲突、确在页面边缘且index在正文前/后，边界原文逐字可核对；同一边界父块不能重复使用，目标在V1中的位置也必须唯一。多Span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为MERGE_EVIDENCE；真空正文/表格/公式仍为EMPTY_BLOCK，不落半份Block、不发布成功缓存。
 - `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
 
 归一化缓存身份更新为 `mineru-adapter-v2`，Native 缓存版本不变。旧成功文件不删除、不改写；旧 v1 云缓存不混入新版 Whole/视觉键，Reindex 遇到版本不一致安全返回 CACHE_CONFIG_CHANGED，不自动重算或收费。已经验证的同 Job 缓存可按原检查点恢复；尚未完成的旧冻结任务在 POST/PUT/GET 前拒绝版本不一致，不用新版结果覆盖旧键。所有进程须由用户按 README 手动重启。
 
 #### MERGE_EVIDENCE只读诊断与原Batch复用
 
-调用链是`jobs.check_step → download_result(内存) → normalize → restore_merged_text → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因`result_downloaded`日志而假定已有缓存。没有来源证据时仍拒绝，不新增多Span拼接、跨页猜测、空项跳过或y坐标排序。本轮仅细分诊断，不改变归一化正文/Block ID/版本。
+调用链是`jobs.check_step → download_result(内存) → normalize → restore_merged_text → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因`result_downloaded`日志而假定已有缓存。没有来源证据时仍拒绝，不新增多Span拼接、跨页猜测、空项跳过或y坐标排序。后续已兼容经过严格验证的非连续页边界，不改变原已接受输入的输出/Block ID，沿用Normalizer v2；不据此自动复活旧失败Job或改写缓存。
 
 | 内部子码示例 | 拒绝条件 |
 |---|---|
@@ -56,6 +56,7 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 | SOURCE_SPAN_COUNT / SOURCE_SPAN_BBOX / SOURCE_BBOX_COVERAGE / TARGET_SPAN_COUNT | 一个源段落多行Span、来源坐标缺失/覆盖不符或目标Span数量不符 |
 | SOURCE_PAGE / MOVED_TEXT / MOVED_CROSS_PAGE / SOURCE_CROSS_PAGE / MOVED_BBOX | 非相邻页、移动前后文字/位置不一致或跨页标记不符 |
 | TEXT_LIMIT / SOURCE_TEXT / TEXT_CHARACTER / TEXT_TRAILING | 超过1MiB、来源文本无效、逐字符不一致或有未归属尾字 |
+| BOUNDARY_LAYOUT / MATCH / INDEX / POSITION / TEXT / REUSED / LIMIT、TARGET_AMBIGUOUS | 边界来源/位置/文字无法唯一核对、重复使用、超过预算或目标正文在V1中映射不唯一（BOUNDARY子码均带完整前缀） |
 
 200页是分片限制，不是上述每页/每组预算。大型PDF更可能包含多行、多Span或复杂跨页，但**在取得真实ZIP前不能据此认定本次根因**。可用只读工具精确复现第一个失败条件：
 
@@ -85,7 +86,14 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 
 MERGE终态不属于已有JOB_TIMEOUT/传输错误Retry白名单，当前不建议`/retry`、`/process`或Force。先保留失败状态与账本，提供ZIP，禁止删除Job/缓存或盲目新增批次。
 
-本轮授权验证：修改前merge/order 61 passed；修改后merge/order/诊断/分片Mock 140 passed，日志相关44 passed；历史三份真实ZIP离线重复转换135/72/14个Block及稳定ID通过（尺寸来自历史layout，只证明兼容回归，不是原件几何验真）。本次AES Batch ZIP缺失，**未定位真实子原因、未完成该ZIP回归、未恢复业务任务**。最终只读核对报告见本地`results/mineru_merge_dceb1360_verified_03.json`，含分片专用options_hash校验，不得把历史样本或Mock通过当成本次修复完成。
+此前诊断回归140 passed、日志相关44 passed，历史三份ZIP转换通过；只读身份报告`results/mineru_merge_dceb1360_verified_03.json`保留不改写。本次取得`data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip`后，确认TARGET_TEXT是把夹在目标与占位之间的header当成目标。修复后真实`restore_merged_text`恢复1处，仅原0-based索引864/866变化，865页眉和其余2290项不变；两段124+229字符无损还原原353字符，重复恢复一致。
+
+**完整normalize仍未通过：** 原V1索引1820/1893/2102（物理页155/162/183）为table，却无table_body且caption/footnote为空，触发原有EMPTY_BLOCK。未删除这些项、未改成图片/空成功块、未拿layout或Markdown补表。此独立表格问题须另行分析可验证的结构来源，不能用合并修复成功宣称整片解析完成。新相邻回归167 passed（7.00秒）；真实验证使用既有分片的实际geometry并核对Hash，只读原ZIP/分片，未访问数据库或调用云端。结果摘要见本地`results/mineru_merge_noncontiguous_01.json`。
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_merge_boundaries.py tests/test_mineru_merge.py tests/test_mineru_order.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py -q -ra -p no:cacheprovider
+```
 
 先运行 Mock 单测（不需要数据库、Worker、GPU或云端）：
 

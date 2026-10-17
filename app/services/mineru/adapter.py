@@ -313,6 +313,8 @@ def convert_bbox(value: object, size: tuple[float, float]) -> list[float] | None
     ]
 
 
+# 只允许跨越有唯一layout证据的边界元素；正文/标题/表格及未知元素绝不跳过。
+MERGE_BOUNDARY_TYPES = frozenset({"header", "footer", "page_number"})
 # 诊断子码仅用于内部定位；对外错误码/重试策略/缓存版本和恢复判定均保持不变。
 MERGE_REASONS = {
     "LAYOUT_PAGE": "matched_text_layout", "TEXT_LEVEL": "matched_text_layout",
@@ -332,6 +334,10 @@ MERGE_REASONS = {
     "SOURCE_PAGE": "restore_merged_text", "MOVED_TEXT": "restore_merged_text",
     "MOVED_CROSS_PAGE": "restore_merged_text", "SOURCE_CROSS_PAGE": "restore_merged_text",
     "MOVED_BBOX": "restore_merged_text",
+    "BOUNDARY_LIMIT": "merge_group_indices", "TARGET_AMBIGUOUS": "restore_merged_text",
+    "BOUNDARY_LAYOUT": "matched_merge_boundary", "BOUNDARY_MATCH": "matched_merge_boundary",
+    "BOUNDARY_INDEX": "matched_merge_boundary", "BOUNDARY_POSITION": "matched_merge_boundary",
+    "BOUNDARY_TEXT": "matched_merge_boundary", "BOUNDARY_REUSED": "restore_merged_text",
 }
 
 
@@ -453,10 +459,103 @@ def merged_text_slices(text: str, originals: list[str]) -> list[str]:
     return [text[left:right] for left, right in pairwise(cuts)]
 
 
-def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list[dict], int]:
-    """恢复紧邻正文的已证实合并占位，保留原数组位置、页面、bbox 和其他字段。
+def merge_group_indices(items: list[dict], offset: int) -> tuple[list[int], list[int]]:
+    """收集非连续正文/占位原索引及待核验边界索引；遇任何其他元素立即停止。
 
-    第一版仅支持每个源段落一个纯文本 span、最多 64 个连续占位。必须有
+    最多64个占位与64个边界，不因跨页眉而越过另一正文寻找更早目标；本步骤
+    仅收集索引，调用方必须验证每个边界的layout证据后才能恢复。
+    """
+    target, boundaries = offset - 1, []
+    while target >= 0 and items[target].get("type") in MERGE_BOUNDARY_TYPES:
+        boundaries.append(target)
+        if len(boundaries) > 64:
+            raise merge_evidence_error("BOUNDARY_LIMIT", item_index=offset + 1)
+        target -= 1
+    if target < 0:
+        raise merge_evidence_error("GROUP_NO_TARGET", page_idx=items[offset].get("page_idx"),
+                                   item_index=offset + 1)
+    placeholders, cursor = [], offset
+    while cursor < len(items) and items[cursor].get("type") == "text" and items[cursor].get("text") == "":
+        placeholders.append(cursor)
+        if len(placeholders) > 64:
+            raise merge_evidence_error("GROUP_LIMIT", page_idx=items[offset].get("page_idx"),
+                                       item_index=offset + 1, observed=len(placeholders), expected=64)
+        next_index = cursor + 1
+        while next_index < len(items) and items[next_index].get("type") in MERGE_BOUNDARY_TYPES:
+            # 最后占位之后的无关页边界不属于本组，也不在本组验证/修改。
+            if next_index - cursor > 64:
+                break
+            next_index += 1
+        if (next_index < len(items) and items[next_index].get("type") == "text"
+                and items[next_index].get("text") == ""):
+            boundaries.extend(range(cursor + 1, next_index))
+            if len(boundaries) > 64:
+                raise merge_evidence_error("BOUNDARY_LIMIT", item_index=offset + 1)
+            cursor = next_index
+        else:
+            break
+    return [target, *placeholders], sorted(boundaries)
+
+
+def matched_merge_boundary(item: dict, pages: dict[int, dict], allowed_pages: set[int]) -> tuple[int, int]:
+    """唯一核对discarded页边界的类型/坐标/index/原文及边缘位置；只返回来源身份。
+
+    不用边界位置推断正文顺序，不修改边界；任何缺失或冲突均拒绝跨越。
+    """
+    index, kind = item.get("page_idx"), item.get("type")
+    location = {"page_idx": index}
+    page = pages.get(index) if type(index) is int else None
+    if not isinstance(page, dict) or index not in allowed_pages or kind not in MERGE_BOUNDARY_TYPES:
+        raise merge_evidence_error("BOUNDARY_LAYOUT", **location)
+    body, discarded = page.get("para_blocks"), page.get("discarded_blocks")
+    if (not isinstance(body, list) or not body or not isinstance(discarded, list)
+            or not 1 <= len(body) + len(discarded) <= 512):
+        raise merge_evidence_error("BOUNDARY_LAYOUT", **location)
+    blocks = body + discarded
+    if any(not isinstance(block, dict) for block in blocks):
+        raise merge_evidence_error("BOUNDARY_LAYOUT", **location)
+    indices = [block.get("index") for block in blocks]
+    if (any(type(value) is not int or value < 0 for value in indices)
+            or len(set(indices)) != len(indices)):
+        raise merge_evidence_error("BOUNDARY_INDEX", **location)
+    boxes = [layout_bbox(block, page.get("page_size")) for block in blocks]
+    if any(box is None for box in boxes):
+        raise merge_evidence_error("BOUNDARY_LAYOUT", **location)
+    try:
+        box = convert_bbox(item.get("bbox"), (1000, 1000))
+    except MinerUError:
+        raise merge_evidence_error("BOUNDARY_MATCH", **location) from None
+    matches = [position for position, block in enumerate(blocks)
+               if box is not None and block.get("type") == kind
+               and all(abs(a - b) <= 2 for a, b in zip(box, boxes[position]))]
+    if len(matches) != 1 or matches[0] < len(body):
+        raise merge_evidence_error("BOUNDARY_MATCH", observed=len(matches), expected=1, **location)
+    boundary = blocks[matches[0]]
+    top = box[3] <= 150 and box[3] <= min(value[1] for value in boxes[:len(body)])
+    bottom = box[1] >= 850 and box[1] >= max(value[3] for value in boxes[:len(body)])
+    top = top and boundary["index"] < min(indices[:len(body)])
+    bottom = bottom and boundary["index"] > max(indices[:len(body)])
+    if (kind == "header" and not top or kind == "footer" and not bottom
+            or kind == "page_number" and not (top or bottom)):
+        raise merge_evidence_error("BOUNDARY_POSITION", **location)
+    if (boundary.get("lines_deleted", False) is not False or not isinstance(item.get("text"), str)
+            or type(item.get("text_level", 0)) is not int or item.get("text_level", 0) != 0):
+        raise merge_evidence_error("BOUNDARY_TEXT", **location)
+    try:
+        spans = plain_layout_spans(boundary)
+        if any(span.get("cross_page", False) is not False
+               or layout_bbox(span, page["page_size"]) is None for span in spans):
+            raise merge_evidence_error("BOUNDARY_TEXT", **location)
+        merged_text_slices(item["text"], [span["content"] for span in spans])
+    except MinerUError:
+        raise merge_evidence_error("BOUNDARY_TEXT", **location) from None
+    return index, boundary["index"]
+
+
+def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list[dict], int]:
+    """恢复正文及有证据的非连续合并占位，保留所有原数组位置、页面与bbox。
+
+    仅支持每个源段落一个纯文本 span、最多64个占位和64个经核对的边界。必须有
     lines_deleted=true、空后处理 lines、完整前处理来源及目标 span 顺序证据；
     跨页要求 cross_page=true 且只跨相邻后一页。歧义安全失败，不跳过真空正文。
     """
@@ -493,63 +592,79 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
         if len(marked) != 1:
             raise merge_evidence_error("PLACEHOLDER_MATCH", page_idx=item["page_idx"], item_index=offset + 1,
                                        observed=len(marked), expected=1)
-        end = offset
-        while (end < len(items) and items[end].get("type") == "text"
-               and items[end].get("text") == ""):
-            end += 1
-        if offset == 0:
-            raise merge_evidence_error("GROUP_NO_TARGET", page_idx=item["page_idx"], item_index=offset + 1)
-        if end - offset > 64:
-            raise merge_evidence_error("GROUP_LIMIT", page_idx=item["page_idx"], item_index=offset + 1,
-                                       observed=end - offset, expected=64)
-        group = items[offset - 1:end]
+        group_indices, boundary_indices = merge_group_indices(items, offset)
+        group = [items[index] for index in group_indices]
+        target_index = group_indices[0]
         target = group[0]
         if (target.get("type") != "text" or not isinstance(target.get("text"), str)
                 or not target["text"].strip()):
-            raise merge_evidence_error("TARGET_TEXT", page_idx=target.get("page_idx"), item_index=offset)
+            raise merge_evidence_error("TARGET_TEXT", page_idx=target.get("page_idx"), item_index=target_index + 1)
         evidence = []
-        for position, value in enumerate(group, start=offset):
+        for position, value in zip(group_indices, group):
             try:
                 evidence.append(matched_text_layout(value, pages))
             except MergeEvidenceError as error:
-                error.locate(page_idx=value.get("page_idx"), item_index=position)
+                error.locate(page_idx=value.get("page_idx"), item_index=position + 1)
                 raise
+        if boundary_indices:
+            # 边界不能用于跨越别的正文；目标映射在V1中也必须唯一，避免重复目标歧义。
+            target_box = convert_bbox(target.get("bbox"), (1000, 1000))
+            target_matches = 0
+            for value in items:
+                if value.get("type") == "text" and value.get("page_idx") == target.get("page_idx"):
+                    box = convert_bbox(value.get("bbox"), (1000, 1000))
+                    if box is not None and all(abs(a - b) <= 2 for a, b in zip(box, target_box)):
+                        target_matches += 1
+            if target_matches != 1:
+                raise merge_evidence_error("TARGET_AMBIGUOUS", page_idx=target.get("page_idx"),
+                                           item_index=target_index + 1, observed=target_matches, expected=1)
+            allowed_pages = {value.get("page_idx") for value in group}
+            used_boundaries = set()
+            for position in boundary_indices:
+                try:
+                    boundary_id = matched_merge_boundary(items[position], pages, allowed_pages)
+                    if boundary_id in used_boundaries:
+                        raise merge_evidence_error("BOUNDARY_REUSED", page_idx=items[position].get("page_idx"))
+                    used_boundaries.add(boundary_id)
+                except MergeEvidenceError as error:
+                    error.locate(item_index=position + 1)
+                    raise
         if evidence[0][0].get("lines_deleted", False) is not False:
-            raise merge_evidence_error("TARGET_DELETED", page_idx=target.get("page_idx"), item_index=offset)
+            raise merge_evidence_error("TARGET_DELETED", page_idx=target.get("page_idx"), item_index=target_index + 1)
         source_spans = []
         for index, (parent, before, size) in enumerate(evidence):
             if index and (parent.get("lines_deleted") is not True or parent.get("lines") != []):
                 raise merge_evidence_error("SOURCE_NOT_DELETED", page_idx=group[index].get("page_idx"),
-                                           item_index=offset + index)
+                                           item_index=group_indices[index] + 1)
             try:
                 spans = plain_layout_spans(before)
             except MergeEvidenceError as error:
-                error.locate(page_idx=group[index].get("page_idx"), item_index=offset + index, span_role="source")
+                error.locate(page_idx=group[index].get("page_idx"), item_index=group_indices[index] + 1, span_role="source")
                 raise
             if len(spans) != 1:
                 raise merge_evidence_error("SOURCE_SPAN_COUNT", page_idx=group[index].get("page_idx"),
-                                           item_index=offset + index, observed=len(spans), expected=1)
+                                           item_index=group_indices[index] + 1, observed=len(spans), expected=1)
             if layout_bbox(spans[0], size) is None:
                 raise merge_evidence_error("SOURCE_SPAN_BBOX", page_idx=group[index].get("page_idx"),
-                                           item_index=offset + index)
+                                           item_index=group_indices[index] + 1)
             # 当前只处理源 span 覆盖整个段落的情形，不把局部 span 坐标冒充整个源块。
             span_box, parent_box = layout_bbox(spans[0], size), layout_bbox(before, size)
             if any(abs(a - b) > 2 for a, b in zip(span_box, parent_box)):
                 raise merge_evidence_error("SOURCE_BBOX_COVERAGE", page_idx=group[index].get("page_idx"),
-                                           item_index=offset + index)
+                                           item_index=group_indices[index] + 1)
             source_spans.append(spans[0])
         try:
             target_spans = plain_layout_spans(evidence[0][0])
         except MergeEvidenceError as error:
-            error.locate(page_idx=target.get("page_idx"), item_index=offset, span_role="target")
+            error.locate(page_idx=target.get("page_idx"), item_index=target_index + 1, span_role="target")
             raise
         if len(target_spans) != len(source_spans):
-            raise merge_evidence_error("TARGET_SPAN_COUNT", page_idx=target.get("page_idx"), item_index=offset,
+            raise merge_evidence_error("TARGET_SPAN_COUNT", page_idx=target.get("page_idx"), item_index=target_index + 1,
                                        observed=len(target_spans), expected=len(source_spans))
-        for position, (value, original, moved, (_, _, size)) in enumerate(
-                zip(group, source_spans, target_spans, evidence), start=offset):
+        for position, value, original, moved, (_, _, size) in zip(
+                group_indices, group, source_spans, target_spans, evidence):
             source_page, target_page = value.get("page_idx"), target.get("page_idx")
-            location = {"page_idx": source_page, "item_index": position}
+            location = {"page_idx": source_page, "item_index": position + 1}
             if (type(source_page) is not int or type(target_page) is not int
                     or source_page not in {target_page, target_page + 1}):
                 raise merge_evidence_error("SOURCE_PAGE", **location)
@@ -565,12 +680,13 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
         try:
             parts = merged_text_slices(target["text"], [s["content"] for s in source_spans])
         except MergeEvidenceError as error:
-            error.locate(page_idx=target.get("page_idx"), item_index=offset)
+            error.locate(page_idx=target.get("page_idx"), item_index=target_index + 1)
             raise
-        for index, (value, text) in enumerate(zip(group, parts), start=offset - 1):
+        # 只写回经验证的真实原索引；绝不连续覆盖夹在其中的页眉/页脚等内容。
+        for index, value, text in zip(group_indices, group, parts):
             restored[index] = value | {"text": text}
-        count += end - offset
-        offset = end
+        count += len(group_indices) - 1
+        offset = group_indices[-1] + 1
     return restored, count
 
 
