@@ -340,7 +340,7 @@ ORDER BY d.file_name, b.block_index;
 
 ## 超限 PDF：连续分片
 
-本节为新增代码与Mock设计，**未执行真实分片、云API、数据库迁移或pytest**，不表示阶段32解析/评测通过。
+分片主链路仍待真实原件/云端验收。Windows保存句柄修复已按本轮单独授权执行8项隔离离线用例和51项相邻Mock回归；**未执行AES真实原件分片、云API或业务数据库操作**，不表示阶段32解析/评测通过。
 
 ### 范围、身份和限制
 
@@ -364,7 +364,63 @@ ORDER BY d.file_name, b.block_index;
 
 ### 用户手动验证（先Mock，真实执行另行确认）
 
-纯Mock不需要启动服务、真实原件或GPU（本轮Codex没有执行）：
+#### Windows保存句柄修复与离线验收
+
+原`target.open("xb") → piece.save(stream)`会使PyMuPDF把具名文件对象转换回`.name`路径，而Python仍持有Windows目标句柄，导致`FzErrorSystem: cannot remove file ... Permission denied`。该异常继承`FzErrorBase(Exception)`，旧`RuntimeError`捕获不能覆盖，因而曾返回UNKNOWN。
+
+当前在独立临时子目录对**未存在的字符串路径**直接`piece.save(str(generated), ...)`，关闭所有MuPDF句柄并核对页数/裁剪框/旋转后，再以`xb`独占复制原字节至目标。即使检查后目标被另一进程创建，也拒绝覆盖。不修改生成参数、分片策略版本、SHA256算法或原页映射，不为本次文件写特例。额外暂存/复制会占用少量额外本地I/O及磁盘空间，保存失败在任何云提交之前停止。
+
+保存/发布异常安全返回`PDF_SPLIT_WRITE`，其他可识别MuPDF读取/生成错误为`PDF_SPLIT_IO`；业务事件`mineru.split_io_failed`仅记录类型和固定`stage/step`，不输出异常原文、Token、签名URL或源文件路径。旧UNKNOWN任务不自动复活，本轮不重投或修改Job。
+
+已在Windows Conda `dkf-agent`中实际执行：新增用例8 passed（0.63秒），相邻分片Mock 51 passed（6.63秒）。新增真实PyMuPDF验证使用临时无正文257页PDF，得到200+57页，全部页几何/原件Hash保持，输出与既有相同参数的参考字节一致；同时覆盖已存在目标、发布竞态、FzErrorSystem/Generic/PermissionError及安全诊断。首轮仅有旧`.pytest_cache`写权限警告，未修改权限；不等于AES原件、真实云端或数据库并发已通过。
+
+用户手动复测，不需要启动任何服务：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_pdf_split_windows.py -q -ra -p no:cacheprovider
+python -m pytest tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py -q -ra -p no:cacheprovider
+```
+
+如需人工复验自己的真实PDF，可使用以下**纯离线**命令。原件只读；输出为系统临时目录中新建的唯一目录，不使用PARSED_DIR中的活动Job目录，不创建Job、不上传、不联系数据库，不改阶段32原件/QA：
+
+```powershell
+$pdfSource = (Resolve-Path -LiteralPath (Read-Host "输入待离线验证的PDF路径")).Path
+$pdfOutput = Join-Path ([IO.Path]::GetTempPath()) ("dkf-pdf-split-" + [guid]::NewGuid().ToString("N"))
+$offlineCheck = @'
+import sys
+from functools import partial
+from pathlib import Path
+import pymupdf
+from app.services.mineru.pdf_split import build_parts, render_range, file_digest
+from app.services.mineru.errors import MinerUError
+source, output = Path(sys.argv[1]), Path(sys.argv[2])
+try:
+    output.mkdir(parents=True, exist_ok=False)
+    before = file_digest(source)
+    with pymupdf.open(source) as pdf:
+        rows = build_parts(pdf.page_count, output, partial(render_range, pdf))
+    assert file_digest(source) == before
+    for row in rows:
+        path = output / f"part-{row['ordinal']:04d}.pdf"
+        assert path.stat().st_size == row['size_bytes']
+        assert file_digest(path) == row['file_hash']
+except MinerUError as error:
+    print("OFFLINE_FAILED", error.code)
+    raise SystemExit(1)
+except (pymupdf.mupdf.FzErrorBase, OSError, ValueError, AssertionError) as error:
+    print("OFFLINE_FAILED", type(error).__name__)
+    raise SystemExit(1)
+print("OFFLINE_OK", [(r['page_start'], r['page_end'], r['size_bytes']) for r in rows])
+'@
+python -c $offlineCheck $pdfSource $pdfOutput
+if ($LASTEXITCODE -ne 0) { throw "离线验证失败；未提交云任务，不要盲目重投" }
+Write-Host "离线分片输出目录：$pdfOutput"
+```
+
+257页原件在大小不触发进一步缩片时预期为`1～200`、`201～257`；任何失败都不要因此执行Force Reparse。原批次是否已提交、后续恢复与费用仍须单独核对并授权。
+
+更广的回归命令如下，不需要启动服务、真实原件或GPU（本轮只执行了上述8+51项，未执行以下整组）：
 
 ```powershell
 conda activate dkf-agent

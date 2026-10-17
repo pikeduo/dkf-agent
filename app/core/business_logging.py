@@ -176,6 +176,7 @@ EVENT_LABELS = {
     "mineru.split_piece_done": "PDF 分片结果已缓存，原文档尚未整体落库",
     "mineru.split_manifest_failed": "PDF 分片磁盘副本写入失败，数据库检查点仍保留",
     "mineru.split_checkpoint_invalid": "PDF 分片检查点无效，保留原账本并停止处理",
+    "mineru.split_io_failed": "PDF 分片本地文件操作失败，未提交云任务",
     "mineru.retry": "MinerU 任务等待重试",
     "mineru.failed": "MinerU 任务失败",
     "mineru.error_record_failed": "MinerU 失败原因未能写入数据库",

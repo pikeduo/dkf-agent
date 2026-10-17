@@ -10,6 +10,7 @@ from uuid import UUID, uuid5
 import pymupdf
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.business_logging import log_event
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.mineru.errors import MinerUError
 from app.services.parse_cache import ParseCache, ReadyRecord
@@ -120,18 +121,42 @@ def file_digest(path: Path) -> str:
 
 
 def render_range(pdf, first: int, last: int, target: Path) -> None:
-    """复制含裁剪/旋转的原页而不渲染/OCR；索引为原 PDF 的 1-based 闭区间。"""
-    with pymupdf.open() as piece:
-        piece.insert_pdf(pdf, from_page=first - 1, to_page=last - 1)
-        with target.open("xb") as stream:
-            piece.save(stream, garbage=4, deflate=True, no_new_id=True)
-    with pymupdf.open(target) as piece:
-        if piece.page_count != last - first + 1 or piece.is_repaired or piece.needs_pass:
-            raise MinerUError("PDF_SPLIT_INVALID", "生成的 PDF 分片无法完整读取")
-        for index, page in enumerate(piece):
-            original = pdf[first - 1 + index]
-            if page.rect != original.rect or page.cropbox != original.cropbox or page.rotation != original.rotation:
-                raise MinerUError("PDF_SPLIT_GEOMETRY", "PDF 分片改变原页面坐标，未提交云任务")
+    """按原1-based闭区间复制页面；MuPDF独占保存新路径，关闭后再独占发布目标。"""
+    if target.exists() or target.is_symlink():
+        raise MinerUError("PDF_SPLIT_CHANGED", "PDF 分片目标已存在，未覆盖文件")
+    step = "temporary_directory"
+    try:
+        # MuPDF会把具名文件对象转回路径；保存期间不得由Python预先打开该文件。
+        # 仍使用独立临时目录；最终xb发布防止检查后目标被其他进程创建时遭覆盖。
+        with TemporaryDirectory(prefix=".pdf-write-", dir=target.parent) as scratch:
+            generated = Path(scratch) / "piece.pdf"
+            step = "copy_pages"
+            with pymupdf.open() as piece:
+                piece.insert_pdf(pdf, from_page=first - 1, to_page=last - 1)
+                step = "save"
+                piece.save(str(generated), garbage=4, deflate=True, no_new_id=True)
+            step = "verify"
+            with pymupdf.open(generated) as piece:
+                if piece.page_count != last - first + 1 or piece.is_repaired or piece.needs_pass:
+                    raise MinerUError("PDF_SPLIT_INVALID", "生成的 PDF 分片无法完整读取")
+                for index, page in enumerate(piece):
+                    original = pdf[first - 1 + index]
+                    if page.rect != original.rect or page.cropbox != original.cropbox or page.rotation != original.rotation:
+                        raise MinerUError("PDF_SPLIT_GEOMETRY", "PDF 分片改变原页面坐标，未提交云任务")
+            step = "publish"
+            # 此时所有MuPDF文件句柄均已关闭；只复制原始字节，不重新序列化或改变Hash。
+            with target.open("xb") as stream, generated.open("rb") as source:
+                shutil.copyfileobj(source, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+    except FileExistsError:
+        raise MinerUError("PDF_SPLIT_CHANGED", "PDF 分片目标已存在，未覆盖文件") from None
+    except (pymupdf.mupdf.FzErrorBase, OSError, RuntimeError, ValueError) as exc:
+        code = "PDF_SPLIT_WRITE" if step in {"temporary_directory", "save", "publish"} else "PDF_SPLIT_IO"
+        log_event("mineru.split_io_failed", error_code=code, error_type=type(exc).__name__,
+                  stage="pdf_split.render_range", step=step)
+        raise MinerUError(code, "PDF 分片文件写入失败，未提交云任务"
+                         if code == "PDF_SPLIT_WRITE" else "PDF 分片生成或校验失败，未提交云任务") from None
 
 
 def build_parts(page_count: int, directory: Path, render, *, max_bytes=MAX_BYTES,
@@ -186,7 +211,7 @@ def build_parts(page_count: int, directory: Path, render, *, max_bytes=MAX_BYTES
 
 
 def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
-    """仅 Worker 在整份缓存 miss 后生成分片；原件只读，全部规划成功后才能云提交。"""
+    """缓存miss后只读原件规划全片；MuPDF底层异常安全分类，失败不得开始云提交。"""
     cache = ParseCache(settings)
     directory = part_path(cache, document.doc_id, job.job_id, 1).parent
     request = job.parse_options["_pdf_split_request"]
@@ -209,7 +234,9 @@ def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
             row.update(data_id=f"dkf-{identity.hex}", task_id=identity)
         return SplitManifest(doc_id=document.doc_id, file_hash=document.file_hash,
                              page_count=request["page_count"], policy=policy(), parts=rows)
-    except (OSError, ValueError, RuntimeError):
+    except (pymupdf.mupdf.FzErrorBase, OSError, ValueError, RuntimeError) as exc:
+        log_event("mineru.split_io_failed", error_code="PDF_SPLIT_IO", error_type=type(exc).__name__,
+                  stage="pdf_split.prepare_manifest", step="read_or_plan")
         raise MinerUError("PDF_SPLIT_IO", "PDF 分片生成或读取失败，未提交云任务") from None
 
 
