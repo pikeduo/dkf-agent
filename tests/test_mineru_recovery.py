@@ -51,9 +51,10 @@ class ProviderStub:
 
 
 @pytest.fixture
-def context(monkeypatch):
-    """建立过期但已上传的Job；只替代I/O和适配边界，保留生产短步骤与管理决策。"""
-    settings = Settings(_env_file=None, deepseek_provider=None, llm_provider="deepseek")
+def context(monkeypatch, tmp_path):
+    """建立已上传的过期Job；归档I/O隔离在临时目录，保留短步骤与管理决策。"""
+    settings = Settings(_env_file=None, deepseek_provider=None, llm_provider="deepseek",
+                        parsed_dir=tmp_path / "parsed")
     document = Document(doc_id=uuid4(), kb_id=uuid4(), status="PARSING", file_hash="a" * 64,
         file_type="pdf", file_name="metadata.pdf", processing_task_id=uuid4(),
         management_task_id=None, management_config=None)
@@ -77,16 +78,27 @@ def test_old_uploaded_submit_redirects_to_check_without_second_post(context):
 
 
 def test_worker_downtime_done_is_recovered_before_local_deadline(context, monkeypatch):
-    """远端早已done时仍回收原结果；Stub只证明编排，不冒充真实ZIP/Block验收。"""
+    """远端done仍接续编排；显式Stub归档边界并核对来源Hash，不冒充ZIP/Block验收。"""
     settings, document, job, session = context
     provider = ProviderStub(job, "done")
     parsed = SimpleNamespace(blocks=["block-stub"])
     calls = []
-    monkeypatch.setattr(jobs, "local_file", lambda *args: SimpleNamespace(path="PRIVATE_PATH"))
+    monkeypatch.setattr(jobs, "local_file", lambda *args: SimpleNamespace(
+        path="PRIVATE_PATH", file_hash=job.file_hash))
     monkeypatch.setattr(jobs, "validate_local_file", lambda *args: None)
     monkeypatch.setattr(jobs, "page_geometry", lambda *args: {})
     monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", lambda *args, **kwargs: parsed)
     monkeypatch.setattr(jobs, "save_cloud_cache", lambda *args: calls.append("cache"))
+
+    def obtain(provider_arg, url, configuration, **identity):
+        """只模拟归档I/O，验证完整来源身份；真实ZIP校验由独立回归覆盖。"""
+        assert provider_arg is provider and configuration is settings
+        assert identity == {"doc_id": document.doc_id, "job_id": job.job_id, "ordinal": 1,
+            "batch_id": job.batch_id, "data_id": job.data_id, "file_hash": job.file_hash}
+        calls.append("raw")
+        return provider_arg.download_result(url), {"source_file_hash": identity["file_hash"]}
+
+    monkeypatch.setattr(jobs, "obtain_raw_result", obtain)
 
     def finish(session, document, job, parsed):
         """仅模拟已验证持久化边界，真实事务由隔离数据库用例覆盖。"""
@@ -95,7 +107,9 @@ def test_worker_downtime_done_is_recovered_before_local_deadline(context, monkey
 
     monkeypatch.setattr(jobs, "finish_job", finish)
     assert jobs.check_step(session, job.job_id, provider, settings) == ("done", 1)
-    assert calls == ["cache", "blocks"] and provider.queries == 1 and session.commits == 1
+    assert calls == ["raw", "cache", "blocks"] and provider.queries == 1 and session.commits == 1
+    assert job.parse_options["_raw_result"]["source_file_hash"] == job.file_hash
+    assert not settings.parsed_dir.exists()
     assert document.status == "CHUNKING"
 
 
@@ -187,10 +201,11 @@ def test_network_retry_keeps_batch_and_exhaustion_never_reposts(context, monkeyp
 
 
 def test_corrupt_archive_never_calls_cache_or_block_publish(context, monkeypatch):
-    """真实Adapter拒绝损坏ZIP字节，先校验后持久化；不解析PDF或改已有Block。"""
+    """真实归档校验拒绝损坏ZIP字节，未发布ZIP/成功缓存/Block，不解析PDF或访问业务缓存。"""
     settings, document, job, session = context
     provider = ProviderStub(job, "done")
-    monkeypatch.setattr(jobs, "local_file", lambda *args: SimpleNamespace(path="PRIVATE_PATH"))
+    monkeypatch.setattr(jobs, "local_file", lambda *args: SimpleNamespace(
+        path="PRIVATE_PATH", file_hash=job.file_hash))
     monkeypatch.setattr(jobs, "validate_local_file", lambda *args: None)
     monkeypatch.setattr(jobs, "page_geometry", lambda *args: {})
     calls = []
@@ -199,6 +214,8 @@ def test_corrupt_archive_never_calls_cache_or_block_publish(context, monkeypatch
     with pytest.raises(MinerUError) as error:
         jobs.check_step(session, job.job_id, provider, settings)
     assert error.value.code == "ZIP_INVALID" and not calls
+    assert not list(settings.parsed_dir.rglob("*.zip"))
+    assert not list(settings.parsed_dir.rglob("*.json"))
     assert not jobs.record_error(session, job.job_id, error.value, settings)
     assert document.status == "FAILED" and job.batch_id == "existing-batch"
 

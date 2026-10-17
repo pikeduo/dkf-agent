@@ -1,9 +1,13 @@
 """阶段33真实结构的最小Mock回归；仅编写，由用户执行，不读取正式原件。"""
 
 from copy import deepcopy
+import hashlib
+import json
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
+from mineru_samples import result_zip
 
 from app.services.mineru import jobs
 from app.services.mineru.adapter import merge_evidence_error, safe_merge_diagnostic
@@ -14,6 +18,39 @@ from app.services.document_processing import router_failure_codes
 from app.services import document_management as management
 from test_mineru_recovery import context, ProviderStub
 from test_mineru_table_merge import table_case, html
+
+
+def test_first_raw_archive_publish_initializes_paths_and_same_batch_is_reused(tmp_path):
+    """首次归档须先定位路径再写回执；随后同Batch只读复用，不重下载或覆盖。"""
+    from app.core.config import Settings
+    from app.services.mineru.raw_results import obtain_raw_result, load_raw_result
+    settings = Settings(_env_file=None, parsed_dir=tmp_path / "parsed")
+    archive = result_zip([{"type": "text", "page_idx": 0, "text": "Mock正文"}])
+    calls = []
+
+    def download(url):
+        """只返回内存Mock ZIP并记录次数，不读取URL或连接网络。"""
+        calls.append(url)
+        return archive
+
+    provider = SimpleNamespace(download_result=download)
+    identity = {"doc_id": uuid4(), "job_id": uuid4(), "ordinal": 1, "batch_id": "original-batch",
+        "data_id": "original-data", "file_hash": "a" * 64}
+    assert load_raw_result(settings, **identity) is None
+    result, record = obtain_raw_result(provider, None, settings, **identity)
+    expected = f"{identity['doc_id']}/mineru_raw/{identity['job_id']}/part-0001-original-batch.zip"
+    assert result == archive and record["zip_path"] == expected
+    assert record["sha256"] == hashlib.sha256(archive).hexdigest()
+    assert record["size_bytes"] == len(archive) and record["content_items"] == 1
+    assert record["source_file_hash"] == identity["file_hash"] and record["validation"] == "validated"
+    path = settings.parsed_dir / record["zip_path"]
+    receipt = path.with_suffix(".json")
+    assert path.read_bytes() == archive
+    assert json.loads(receipt.read_text(encoding="utf-8")) == record
+    timestamps = path.stat().st_mtime_ns, receipt.stat().st_mtime_ns
+    assert obtain_raw_result(provider, None, settings, **identity) == (archive, record)
+    assert load_raw_result(settings, **identity) == (archive, record)
+    assert calls == [None] and (path.stat().st_mtime_ns, receipt.stat().st_mtime_ns) == timestamps
 
 
 def test_layout_equation_wrapper_matches_v1_without_changing_v1_cells():

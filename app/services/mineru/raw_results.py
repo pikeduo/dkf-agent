@@ -84,7 +84,7 @@ def load_raw_result(settings, *, doc_id, job_id, ordinal, batch_id, data_id, fil
 
 def obtain_raw_result(provider, url, settings, *, doc_id, job_id, ordinal, batch_id, data_id,
                       file_hash):
-    """同Batch优先读取已校验归档；首次下载后保全原字节，不发布成功缓存。"""
+    """同Batch优先读归档；首次下载校验后在发布锁内确定路径及回执，不发布成功缓存。"""
     cache, limit = ParseCache(settings), settings.mineru_result_max_mb * 1024**2
     identity = {"doc_id": str(doc_id), "job_id": str(job_id), "ordinal": ordinal,
                 "batch_id": safe_identifier(batch_id), "data_id": safe_identifier(data_id),
@@ -99,11 +99,12 @@ def obtain_raw_result(provider, url, settings, *, doc_id, job_id, ordinal, batch
         log_event("mineru.result_downloaded", doc_id=doc_id, job_id=job_id,
                   batch_id=batch_id, size_bytes=len(archive))
         count = validate_archive(archive, limit)
-        record = identity | {"zip_path": path.relative_to(cache.root).as_posix(),
-            "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive),
-            "content_items": count, "validation": "validated"}
         with cache_guard(cache.root):
             path, receipt = result_paths(cache, doc_id, job_id, ordinal, batch_id)
+            # load_raw_result的局部路径不属于当前函数；首次发布须先安全定位，再构造回执。
+            record = identity | {"zip_path": path.relative_to(cache.root).as_posix(),
+                "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive),
+                "content_items": count, "validation": "validated"}
             if path.exists() or receipt.exists():
                 if (not path.exists() or not receipt.exists() or cache.read_bytes(path, limit) != archive
                         or json.loads(cache.read_bytes(receipt, 16384)) != record):
