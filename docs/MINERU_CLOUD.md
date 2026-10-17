@@ -143,7 +143,7 @@ Get-Content -Encoding UTF8 results/mineru_completeness_acceptance_01.json
 
 预期而非已执行：文本恢复1处、表格恢复3组、2263 Block；`frozen_completeness_guard=FAIL`（131/188）、`guard_evaluation_scope=proposed_coverage_only`、新`completeness_guard=PASS`、`status=ADAPTER_PASS_NOT_RECOVERED`。报告保留新旧覆盖版本、两套决策Hash、逐页变更、原冻结Normalizer/拟用版本/Adapter身份，并明确coverage比较不改Normalizer。缺少coverage开关仍按旧冻结要求FAIL/COMPLETENESS；两个开关都不加则旧Normalizer在读取ZIP前CACHE_CONFIG_CHANGED。
 
-诊断成功也不恢复FAILED Job、不标Cache READY、不继续第二片；后续仍须单独授权并实现前述可审计恢复方案。本轮无数据库迁移、环境变量、新依赖或真实MinerU请求。
+用户已执行该只读诊断并确认`ADAPTER_PASS_NOT_RECOVERED`。诊断不恢复FAILED Job、不标Cache READY、不继续第二片。当前不开发旧Job恢复框架，转为下述[分片到原始ZIP验收](#只验收分片到原始zip)；无数据库迁移、新环境变量或依赖。
 
 先运行 Mock 单测（不需要数据库、Worker、GPU或云端）：
 
@@ -442,7 +442,7 @@ ORDER BY d.file_name, b.block_index;
 
 ## 超限 PDF：连续分片
 
-分片主链路仍待真实原件/云端验收。Windows保存句柄修复已按本轮单独授权执行8项隔离离线用例和51项相邻Mock回归；**未执行AES真实原件分片、云API或业务数据库操作**，不表示阶段32解析/评测通过。
+Windows句柄修复及首片文本/表格恢复已保留，用户已确认首片Adapter/新覆盖Guard通过（2263 Block）。当前只补齐两片云端原始ZIP获取验收；本轮未执行真实原件分片、云API或业务数据库操作，不表示阶段32解析/评测通过。
 
 ### 范围、身份和限制
 
@@ -456,7 +456,9 @@ ORDER BY d.file_name, b.block_index;
 
 每个短任务只推进当前片，复用原Provider：申请前提交意图，PUT前提交Batch，查询/下载错误沿用同Batch和原Redis共享限流。按实际每片一个文件预留额度；确认Batch的不同片计入`mineru_file_submit_count`，未知POST可能已计费，必须人工核对，不能当成确定零费用。
 
-片结果先通过局部Guard，保存原ZIP/content_list/可选full.md/标准化块到内容缓存，再保存不可变代次指针和游标。SQL回滚可恢复同片指针，不另POST；完全相同片Hash、模型/参数/归一化/分片策略可跨原件复用。Force Reparse只绕过原件级成功入口，**仍有效的成功片不重复收费**；只有确实缺少结果且已明确允许新收费的片才提交。普通重试遇到收费历史但结果缺失安全停止。
+下载后先核对全部ZIP成员CRC、路径/展开预算和唯一非空V1结构列表，精确原字节及来源回执独立保存在`PARSED_DIR/<doc_id>/mineru_raw/<job_id>/part-NNNN-<batch_id>.zip/.json`。回执包含来源片Hash、Batch/Data ID、ZIP SHA256/字节数；同Batch仅复用完整一致的归档，冲突/损坏不覆盖、不因此再POST。该归档不是成功Parse Cache；Adapter/Guard失败及SQL回滚都不删除原ZIP，日志分开记录下载、归档、转换及落库。原有旧Job不会据磁盘回执自动恢复。
+
+随后片结果通过Adapter/局部Guard，保存原ZIP/content_list/可选full.md/标准化块到成功缓存，再保存不可变代次指针和游标。SQL回滚可恢复同片指针，不另POST；完全相同片Hash、模型/参数/归一化/分片策略可跨原件复用。Force Reparse只绕过原件级成功入口，**仍有效的成功片不重复收费**；只有确实缺少结果且已明确允许新收费的片才提交。普通重试遇到收费历史但结果缺失安全停止。
 
 所有片成功并核对原件Hash/分片Hash/页覆盖后，按原页排序且同页稳定保留Adapter原序，整体保留table/formula/text/bbox/source；Block ID绑定原doc_id、缓存身份和原位置，不含消息ID。映射公式：`原物理页 = page_start + 片内1-based页 - 1`；OHR原0-based证据页仅在评测侧+1，不改官方数据。不得全局按y排序或让临时局部页成为引用。
 
@@ -464,7 +466,43 @@ ORDER BY d.file_name, b.block_index;
 
 活动消息丢失可用原入口或文档级Retry续同Job。显式Retry可恢复原已上传Batch的JOB_TIMEOUT/传输错误、仍有效签名链接的原Batch PUT，以及从未提交片的频控/缓存占用等待；保留成功片和网络预算，不重建收费身份。远端失败、SUBMIT_UNCERTAIN、坏ZIP/来源/缓存不自动复活，先核对平台、备份和原结果；确需新解析再由管理员确认Force费用。单片观察窗口与重试预算有限，成功推进到下一片才重置本片窗口，管理cloud窗口相应续开；不会自动复活已失败的管理任务。
 
-### 用户手动验证（先Mock，真实执行另行确认）
+### 只验收分片到原始ZIP
+
+`scripts/mineru_pdf_split_acceptance.py`是精简的隔离云链路验收入口：复用生产`prepare_manifest/build_parts/render_range`、`MinerUCloudProvider`、原参数与Redis共享限流、原始ZIP归档器。它不连接业务数据库、不修改旧Job或Cache READY、不调用Adapter/Chunk/Embedding/Index。现有生产`jobs.check_step`仍使用同一归档器及原分片状态机；本入口只把云端ZIP获取与后续转换分开验证，不替代业务入库。
+
+默认仅检查本地PDF页数/Hash并打印预览，不拆文件或联网。执行必须同时指定`--execute --allow-cloud`，实际分片数不能超过`--max-files`，否则首次POST之前停止。输出目录必须全新，不覆盖旧报告；不支持通过重跑自动恢复/再付费。`doc_id/job_id`仅为隔离运行的来源标识，不代表创建了数据库记录。
+
+仅需用户已部署的Redis（共享限流）、有效`MINERU_API_TOKEN`和本地依赖；**不需要API、CPU/GPU Worker、PostgreSQL或模型**。以下原件路径是已有257页AES原件，先核对预览的页数和Hash；若另存原件，仅替换`--pdf`，不可编辑原文件：
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+python scripts/mineru_pdf_split_acceptance.py --pdf data/uploads/ead578f3-b18d-44c9-befb-ebf24fd9b5f0.pdf --output results/mineru_split_cloud_01 --max-files 2
+```
+
+预期`DRY_RUN`、257页、原Hash=`9c5de2227534c4d6bf3d805f635bad5d82eddf8e4183a85a3d1311b48b50291d`、最少2个云文件任务。实际按原文件生成200页和57页，每片还要通过实际字节/Hash/几何校验。本次是**全新2个文件、通常2个Batch**，不是复用已有首片Batch；旧首片可能已收费，本次会额外计费，未知提交/超时也不保证未收费。只有用户确认本原件外传、全部两片费用后才执行下一命令；Codex不自行发起：
+
+```powershell
+python scripts/mineru_pdf_split_acceptance.py --pdf data/uploads/ead578f3-b18d-44c9-befb-ebf24fd9b5f0.pdf --output results/mineru_split_cloud_01 --max-files 2 --execute --allow-cloud --timeout 7200 --poll-interval 15
+$result = Get-Content results/mineru_split_cloud_01/report.json -Raw -Encoding UTF8 | ConvertFrom-Json
+$result | Select-Object status, confirmed_submissions, adapter_status, business_database_modified
+$result.parts | Format-Table ordinal,page_start,page_end,batch_id,upload_status,parse_status,zip_status,zip_sha256 -AutoSize
+$result.parts | Select-Object ordinal,zip_path,zip_sha256 | Format-List
+```
+
+预期`CLOUD_ZIP_PASS`、两片`uploaded/done/validated`，分别1～200/201～257页；报告给出ZIP绝对路径、SHA256、大小和结构条目数。`adapter_status=NOT_RUN`、业务库未修改、`business_parse_success=false`是本轮正确边界，不是失败；不能据此宣称Adapter/READY通过。报告每次请求前后更新，按片只POST一次，正常状态GET有界轮询；CLI允许等待，不改变Celery短任务/countdown机制。
+
+失败返回非零退出码和`INCOMPLETE`，保留已取得的原ZIP/Batch。`JOB_TIMEOUT`只代表本地停止等待，`SUBMIT_UNCERTAIN`可能已收费；**先查报告和MinerU平台，不换目录盲目重跑、不Force Reparse、不改旧SQL状态**。下载/CRC/结构错误单独记入`zip_status/error_code`；第一片转换问题不会阻挡该隔离入口取第二片ZIP，因为本入口完全不调用Adapter。生产主链路依旧严格：Adapter失败则整份失败，不以ZIP成功冒充解析成功。
+
+用户复测纯Mock（不生成真实PDF、不连接数据库/Redis/云端）：
+
+本轮实际结果：分片/Provider完整流程及相邻元数据回归65 passed；新日志角色/归档脱敏定向17 passed。首次pytest受系统临时目录权限阻断，改用仓库results下全新临时目录后通过；未修改系统权限，Mock不能替代真实两片云端验收。
+
+```powershell
+python -m pytest tests/test_mineru_pdf_cloud_acceptance.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py -q -ra -p no:cacheprovider
+```
+
+### 用户手动验证（完整业务链路另行确认）
 
 #### Windows保存句柄修复与离线验收
 

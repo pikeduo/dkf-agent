@@ -95,12 +95,26 @@ def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
     assert logs.safe_fields({"provider": "PRIVATE"}) == {}
 
 
+def test_mineru_raw_result_events_keep_separate_statuses_without_private_payloads(events):
+    """原始ZIP归档和Adapter失败分开记录，只包含标识/摘要，不泄漏签名地址或正文。"""
+    doc_id, job_id = uuid4(), uuid4()
+    for event in ("mineru.raw_result_saved", "mineru.raw_result_reused",
+                  "mineru.raw_result_rejected", "mineru.adapter_failed"):
+        logs.log_event(event, doc_id=doc_id, job_id=job_id, batch_id="batch-1", file_index=1,
+            size_bytes=123, error_code="MERGE_EVIDENCE", token="PRIVATE_TOKEN", url="PRIVATE_URL",
+            zip_path="PRIVATE_PATH", body="PRIVATE_BODY")
+    output = records(events)
+    assert len(output) == 4 and all(row["doc_id"] == str(doc_id) for row in output)
+    assert "PRIVATE" not in events.getvalue() and "尚不代表业务解析成功" in events.getvalue()
+
+
 @pytest.mark.parametrize("role,label", [
     ("api", "API"), ("worker", "Worker"), ("dense-cli", "Dense CLI"),
     ("bm25-cli", "BM25 CLI"), ("hybrid-cli", "Hybrid CLI"),
     ("rerank-cli", "Reranker CLI"), ("retrieval-acceptance", "检索验收"),
     ("rag-cli", "RAG CLI"),
     ("mineru-diagnostic-cli", "MinerU Diagnostic CLI"),
+    ("mineru-split-cli", "MinerU Split CLI"),
     ("evidence-cli", "Evidence CLI"),
     ("formula-cli", "Formula CLI"),
     ("formula-binding-cli", "Formula Binding CLI"),

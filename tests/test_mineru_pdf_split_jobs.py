@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4, uuid5
 
 import pytest
+from mineru_samples import result_zip
 
 from app.core.config import Settings
 from app.parsers.routing.contracts import Inspection, PageSignals, StructuralSignals
@@ -83,9 +84,9 @@ class ProviderStub:
                 "full_zip_url": "https://mineru.net/private-result"}
 
     def download_result(self, url):
-        """只输出 Adapter Stub 的字节标记，不是伪造可验收的 OCR 文档。"""
+        """返回内存 Mock 结构化 ZIP，验证独立归档；不伪造真实 OCR 验收。"""
         self.downloads += 1
-        return b"MOCK_ARCHIVE"
+        return result_zip()
 
 
 @pytest.fixture
@@ -207,6 +208,61 @@ def test_all_parts_complete_before_atomic_original_document_blocks(context):
     assert len(c.provider.posts) == 2
     # 原 Index 仍是 READY 唯一提交者；这里不伪造 GPU/索引成功。
     assert c.document.status != "READY"
+    parts = split.checked_manifest(c.document, c.job).parts
+    for part in parts:
+        raw = part.raw_result
+        assert raw["validation"] == "validated" and raw["batch_id"] == part.batch_id
+        archive = ParseCache(c.settings).root / raw["zip_path"]
+        assert split.file_digest(archive) == raw["sha256"]
+
+
+def test_adapter_failure_keeps_downloaded_zip_without_business_success(context, monkeypatch):
+    """Adapter拒绝后回滚业务SQL，仍能取得同Batch原始ZIP及Hash；不写半份Block或提交第二片。"""
+    import json
+
+    c = context
+
+    def reject(self, archive, **kwargs):
+        """模拟结构合法但来源无法证明的转换错误，不运行实际 Adapter。"""
+        raise MinerUError("MERGE_EVIDENCE", "安全来源错误")
+
+    monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", reject)
+    submit(c)
+    batch = c.job.batch_id
+    with pytest.raises(MinerUError) as error:
+        check(c)
+    c.session.rollback()
+    assert not jobs.record_error(c.session, c.job.job_id, error.value, c.settings)
+    root = ParseCache(c.settings).root
+    receipts = list(root.glob(f"*/mineru_raw/*/part-0001-{batch}.json"))
+    assert len(receipts) == 1
+    raw = json.loads(receipts[0].read_text(encoding="utf-8"))
+    archive = root / raw["zip_path"]
+    assert raw["validation"] == "validated" and raw["batch_id"] == batch
+    assert split.file_digest(archive) == raw["sha256"] and raw["size_bytes"] == archive.stat().st_size
+    assert c.document.status == "FAILED" and c.session.blocks == ["OLD_BLOCK"]
+    assert len(c.provider.posts) == 1 and c.provider.downloads == 1
+    assert c.job.state == "failed" and not c.job.is_active
+
+
+def test_same_batch_raw_archive_is_reused_after_adapter_retry(context, monkeypatch):
+    """已保存ZIP但后续转换暂时失败时，只复查同Batch，不重新下载/POST或覆盖ZIP。"""
+    c = context
+    original = jobs.MinerUResultAdapter.normalize
+
+    def reject(self, archive, **kwargs):
+        """模拟可恢复的本地I/O错误，不发HTTP。"""
+        raise MinerUError("FILE_IO", "安全本地错误", retryable=True)
+
+    submit(c)
+    monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", reject)
+    with pytest.raises(MinerUError) as error:
+        check(c)
+    c.session.rollback()
+    assert jobs.record_error(c.session, c.job.job_id, error.value, c.settings)
+    monkeypatch.setattr(jobs.MinerUResultAdapter, "normalize", original)
+    assert check(c) == ("submit", 0)
+    assert len(c.provider.posts) == c.provider.downloads == 1
 
 
 def test_single_failed_part_retains_successful_cache_and_original_blocks(context):

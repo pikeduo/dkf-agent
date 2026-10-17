@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**32数据冻结保留；首片既有Adapter v3通过2263 Block及文本/表格恢复不变。已只读确认131/188页仅装饰横线，新增覆盖v2白名单和显式只读冻结比较；本轮测试仅编写，完整ZIP/Guard待用户执行。旧Job仍未恢复、无新批次，不进入33～36。**
+当前阶段：**32数据冻结保留；用户已确认首片Adapter v3及新覆盖Guard通过（2263 Block）。当前只验收PDF分片→MinerU→原始ZIP：补独立归档及隔离入口，定向Mock65项/日志17项通过；不扩展旧Job恢复，真实两片提交待单独授权，不进入33～36。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 多选上传/日志/PDF分片与Windows句柄/文本表格恢复保留；新增严格装饰横线覆盖v2及独立只读比较，未知绘图仍必需；新Mock/完整Guard与旧Job恢复待验收 |
+| 配套功能 | 多选上传/日志/PDF分片与Windows句柄/文本表格恢复保留；首片2263 Block/新Guard用户已确认；补Adapter前原ZIP归档和只取ZIP验收，真实两片云链路待验收 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
@@ -159,6 +159,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
 - POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
 - 每个云结果ZIP的唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
+- 云结果先校验全部ZIP成员CRC及唯一非空结构列表，在PARSED_DIR独立保留原字节/Hash/Batch回执，再运行Adapter；转换失败不删原ZIP，也不发布成功缓存或标记业务成功。隔离验收CLI仅复用分片器/Provider/共享限流取得原ZIP，不操作旧Job/业务库、不运行Adapter和后续模型；默认dry-run，真实执行须另行授权全部新分片费用。
 - 文本合并只在父块/Span唯一、完整V1字符可核对时恢复；仅跨严格验证的header/footer/page_number，按非连续原索引写回，保留边界/原页/bbox/ID，不越过其他正文/结构块；跨页文字须相邻且cross_page=true。表格用table_body删除标记、相邻源表及HTML行/单元格/跨度/网格证明切取V1原行，caption/footnote须唯一匹配后归还，不从layout/V2/Markdown补字或复制整图。未知/真空结构仍失败。
 - 当前Normalizer为v3，旧v1/v2 Whole/视觉/分片缓存隔离，旧付费Job默认拒绝版本变化；只有诊断CLI显式允许v2→v3内存比较，报告保留两套身份，不修改Job或发布缓存。Completeness缺页必须失败，不因Adapter通过删除required页、造块或自动追加Batch；不自动复活FAILED、回填旧ZIP或新增收费。
 

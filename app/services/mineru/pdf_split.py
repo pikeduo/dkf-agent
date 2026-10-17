@@ -46,6 +46,8 @@ class PDFPart(BaseModel):
     submitted_at: str | None = None
     submission_started_at: str | None = None
     result: dict | None = None
+    # 原始 ZIP 已取得与 Adapter/Guard 成功是两件事，失败时仍保留下载来源。
+    raw_result: dict | None = None
     error_code: str | None = None
 
 

@@ -41,6 +41,7 @@ ROLE_LABELS = MappingProxyType({
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
     "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
+    "mineru-split-cli": "MinerU Split CLI",
     "unknown": "未知进程",
 })
 FIELDS = {
@@ -172,6 +173,10 @@ EVENT_LABELS = {
     "mineru.upload_complete": "MinerU 原件上传检查点已保存",
     "mineru.remote_state": "收到 MinerU 远端解析状态",
     "mineru.result_downloaded": "MinerU 结果 ZIP 下载完成",
+    "mineru.raw_result_saved": "MinerU 原始 ZIP 已校验归档，尚不代表业务解析成功",
+    "mineru.raw_result_reused": "复用同批次原始 ZIP，未重新下载或提交",
+    "mineru.raw_result_rejected": "原始 ZIP 校验或归档失败，未覆盖既有结果或追加批次",
+    "mineru.adapter_failed": "原始 ZIP 已保留，Adapter 转换失败",
     "mineru.adapter_validated": "MinerU 解析结果结构校验通过",
     "mineru.merge_restored": "MinerU 合并正文已按证据恢复原页与位置，尚未落库",
     "mineru.merge_rejected": "MinerU 合并正文的来源证据不足，未保存不完整结果",

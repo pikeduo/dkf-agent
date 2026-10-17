@@ -24,6 +24,7 @@ from app.services.document_processing import (
 from app.services.mineru.adapter import MinerUResultAdapter, page_geometry
 from app.services.mineru.errors import MinerUError, api_error
 from app.services.mineru.provider import LocalFile, validate_local_file
+from app.services.mineru.raw_results import obtain_raw_result
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
 from app.parsers.hybrid import BundleManifest
 from app.services.xlsx_primary import prepare_primary, complete_primary
@@ -484,7 +485,7 @@ def result_failure(payload: dict) -> MinerUError:
 def check_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """每次仅查询当前片；全片完成后原子写块，拒绝部分成功或改换冻结身份。"""
+    """每次仅查询当前片；先独立保全 ZIP，再校验全片并原子写块，拒绝部分成功。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -525,31 +526,41 @@ def check_step(
         sync_current(document, job, settings)
         session.commit()
         return "check", settings.mineru_poll_interval_seconds
-    archive = provider.download_result(result.get("full_zip_url"))
-    log_event(
-        "mineru.result_downloaded",
-        doc_id=document.doc_id,
-        job_id=job_id,
-        size_bytes=len(archive),
-    )
     source = local_file(document, job, settings)
     validate_local_file(source)
+    ordinal = 1
     if "_pdf_split" in job.parse_options:
         # SQL 提交失败时沿用同片 Batch；片结果的 ID 不依赖临时文件名或 Celery 消息。
         from app.services.mineru.pdf_split import checked_manifest, piece_recipe
-        from app.services.mineru.pdf_split_jobs import current_part
-        part = current_part(checked_manifest(document, job))
+        from app.services.mineru.pdf_split_jobs import current_part, save_manifest
+        manifest = checked_manifest(document, job)
+        part = current_part(manifest)
+        ordinal = part.ordinal
         adapter_identity = key_for(piece_recipe(job, part))
     else:
         adapter_identity = job.file_hash + ":" + job.options_hash
-    parsed = MinerUResultAdapter().normalize(
-        archive,
-        doc_id=document.doc_id,
-        file_name=document.file_name,
-        file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
-        geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
-        identity=adapter_identity,
-    )
+    archive, raw_result = obtain_raw_result(provider, result.get("full_zip_url"), settings,
+        doc_id=document.doc_id, job_id=job_id, ordinal=ordinal, batch_id=job.batch_id,
+        data_id=job.data_id, file_hash=source.file_hash)
+    if "_pdf_split" in job.parse_options:
+        part.raw_result = raw_result
+        save_manifest(job, manifest, settings)
+    else:
+        job.parse_options = job.parse_options | {"_raw_result": raw_result}
+    # 不新增事务边界或松开文档锁；SQL回滚不删除独立ZIP/JSON回执，不发布成功缓存。
+    try:
+        parsed = MinerUResultAdapter().normalize(
+            archive,
+            doc_id=document.doc_id,
+            file_name=document.file_name,
+            file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
+            geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
+            identity=adapter_identity,
+        )
+    except MinerUError as error:
+        log_event("mineru.adapter_failed", doc_id=document.doc_id, job_id=job_id,
+                  batch_id=job.batch_id, file_index=ordinal, error_code=error.code)
+        raise
     log_event(
         "mineru.adapter_validated",
         doc_id=document.doc_id,

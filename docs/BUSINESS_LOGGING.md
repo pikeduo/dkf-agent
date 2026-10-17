@@ -29,6 +29,7 @@
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |
+| mineru-split-cli | MinerU Split CLI |
 | unknown / 未注册角色 | 未知进程 |
 
 API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角色；预置导入使用preset-cli；联合冒烟的检索步骤使用retrieval-acceptance。角色变化只改固定前缀中的显示名称，白名单摘要、脱敏、真实PID、每日合并、上下文和异常降级不变。更新代码后用户重启相应进程，旧日志不改写。
@@ -63,6 +64,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `mineru.http_started / http_response / http_failed` | 官方 API 请求摘要；PUT/ZIP 下载使用阶段名称而非签名 URL，HTTP 成功不代表业务 envelope 成功 |
 | `mineru.batch_created / upload_complete / remote_state` | 已提交批次检查点、上传完成检查点、收到供应商单文件状态；远端 done 仍可能下载或落库失败 |
 | `mineru.result_downloaded / adapter_validated / blocks_persisted` | ZIP 下载完成、统一结构校验通过、Block 与任务/文档状态已事务提交 |
+| `mineru.raw_result_saved / raw_result_reused / raw_result_rejected / adapter_failed` | 全ZIP CRC/结构校验并独立归档、复用同Batch、归档拒绝、保留原ZIP但转换失败；只记UUID/Batch/片号/字节/数量/安全错误，路径和Hash在本地回执而非日志；不等于业务成功。隔离云验收入口role为mineru-split-cli |
 | `mineru.split_planned / split_piece_done / split_manifest_failed / split_checkpoint_invalid` | 超限PDF计划已提交/成功片缓存/磁盘副本失败/坏检查点安全停止；仅UUID、数量与安全码。实际费用按片Batch去重，父Job行数不是云文件数，提交不确定须平台核对 |
 | `mineru.split_io_failed` | 分片本地I/O失败；仅安全错误码、异常类型和固定stage/step源码位置，不记录异常原文/文件路径。保存/发布错误为PDF_SPLIT_WRITE，读取/生成/校验错误为PDF_SPLIT_IO |
 | `mineru.merge_restored / merge_rejected` | 无损恢复/安全拒绝；对外仍MERGE_EVIDENCE，内部step固定子码、stage固定项目函数/结构角色，附原数组item_index、局部1-based page、受限数量和异常类型；不输出正文/bbox明细，恢复不等于落库 |

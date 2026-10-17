@@ -424,6 +424,8 @@ MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000�
 
 分片文件和检查点位于共享 `PARSED_DIR/<doc_id>/pdf_split/<job_id>/`，需额外磁盘空间并随完整缓存备份；Windows CPU Worker 使用 `--pool=solo --concurrency=1`，更新后由用户重启。接口仍只返回原文档，原页码/文件 Hash 不变。恢复、费用核对与验收见 [超限 PDF 分片](docs/MINERU_CLOUD.md#超限-pdf连续分片)。复杂 XLSX 的 Native/云质量仍须单独对照，不能从其他格式推断。
 
+云端原始结果在 Adapter 转换前独立保存于 `PARSED_DIR/<doc_id>/mineru_raw/<job_id>/`，包含精确ZIP、SHA256及Batch来源回执；转换失败仍保留，ZIP取得不等于业务解析成功。仅验证分片上传/解析/ZIP下载、不运行后续入库的命令见[原始ZIP验收](docs/MINERU_CLOUD.md#只验收分片到原始zip)，默认只读，实际执行会创建新的收费批次，须先确认权限及预算。
+
 ### 状态查询与恢复
 
 - 文档详情是业务状态依据；解析完成为Document=CHUNKING、云job=done，新上传继续经过EMBEDDING/INDEXING至READY。云Celery SUCCESS或delegated_to_mineru只代表短步骤，不代表全链路完成；中间状态可能很快经过。
