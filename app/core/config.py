@@ -61,7 +61,8 @@ class Settings(BaseSettings):
     rag_max_context_chars: int = Field(default=60000, ge=1024, le=100000)
     embeddings_dir: Path = Path("data/embeddings")
     upload_dir: Path = Path("data/uploads")
-    max_upload_size_mb: int = Field(default=50, gt=0)
+    # 单文件默认200 MiB，沿用现有MB配置的1024²计量，前后端共用同一限制。
+    max_upload_size_mb: int = Field(default=200, gt=0)
     # 解析缓存与原件分开管理；API/Worker 必须共享该本地目录，不自动清理历史结果。
     parsed_dir: Path = Path("data/parsed")
     parse_cache_max_entry_mb: int = Field(default=768, ge=64, le=2048)

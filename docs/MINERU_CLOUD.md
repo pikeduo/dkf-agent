@@ -344,7 +344,7 @@ ORDER BY d.file_name, b.block_index;
 
 ### 范围、身份和限制
 
-- Router依旧决定Native/Whole/Hybrid；仅最终需要MinerU的PDF超过200页或200 MB时进入分片。分片保守取十进制200,000,000字节，不放宽Provider原边界。完整Native不拆，普通云PDF与Office/图片流程不变。原上传上限默认50MiB；大原件需要用户评估后手动配置，不能借分片绕过上传/预检限制。
+- Router依旧决定Native/Whole/Hybrid；仅最终需要MinerU的PDF超过200页或200 MB时进入分片。分片保守取十进制200,000,000字节，不放宽Provider原边界。完整Native不拆，普通云PDF与Office/图片流程不变。原上传上限默认200MiB（MAX_UPLOAD_SIZE_MB=200）；沿用项目1024²计量，和云端分片限制分别校验，不能借分片绕过上传/预检限制。
 - Worker先为全部原页规划连续闭区间，优先尝试200页；实际生成文件大于200MB时有界二分缩小，每片最多10次尝试。接受前核对实际字节和SHA256，生成器保留原裁剪框/旋转/视口；任何单页仍超限均在第一个云POST之前停止。当前安全上限128片，原Router页数上限仍默认1000、可配置至2000；超限明确失败，不丢页。
 - 原件只读，Document.doc_id/file_hash/file_name和官方QA完全不变；无子Document、无新表/迁移/环境变量。一个父Parse Job用现有JSONB的`_pdf_split_request`、`_pdf_split`保存版本/原Hash/总页数/每片原页范围、Hash、字节、状态和收费身份。
 - 每片有稳定的data_id和逻辑task_id；后者不是Celery消息ID。父Job/task_id仍是当前原文档解析代次，父行batch_id/data_id/upload_complete表示**当前片**，历史片必须查账本，不把父Job行数当费用。

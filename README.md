@@ -76,7 +76,7 @@ MINERU_MODEL_VERSION=vlm
 
 # 存储与可选功能
 UPLOAD_DIR=data/uploads
-MAX_UPLOAD_SIZE_MB=50
+MAX_UPLOAD_SIZE_MB=200
 PARSED_DIR=data/parsed
 PARSE_CACHE_MAX_ENTRY_MB=768
 EMBEDDINGS_DIR=data/embeddings
@@ -94,7 +94,7 @@ HYBRID_MAX_IMAGE_MB=16
 
 - 替换数据库密码，URL 中特殊字符需百分号编码；真实密钥和 `.env` 不提交仓库。
 - Redis 逻辑库 0/1/2 分别用于应用、消息、结果；三个 URL 指向同一本地服务，未配置 Celery URL 时使用 REDIS_URL。
-- API/Worker 使用同一数据库，并能读写同一原件目录；UPLOAD_DIR 相对项目根目录，默认单文件上限 50 MiB。
+- API/Worker 使用同一数据库，并能读写同一原件目录；UPLOAD_DIR 相对项目根目录，默认单文件上限 200 MiB（MAX_UPLOAD_SIZE_MB=200，沿用1024²字节计量）。
 - API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
 - Native 解析/切片无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token。文档向量化需要本地 BGE-M3、CUDA GPU 和 GPU Worker；不需要 DeepSeek Key，不下载 Reranker。
 - API/GPU Worker 共用可读写的 EMBEDDINGS_DIR，默认 data/embeddings；向量文件含业务衍生数据，应限制访问并备份，不入仓库。每代次结果上限 512 MiB，无自动清理；模型和向量目录自定义到仓库内时需自行配置忽略规则。
@@ -388,7 +388,7 @@ Get-Content (".\logs\knowledge-service-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd
 
 ### 上传与选择解析方式
 
-支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、CSV、TXT、MD、JPG、JPEG、PNG；服务端检查真实内容和同库 SHA256 去重，不接受空文件或伪装格式。默认单文件 50 MiB、每次 1～50 份。
+支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、CSV、TXT、MD、JPG、JPEG、PNG；服务端检查真实内容和同库 SHA256 去重，不接受空文件或伪装格式。默认单文件 200 MiB、每次 1～50 份。
 
 Swagger 点击 Try it out，填写 kb_id，打开“选择文件”窗口单选或 Ctrl/Shift 多选；选后显示名称/大小初检，确认再 Execute。只有一个文件控件，不需 Add string item；最终内容校验由服务端负责。
 
@@ -420,7 +420,7 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 Native 文本严格解码 UTF-8、BOM UTF-16/32、GB18030；CSV 支持引号字段、空值，不支持不等宽行。DOCX 提取正文/表格；XLSX 按 Sheet 提取单元格、保留公式不执行，不解析图片/图表。Native Office/文本为逻辑页 1，PDF 为物理页；云 Office 为转换后逻辑页、bbox 为空，不声称原件排版坐标。
 
-MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000字节）。**只有实际走 MinerU 的超限 PDF** 才由 CPU Worker 按连续原页自动分片；每片按生成文件实际字节校验，所有片成功后以原 doc_id/物理页整体入库。Native 可完整解析的 PDF 不拆；Office/图片不套用 PDF 分片。原始上传仍受 `MAX_UPLOAD_SIZE_MB`（默认50）和 Router 资源限制，不自动放宽。分片会增加云文件任务/费用，须先确认整份原件外传及全部分片预算；失败不降级 Native、不盲目补发收费批次。
+MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000字节）。**只有实际走 MinerU 的超限 PDF** 才由 CPU Worker 按连续原页自动分片；每片按生成文件实际字节校验，所有片成功后以原 doc_id/物理页整体入库。Native 可完整解析的 PDF 不拆；Office/图片不套用 PDF 分片。原始上传仍受 `MAX_UPLOAD_SIZE_MB`（默认200，单位MiB）和 Router 资源限制；上传限制与云端分片限制分别校验。分片会增加云文件任务/费用，须先确认整份原件外传及全部分片预算；失败不降级 Native、不盲目补发收费批次。
 
 分片文件和检查点位于共享 `PARSED_DIR/<doc_id>/pdf_split/<job_id>/`，需额外磁盘空间并随完整缓存备份；Windows CPU Worker 使用 `--pool=solo --concurrency=1`，更新后由用户重启。接口仍只返回原文档，原页码/文件 Hash 不变。恢复、费用核对与验收见 [超限 PDF 分片](docs/MINERU_CLOUD.md#超限-pdf连续分片)。复杂 XLSX 的 Native/云质量仍须单独对照，不能从其他格式推断。
 

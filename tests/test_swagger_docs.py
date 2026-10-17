@@ -1,6 +1,7 @@
 """Swagger 多选插件的页面集成测试，不写库、不投递任务或调用云 API。"""
 
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -64,6 +65,20 @@ def test_docs_expose_only_upload_size_configuration(monkeypatch):
     assert '"dkfUploadMaxBytes": 7340032' in html
     for secret in ["SECRET_TOKEN_FOR_TEST", "SECRET_PASSWORD", "private-upload-dir"]:
         assert secret not in html
+
+
+def test_default_upload_limit_is_200_mib_in_swagger(monkeypatch):
+    """默认上限为200MiB且Swagger初检一致；不读本机配置、不生成大文件或上传。"""
+    limit_mb = Settings.model_fields["max_upload_size_mb"].default
+    assert limit_mb == 200
+
+    def configured():
+        """仅提供页面所需的大小元数据，避免加载本地真实密钥。"""
+        return SimpleNamespace(max_upload_size_mb=limit_mb)
+
+    monkeypatch.setattr("app.api.docs.get_settings", configured)
+    html = docs_request("/docs").text
+    assert '"dkfUploadMaxBytes": 209715200' in html
 
 
 def test_static_plugin_is_available_and_docs_routes_stay_hidden():
