@@ -389,6 +389,63 @@ def test_failed_only_lost_retry_response_is_observed_without_second_write(tmp_pa
     assert result[data["documents"][1]["file_id"]]["execution_status"] == "NOT_ATTEMPTED"
 
 
+def test_retry_http_409_is_not_accepted_as_upload_deduplication():
+    """同一HTTP客户端上传409可去重，但管理Retry的409必须明确拒绝；不重发请求。"""
+    import httpx
+    calls = []
+
+    def respond(request):
+        """仅HTTPX内存传输，禁止真实网络，原响应正文也不进入安全错误。"""
+        calls.append(request.url.path)
+        return httpx.Response(409, json={"detail": "PRIVATE_SERVER_DETAIL"})
+
+    api = runtime.API("http://127.0.0.1:8000", client=httpx.Client(base_url="http://127.0.0.1:8000/",
+        transport=httpx.MockTransport(respond)))
+    try:
+        with pytest.raises(common.Stage33Error, match="RETRY_HTTP_409") as error:
+            api.retry(uuid4())
+        assert "PRIVATE" not in str(error.value) and len(calls) == 1
+        assert api._post("api/admin/knowledge-bases/mock/documents") == 409
+    finally:
+        api.close()
+
+
+def test_retry_rejection_survives_snapshot_and_prints_actual_failure(tmp_path, capsys):
+    """终态观察不能覆盖丢失409原因；不得用仅有READY总数的循环输出代替失败明细。"""
+    data, kb, now, calls = inputs(2), uuid4(), [0], []
+    row = ready(data["documents"][0], kb) | {"status": "FAILED", "error_code": "MERGE_EVIDENCE"}
+    rows = {data["documents"][0]["sha256"]: row}
+    common.write_json(tmp_path / "import_checkpoint.json", recovery_checkpoint(data, rows))
+
+    def reader(kb_id):
+        """只返回稳定失败的内存快照。"""
+        return deepcopy(rows)
+
+    def retry(doc_id):
+        """模拟API明确拒绝，不触发任何Worker或云调用。"""
+        calls.append(doc_id)
+        raise common.Stage33Error("RETRY_HTTP_409")
+
+    def clock():
+        """读取虚拟时间。"""
+        return now[0]
+
+    def pause(seconds):
+        """推进时间，不执行真实等待。"""
+        now[0] += seconds
+
+    result = runtime.import_all(data, tmp_path, kb, SimpleNamespace(retry=retry),
+        retry_failed_only=True, reader=reader, clock=clock, pause=pause, timeout=5, poll_interval=1)
+    item = result[data["documents"][0]["file_id"]]
+    assert item["retry_http_status"] == 409 and item["retry_request_error"] == "RETRY_HTTP_409"
+    assert item["error_code"] == "MERGE_EVIDENCE" and calls == [row["doc_id"]]
+    output = capsys.readouterr().out
+    assert "恢复结束：目标=1；目标READY=0" in output
+    assert "RETRY_HTTP_409" in output and "MERGE_EVIDENCE" in output
+    reports.generate(data, tmp_path)
+    assert "retry_request_error" in (tmp_path / "import_report.csv").read_text(encoding="utf-8").splitlines()[0]
+
+
 def test_evaluation_resume_reuses_only_identical_model_scope_and_qa(tmp_path, monkeypatch):
     """相同QA/索引/模型断点不重复检索；代次变化必须停止，不能混用旧结果。"""
     data, kb, calls = inputs(2), uuid4(), []

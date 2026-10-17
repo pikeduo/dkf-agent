@@ -4,6 +4,10 @@
 
 ## 失败定位与原知识库恢复
 
+**更新源码不等于运行进程已更新。** API和Celery Worker会保留已导入模块；执行恢复前必须在原终端停止并重新启动API/CPU Worker，确认PID/启动时间已改变，不能仅启动新版导入CLI。已有进程可用`Get-Process -Id <日志中的PID> | Select-Object Id,StartTime`只读核对。旧API可能把MERGE失败送回普通Parse，再由CACHE_REPARSE_REQUIRED阻止重复收费；这不是新Adapter拒绝，也不是云端新失败。
+
+Retry的HTTP409是明确拒绝，不是上传去重成功；新版CLI保留`retry_http_status/retry_request_error`，结束时逐项显示恢复目标的当前失败原因。末尾“运行器错误=-”仅指脚本未抛全局异常，不代表任何一份已恢复。若此前运行已写`retry_intent=true`，直接重跑同一命令不会再次提交；不要删除检查点或批量清标记。先修正服务版本，核对当前文档/原Job后，通过既有单文档`/retry`显式恢复并观察，结果由后续只读报告接管，不能Force绕过原付费结果保护。
+
 先停止导入CLI继续调度（Ctrl+C不撤销已在Worker执行的任务），保留run/知识库/原ZIP。用户更新代码后按README重启API/CPU Worker；不清Redis/缓存、不删除FAILED文档、不Force。先执行纯Mock：
 
 ```powershell

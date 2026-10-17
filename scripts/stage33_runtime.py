@@ -201,8 +201,11 @@ class API:
             raise Stage33Error("PRECHECK_FAILED") from None
 
     def retry(self, doc_id):
-        """仅用户显式许可的普通Retry；不发送Force/Reparse或改变解析策略。"""
-        return self._post(f"api/admin/documents/{doc_id}/retry")
+        """普通Retry的409是明确拒绝，不沿用上传去重的409接收语义。"""
+        status = self._post(f"api/admin/documents/{doc_id}/retry")
+        if status == 409:
+            raise Stage33Error("RETRY_HTTP_409")
+        return status
 
     def _post(self, path, **kwargs):
         """只返回HTTP分类，不导出供应商正文；确认丢失由只读数据库身份核对。"""
@@ -281,10 +284,16 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
                     # HTTP确认丢失也可能已接收；与上传一样先占并发，下一轮只读确认。
                     active += 1
                     try:
-                        api.retry(row["doc_id"])
+                        status = api.retry(row["doc_id"])
+                        item["retry_http_status"] = status
+                        item["retry_request_error"] = None
                         item["execution_status"] = "WAITING"
+                        print(f"Retry已接收：doc_id={row['doc_id']}；仅代表已排队，尚未恢复成功。")
                     except Stage33Error as error:
                         item.update(execution_status="RETRY_UNCONFIRMED", error_code=error.code)
+                        item["retry_http_status"] = 409 if error.code == "RETRY_HTTP_409" else None
+                        item["retry_request_error"] = error.code
+                        print(f"Retry未接收或未确认：doc_id={row['doc_id']}；原因={error.code}。")
                 continue
             if retry_failed_only:
                 continue
@@ -311,8 +320,13 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
         if not changed and not pending_retry and all(state[fid]["execution_status"] in terminal for fid in targets):
             break
         if changed:
-            print(f"导入已登记：{sum(bool(x.get('upload_intent')) for x in state.values())}/{len(state)}；"
-                  f"READY={sum(x['execution_status'] == 'READY' for x in state.values())}")
+            if retry_failed_only:
+                print(f"失败项恢复：目标={len(targets)}；本次请求={len(retried)}；"
+                      f"目标READY={sum(state[fid]['execution_status'] == 'READY' for fid in targets)}；"
+                      f"目标仍失败={sum(state[fid]['execution_status'] == 'FAILED' for fid in targets)}")
+            else:
+                print(f"导入已登记：{sum(bool(x.get('upload_intent')) for x in state.values())}/{len(state)}；"
+                      f"READY={sum(x['execution_status'] == 'READY' for x in state.values())}")
         pause(min(poll_interval, max(0, deadline - clock())))
     # 所有文件始终保留；超时不是后台取消，也不把未调度文件当作成功。
     for fid in targets:
@@ -320,4 +334,13 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
         if item["execution_status"] not in {"READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}:
             item["execution_status"] = "TIMEOUT_PENDING"
     write_json(state_path, state)
+    if retry_failed_only:
+        print(f"恢复结束：目标={len(targets)}；目标READY={sum(state[fid]['execution_status'] == 'READY' for fid in targets)}。")
+        for fid in sorted(targets):
+            item = state[fid]
+            if item["execution_status"] != "READY":
+                request = item.get("retry_request_error") or (
+                    "PREVIOUS_RETRY_INTENT_REQUIRES_REVIEW" if fid not in retried and item.get("retry_intent") else "-")
+                print(f"未恢复：doc_id={item.get('doc_id') or '-'}；状态={item['execution_status']}；"
+                      f"处理错误={item.get('error_code') or '-'}；重试请求={request}")
     return state
