@@ -88,7 +88,7 @@ def body(parent, size, *, deleted=False):
 
 
 def extra_spans(parent, size, kind, *, deleted=False):
-    """附属文本逐Span保留文字/行内公式及坐标；删除后页须有明确空lines标记。"""
+    """附属文本保留index、文字/行内公式及坐标；删除后页须有明确空lines标记。"""
     result = []
     for child in children(parent):
         if child["type"] != kind:
@@ -108,16 +108,65 @@ def extra_spans(parent, size, kind, *, deleted=False):
                     max(box[2] for box in boxes), max(box[3] for box in boxes)]
         if any(abs(a - b) > 2 for a, b in zip(envelope, layout_bbox(child, size))):
             raise merge_evidence_error("TABLE_EXTRAS")
-        result.append({"bbox": child["bbox"], "parts": spans})
+        result.append({"index": child["index"], "bbox": child["bbox"], "parts": spans})
     return result
 
 
-def restore_extras(group, evidence):
-    """按唯一源Span组把原V1附注归还原页；逐字符/公式边界核对，不从layout补字。"""
+def standalone_extra(original, kind, page, items):
+    """证明表格附注已转成同页独立V1正文；不搬动、不补字、不重复写入表格。
+
+    原caption/footnote与独立para必须index/bbox/每个Span一致，V1也须唯一同页
+    同框且全文匹配。找不到独立para时仍由原表格附注检查负责，歧义或冲突拒绝。
+    """
+    size = page["page_size"]
+    box = layout_bbox(original, size)
+    parents = [b for b in page["para_blocks"]
+               if b.get("type") == "text" and b.get("index") == original["index"]
+               and (candidate := layout_bbox(b, size)) is not None
+               and all(abs(a - b) <= 2 for a, b in zip(candidate, box))]
+    if not parents:
+        return False
+    if len(parents) != 1 or parents[0].get("lines_deleted", False) is not False:
+        raise merge_evidence_error("TABLE_EXTRAS")
+    parent = parents[0]
+    # 同页另一表格不能复用同一个附注来源；只接受唯一原子块身份。
+    sources = [child for root in page["preproc_blocks"] if root.get("type") == "table"
+               for child in (root["blocks"] if isinstance(root.get("blocks"), list) else []) if isinstance(child, dict)
+               and child.get("type") == kind and child.get("index") == original["index"]
+               and (candidate := layout_bbox(child, size)) is not None
+               and all(abs(a - b) <= 2 for a, b in zip(candidate, box))]
+    if len(sources) != 1:
+        raise merge_evidence_error("TABLE_EXTRAS")
+    moved = paragraph_spans(parent)
+    if len(moved) != len(original["parts"]):
+        raise merge_evidence_error("TABLE_EXTRAS")
+    for actual, source in zip(moved, original["parts"]):
+        actual_box, source_box = layout_bbox(actual, size), layout_bbox(source, size)
+        if (actual.get("type") != source["type"] or actual.get("content") != source["content"]
+                or actual.get("cross_page", False) is not False or actual_box is None
+                or any(abs(a - b) > 2 for a, b in zip(actual_box, source_box))):
+            raise merge_evidence_error("TABLE_EXTRAS")
+    candidates = [value for value in items if value.get("type") == "text"
+                  and value.get("page_idx") == page["page_idx"]
+                  and (value_box := convert_bbox(value.get("bbox"), (1000, 1000))) is not None
+                  and all(abs(a - b) <= 2 for a, b in zip(value_box, box))]
+    if (len(candidates) != 1 or not isinstance(candidates[0].get("text"), str)
+            or not candidates[0]["text"].strip()
+            or type(candidates[0].get("text_level", 0)) is not int
+            or candidates[0].get("text_level", 0) != 0):
+        raise merge_evidence_error("TABLE_EXTRAS")
+    merged_text_slices(candidates[0]["text"], [span_reference_text(span) for span in original["parts"]])
+    return True
+
+
+def restore_extras(group, evidence, *, items=None, pages=None):
+    """原V1附注归还原页；已唯一转为独立Text的附注保持原样，不补字或重复挂表。"""
     changes = [{} for _ in group]
     for kind in ("table_caption", "table_footnote"):
         source = [(index, span) for index, (_, before, size) in enumerate(evidence)
-                  for span in extra_spans(before, size, kind)]
+                  for span in extra_spans(before, size, kind)
+                  if items is None or pages is None
+                  or not standalone_extra(span, kind, pages[group[index]["page_idx"]], items)]
         moved = extra_spans(evidence[0][0], evidence[0][2], kind)
         for after, _, size in evidence[1:]:
             extra_spans(after, size, kind, deleted=True)
@@ -187,7 +236,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
 
     每组最多200页/512个已验证边界；仍受HTML/网格/总字节预算约束。
     所有组先在内存完成核对，异常不返回部分结果。
-    不处理跨分片的远端表格，也不把真正空表格或缺来源当成成功。
+    附注可保留为经过唯一来源证明的独立Text；不处理跨分片表格或忽略真缺失来源。
     """
     restored, summaries, consumed = list(items), [], set()
     for offset, item in enumerate(items):
@@ -268,7 +317,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
             sources = [TableHTML(span["html"]) for span in originals]
             if sum(len(value.rows) for value in sources) != len(merged.rows):
                 raise merge_evidence_error("TABLE_ROWS")
-            extras, pieces, refinements, row = restore_extras(group, evidence), [], [], 0
+            extras, pieces, refinements, row = restore_extras(group, evidence, items=items, pages=pages), [], [], 0
             for source in sources:
                 piece = merged.slice_rows(row, row + len(source.rows))
                 piece_shape = TableHTML(piece)

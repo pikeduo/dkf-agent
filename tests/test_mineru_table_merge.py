@@ -66,6 +66,105 @@ def set_merged(items, pages, value):
     pages[0]["para_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]["html"] = value
 
 
+def standalone_extra_case(kind, *, inline=False):
+    """构造附注从preproc表格子块转为同页独立para/V1正文，不生成真实文档。"""
+    items, pages = table_case(footnote=False)
+    box = [48., 260., 552., 280.]
+    spans = [{"type": "text", "content": "独立附注原文", "bbox": list(box)}]
+    text = "独立附注原文"
+    if inline:
+        spans = [{"type": "text", "content": "原值", "bbox": [48., 260., 300., 280.]},
+                 {"type": "inline_equation", "content": "x+y", "bbox": [300., 260., 552., 280.]}]
+        text = "原值 $x+y$"
+    original = {"type": kind, "index": 3, "bbox": list(box), "lines": [{"spans": spans}]}
+    pages[1]["preproc_blocks"][0]["blocks"].append(deepcopy(original))
+    pages[1]["para_blocks"].append(deepcopy(original) | {"type": "text"})
+    items.append({"type": "text", "text": text, "page_idx": 1, "bbox": [80, 325, 920, 350]})
+    return items, pages
+
+
+@pytest.mark.parametrize("kind", ["table_caption", "table_footnote"])
+@pytest.mark.parametrize("inline", [False, True])
+def test_reclassified_table_extra_remains_once_in_its_original_standalone_block(kind, inline):
+    """附注有完整独立V1来源时不误拒绝或重复挂表，正文/原页/坐标/ID及表体均不变。"""
+    items, pages = standalone_extra_case(kind, inline=inline)
+    original = deepcopy(items), deepcopy(pages)
+    restored, summary = restore_merged_tables(items, pages)
+    assert restored[3] == items[3] and len(restored) == len(items)
+    assert all(restored[index][kind] == [] for index in (0, 2))
+    assert summary[0]["rows"] == [2, 2] and summary[0]["cells"] == [4, 4]
+    assert summary[0]["caption_counts"] == summary[0]["footnote_counts"] == [0, 0]
+    assert (items, pages) == original
+    assert restore_merged_tables(items, pages) == (restored, summary)
+    doc_id = uuid4()
+    parsed = normalize(items, pages, doc_id=doc_id)
+    block = next(b for b in parsed.blocks if b.block_id == uuid5(doc_id, "mineru-v1:frozen-case:4:1:text"))
+    assert block.text == items[3]["text"] and block.page == 2 and block.bbox == [48., 260., 552., 280.]
+    assert sum(b.text.count(items[3]["text"]) for b in parsed.blocks) == 1
+    assert normalize(items, pages, doc_id=doc_id) == parsed
+    assert (items, pages) == original
+
+
+@pytest.mark.parametrize("damage", ["missing_v1", "v1_text", "v1_bbox", "v1_page", "para_index",
+    "para_text", "para_bbox", "cross_page", "duplicate_v1", "duplicate_para", "duplicate_source",
+    "still_attached", "source_span_bbox"])
+def test_reclassified_extra_requires_unique_unchanged_v1_and_layout_sources(damage):
+    """缺字/错页/错框/错索引/重复或双重挂载不能借独立Text路径绕过附注验证。"""
+    items, pages = standalone_extra_case("table_caption")
+    parent = pages[1]["para_blocks"][-1]
+    source = pages[1]["preproc_blocks"][0]["blocks"][-1]
+    if damage == "missing_v1":
+        items.pop()
+    elif damage == "v1_text":
+        items[3]["text"] = "已改变的原文"
+    elif damage == "v1_bbox":
+        items[3]["bbox"][0] += 20
+    elif damage == "v1_page":
+        items[3]["page_idx"] = 0
+    elif damage == "para_index":
+        parent["index"] = 4
+    elif damage == "para_text":
+        parent["lines"][0]["spans"][0]["content"] = "已改变的原文"
+    elif damage == "para_bbox":
+        parent["bbox"][0] += 20
+    elif damage == "cross_page":
+        parent["lines"][0]["spans"][0]["cross_page"] = True
+    elif damage == "duplicate_v1":
+        items.append(deepcopy(items[3]))
+    elif damage == "duplicate_para":
+        pages[1]["para_blocks"].append(deepcopy(parent))
+    elif damage == "duplicate_source":
+        other = deepcopy(pages[1]["preproc_blocks"][0])
+        other.update(index=9, bbox=[300., 400., 540., 500.])
+        pages[1]["preproc_blocks"].append(other)
+    elif damage == "still_attached":
+        pages[0]["para_blocks"][0]["blocks"].append(deepcopy(source))
+        items[0]["table_caption"] = [items[3]["text"]]
+    else:
+        source["lines"][0]["spans"][0]["bbox"][0] += 20
+    original = deepcopy(items), deepcopy(pages)
+    with pytest.raises(MinerUError) as error:
+        restore_merged_tables(items, pages)
+    assert error.value.code == "MERGE_EVIDENCE"
+    assert (items, pages) == original
+
+
+def test_unrelated_text_with_same_nested_index_does_not_replace_a_real_moved_footnote():
+    """同index但不同框的普通正文不是附注重分类，已通过的原附注恢复行为保持不变。"""
+    items, pages = table_case()
+    text = {"type": "text", "index": 3, "bbox": [300., 400., 540., 420.],
+            "lines": [{"spans": [{"type": "text", "content": "另一独立正文",
+                                   "bbox": [300., 400., 540., 420.]}]}]}
+    for group in ("preproc_blocks", "para_blocks"):
+        pages[1][group].append(deepcopy(text))
+    items.append({"type": "text", "text": "另一独立正文", "page_idx": 1,
+                  "bbox": [500, 500, 900, 525]})
+    snapshot = deepcopy(items), deepcopy(pages)
+    restored, _ = restore_merged_tables(items, pages)
+    assert restored[0]["table_footnote"] == [] and restored[2]["table_footnote"] == ["后页注释"]
+    assert restored[3] == items[3] and (items, pages) == snapshot
+
+
 @pytest.mark.parametrize("footnote", [True, False])
 def test_verified_rows_and_footnotes_return_to_source_pages_without_copying_layout(footnote):
     """恢复原行与附注原页，页眉/位置/ID/所有单元格不变；重复执行稳定且输入无修改。"""

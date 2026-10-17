@@ -98,10 +98,12 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 - 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，只能跨已验证的页边界，最多200页和512个边界，并受下述HTML预算约束。
 - V1合并HTML必须与目标para的网格/单元格投影完全等价；preproc仅证明各源表行/单元格和归属。受限HTMLParser不渲染/执行，只接受表格结构、br与受检行内eq比较；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。输出始终切取原V1 HTML，不重新序列化layout。
 - 按已证明的源行数只切取V1原始行字符串，共用V1外壳；不从layout拷正文，不补重复表头。逐行核对单元格数、td/th、原序、空白标准化后的文字、br及rowspan；切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，保持单元格邻接/覆盖关系，不改V1的colspan。例如本次第三组源4列到合并10列的映射是可验证细化，不是把单元格拆开。
-- Caption/footnote必须由preproc唯一Span、para移动结果及后页删除标记共同证明，逐字验证已有V1列表并按原来源归还；未知/重复/乱序来源拒绝，不额外生成标题或附注。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
+- Caption/footnote必须由preproc唯一Span及para/V1去向共同证明：仍挂表的移动结果与后页删除标记按原规则核对；已转为同页独立Text时，必须有唯一原子块、相同index/bbox、逐Span类型/原文/坐标、非跨页标记及唯一同框V1全文对应，才保留其现有Text，不重复挂回表格。未知/缺失/重复/乱序来源拒绝，不从layout补写标题或附注；不能仅凭文字相同或index相同推断。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
 - 恢复按原数组索引写回，保留原page/bbox/类型；新版本/同一拟用身份下Block ID稳定，图像/原ZIP不改写。真正空table即使有caption也不能冒充表体，EMPTY_BLOCK诊断给固定子原因、1-based page/item_index及结构类型；恢复日志不等于持久化成功。
 
 当前真实ZIP验证：文本恢复1处；表格14+14→28行（86+86个单元格）、9+9→18行（45+45个）、31+8→39行（118+73个），共453个单元格逐项核对，前两组后页footnote归还原页。完整Adapter通过、2263个Block、198个有Block的页面，未解释空正文/空表格为0。
+
+阶段33第二片的用户离线报告`stage33_part2_local_20261018_014528.json`已越过TEXT_CHARACTER，但在原页242（局部42）、V1第483项遇TABLE_EXTRAS。只读原ZIP字段核对证明：preproc内一条25字符caption已在para转为独立text，index/bbox/Span均相同；V1第484项保留同页同框完整原文。现补通用独立Text保留路径，不补字、不复制附注、不改变表体/页/ID。新增Mock覆盖caption/footnote、行内公式及缺失/改文/坐标/页/索引/重复/双重挂载，尚未由Codex执行；完整ZIP/Guard是否通过仍待用户重跑离线诊断，不能据字段调查宣称通过。
 
 **历史报告03的Guard失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，当时尚未核对原页，报告为`FAIL / COMPLETENESS`。该报告保留不改写；后续只读原页调查及新规则见下节，旧冻结Job默认仍失败，不能直接删除required页、伪造Block或修改SQL。
 
