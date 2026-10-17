@@ -80,6 +80,7 @@ FIELDS = {
     "item_count",
     "item_index",
     "page",
+    "structure_type",
     "artifact_reused",
     "retry_count",
     "delay_seconds",
@@ -174,6 +175,8 @@ EVENT_LABELS = {
     "mineru.adapter_validated": "MinerU 解析结果结构校验通过",
     "mineru.merge_restored": "MinerU 合并正文已按证据恢复原页与位置，尚未落库",
     "mineru.merge_rejected": "MinerU 合并正文的来源证据不足，未保存不完整结果",
+    "mineru.table_merge_restored": "跨页表格及附属文本已按原V1证据归还原页，尚未落库",
+    "mineru.empty_block": "MinerU 结果仍有未解释的空结构，未保存不完整结果",
     "mineru.blocks_persisted": "MinerU 解析结果已落库",
     "mineru.split_planned": "超限 PDF 连续分片计划已保存，尚未提交云任务",
     "mineru.split_piece_done": "PDF 分片结果已缓存，原文档尚未整体落库",
@@ -368,6 +371,7 @@ FIELD_LABELS = {
     "item_count": "文本数",
     "item_index": "原数组序号",
     "page": "局部页码",
+    "structure_type": "结构类型",
     "artifact_reused": "复用本地向量结果",
     "file_count": "文件数",
     "file_index": "文件序号",
@@ -454,6 +458,10 @@ def safe_fields(fields: dict) -> dict:
         if key not in FIELDS or value is None:
             continue
         if key in {"page", "item_index"} and (type(value) is not int or not 1 <= value <= 1024**2):
+            continue
+        if key == "structure_type" and (not isinstance(value, str) or value not in {
+            "text", "title", "image_text", "header", "footer", "page_number", "aside_text",
+            "page_footnote", "table", "list", "code", "equation", "formula", "unknown"}):
             continue
         if key in AGENT_LOG_ENUMS and (not isinstance(value, str) or value not in AGENT_LOG_ENUMS[key]):
             continue

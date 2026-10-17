@@ -66,6 +66,8 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `mineru.split_planned / split_piece_done / split_manifest_failed / split_checkpoint_invalid` | 超限PDF计划已提交/成功片缓存/磁盘副本失败/坏检查点安全停止；仅UUID、数量与安全码。实际费用按片Batch去重，父Job行数不是云文件数，提交不确定须平台核对 |
 | `mineru.split_io_failed` | 分片本地I/O失败；仅安全错误码、异常类型和固定stage/step源码位置，不记录异常原文/文件路径。保存/发布错误为PDF_SPLIT_WRITE，读取/生成/校验错误为PDF_SPLIT_IO |
 | `mineru.merge_restored / merge_rejected` | 无损恢复/安全拒绝；对外仍MERGE_EVIDENCE，内部step固定子码、stage固定项目函数/结构角色，附原数组item_index、局部1-based page、受限数量和异常类型；不输出正文/bbox明细，恢复不等于落库 |
+| `mineru.table_merge_restored` | V1跨页表格/附注已按严格来源核对切回原页；仅doc_id、数量和阶段，未发布缓存/落库 |
+| `mineru.empty_block` | 未解释的空正文/表格；step固定为TABLE_NO_BODY或STRUCTURE_NO_TEXT，page/item_index均为1-based，structure_type固定枚举，不记录HTML/图片路径/正文 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |

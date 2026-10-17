@@ -755,9 +755,11 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 联合冒烟的 `SMOKE_RETRIEVAL_PREREQUISITE` 表示 READY/证据/向量前置校验未通过，Dense 尚未执行，不是 GPU 故障结论；先按 [只读失败复核](docs/PRESET_IMPORT.md#已有失败报告的只读复核) 查真实文档/Job 错误码，不重新上传。`code` 命令不可用时可用 Windows `notepad` 查看报告，无需安装新依赖。
 
-MinerU 远端 done、ZIP 已下载但出现 EMPTY_BLOCK 时，先保留旧结果并按 [合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标) 核对。新版归一化缓存为 mineru-adapter-v2，用户需按原命令重启 API/CPU Worker；旧冻结任务或 Reindex 版本不一致会安全拒绝，不自动付费重解析。不要删除旧缓存、修改文档状态或盲目 Force Reparse。
+MinerU远端done、ZIP已下载但出现EMPTY_BLOCK时，保留原结果并按[合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标)核对。当前归一化版本为`mineru-adapter-v3`，隔离旧v1/v2缓存；跨页表格仅在完整V1/layout证据成立时恢复。部署新版本由用户重启API/CPU Worker，旧冻结Job/Reindex版本不一致安全拒绝，不自动付费重解析。不要删除缓存、修改Job版本/状态或盲目Force。
 
 出现`MERGE_EVIDENCE`时，Adapter之前下载的ZIP可能尚未缓存；先从**原已完成Batch**保留结果，再按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对Hash、版本与具体子原因。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
+
+旧v2付费Job需要用v3比较结果时，只有诊断CLI的显式`--allow-normalizer-upgrade`允许使用内存副本，报告同时保留旧/新身份；这不是部署、缓存迁移或业务恢复授权。Adapter通过但Completeness Guard失败仍判失败，不自动忽略缺页。
 
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 

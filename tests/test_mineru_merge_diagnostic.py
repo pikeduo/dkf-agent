@@ -130,7 +130,7 @@ def test_report_is_exclusive_and_io_errors_do_not_leak_or_overwrite(tmp_path, mo
     """同名输出拒绝，驱动/路径异常仅固定安全码，不输出异常原文。"""
     monkeypatch.setattr(tool, "ROOT", tmp_path)
 
-    def unavailable(*args):
+    def unavailable(*args, **kwargs):
         """模拟带敏感URL的驱动错误，不连接数据库。"""
         raise RuntimeError("PRIVATE_TOKEN postgresql://PRIVATE_URL")
 
@@ -144,6 +144,51 @@ def test_report_is_exclusive_and_io_errors_do_not_leak_or_overwrite(tmp_path, mo
     assert json.loads(before)["error_code"] == "DIAGNOSTIC_IO_OR_DB"
     assert tool.main(args) == 2 and target.read_bytes() == before
     assert "PRIVATE" not in capsys.readouterr().out and "PRIVATE" not in before.decode()
+
+
+def test_old_paid_normalizer_requires_explicit_diagnostic_upgrade_without_changing_job(context):
+    """v2冻结Job默认拒绝；显式v3离线比较使用新身份，不修改旧参数或发布缓存。"""
+    document, job, settings, _ = context
+    job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v2"
+    snapshot = deepcopy(vars(job))
+    with pytest.raises(MinerUError) as error:
+        tool.inspect_job(document, job, settings, "original-batch", None)
+    assert error.value.code == "CACHE_CONFIG_CHANGED"
+    report = tool.inspect_job(document, job, settings, "original-batch", None, allow_normalizer_upgrade=True)
+    assert report["normalizer_upgrade_explicit"] and report["normalizer_version"] == "mineru-adapter-v3"
+    assert report["frozen_normalizer_version"] == "mineru-adapter-v2"
+    assert report["adapter_identity"] != report["frozen_adapter_identity"]
+    assert vars(job) == snapshot and not report["cache_published"]
+
+
+def test_unknown_old_normalizer_cannot_use_upgrade_switch(context):
+    """升级许可只覆盖明确v2到v3，不能绕过任意历史版本或缺失身份。"""
+    document, job, settings, _ = context
+    job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v1"
+    with pytest.raises(MinerUError) as error:
+        tool.inspect_job(document, job, settings, "original-batch", None, allow_normalizer_upgrade=True)
+    assert error.value.code == "CACHE_CONFIG_CHANGED"
+
+
+def test_production_worker_cannot_silently_upgrade_a_paid_v2_job(context, monkeypatch):
+    """生产短任务遇旧付费版本在任何Provider调用前停止，不继承诊断升级权限。"""
+    from app.services.mineru import jobs
+    document, job, settings, _ = context
+    job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v2"
+    snapshot = deepcopy(vars(job))
+    monkeypatch.setattr(jobs, "restore_cached_result", lambda *args: None)
+    monkeypatch.setattr(jobs, "lock_job", lambda *args: (document, job))
+
+    class ForbiddenProvider:
+        """不允许产生任何云调用，连原Batch查询也不得在版本检查前发生。"""
+
+        def query(self, *args):
+            """一旦触发查询即失败，不发送真实请求。"""
+            pytest.fail("旧冻结版本不得自动调用Provider")
+
+    with pytest.raises(MinerUError) as error:
+        jobs.check_step(object(), job.job_id, ForbiddenProvider(), settings)
+    assert error.value.code == "CACHE_CONFIG_CHANGED" and vars(job) == snapshot
 
 
 def test_diagnostic_page_and_item_log_fields_only_accept_bounded_integers():

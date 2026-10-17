@@ -338,6 +338,10 @@ MERGE_REASONS = {
     "BOUNDARY_LAYOUT": "matched_merge_boundary", "BOUNDARY_MATCH": "matched_merge_boundary",
     "BOUNDARY_INDEX": "matched_merge_boundary", "BOUNDARY_POSITION": "matched_merge_boundary",
     "BOUNDARY_TEXT": "matched_merge_boundary", "BOUNDARY_REUSED": "restore_merged_text",
+    **{name: "restore_merged_tables" for name in (
+        "TABLE_HTML", "TABLE_GRID", "TABLE_LIMIT", "TABLE_ROWS", "TABLE_CELLS",
+        "TABLE_LAYOUT", "TABLE_MATCH", "TABLE_INDEX", "TABLE_DELETED", "TABLE_PAGES",
+        "TABLE_BODY", "TABLE_EXTRAS", "TABLE_IMAGES", "TABLE_AMBIGUOUS")},
 }
 
 
@@ -361,6 +365,22 @@ class MergeEvidenceError(MinerUError):
                               "span_role": {"source", "target"}}.items():
             if isinstance(counts.get(name), str) and counts[name] in allowed:
                 self.diagnostic.setdefault(name, counts[name])
+
+
+class EmptyBlockError(MinerUError):
+    """空结果固定子原因及1-based定位；不把原文或图片地址带入日志/报告。"""
+
+    def __init__(self, kind: str, page: int, position: int, *, missing_table_body=False):
+        """安全保存结构类型/数组序号/页码，保留原有EMPTY_BLOCK外部错误码。"""
+        super().__init__("EMPTY_BLOCK", "MinerU 返回的正文、表格或公式没有可用文本")
+        allowed = {"text", "title", "image_text", "header", "footer", "page_number",
+                   "aside_text", "page_footnote", "table", "list", "code", "equation", "formula"}
+        self.diagnostic = {"reason": "TABLE_NO_BODY" if missing_table_body else "STRUCTURE_NO_TEXT",
+            "stage": "adapter.normalize", "structure_type": kind if kind in allowed else "unknown",
+            "page": page, "item_index": position}
+        log_event("mineru.empty_block", level=logging.WARNING, error_code=self.code,
+                  step=self.diagnostic["reason"], stage="adapter.normalize", page=page,
+                  item_index=position, structure_type=self.diagnostic["structure_type"])
 
 
 def merge_evidence_error(reason: str, **counts) -> MergeEvidenceError:
@@ -713,6 +733,10 @@ class MinerUResultAdapter:
         if not office:
             try:
                 items, restored_count = restore_merged_text(items, pages)
+                from app.services.mineru.table_merge import restore_merged_tables
+                with ZipFile(BytesIO(archive)) as zipped:
+                    members = zipped.namelist()
+                items, table_groups = restore_merged_tables(items, pages, archive_members=members)
             except MinerUError as exc:
                 detail = exc.diagnostic if isinstance(exc, MergeEvidenceError) else {}
                 log_event("mineru.merge_rejected", level=logging.WARNING,
@@ -726,6 +750,9 @@ class MinerUResultAdapter:
             if restored_count:
                 log_event("mineru.merge_restored", doc_id=doc_id,
                           item_count=restored_count, stage="adapter")
+            if table_groups:
+                log_event("mineru.table_merge_restored", doc_id=doc_id, stage="adapter",
+                          item_count=sum(len(group["pages"]) - 1 for group in table_groups))
         blocks, headings, title = [], {}, ""
         # ID 使用原始 position，block_index 使用最终列表顺序；改序不能换掉既有块身份。
         ordered = (
@@ -769,6 +796,8 @@ class MinerUResultAdapter:
                     title = title or content.strip()
             elif kind == "table":
                 block_type = "table"
+                if not joined_text(item.get("table_body")).strip():
+                    raise EmptyBlockError(kind, page_idx + 1, position, missing_table_body=True)
                 content = "\n".join(
                     part
                     for part in (
@@ -818,9 +847,7 @@ class MinerUResultAdapter:
             if not content.strip():
                 if kind in {"image", "chart"}:
                     continue
-                raise MinerUError(
-                    "EMPTY_BLOCK", "MinerU 返回的正文、表格或公式没有可用文本"
-                )
+                raise EmptyBlockError(kind, page_idx + 1, position)
             try:
                 blocks.append(
                     ParsedBlock(

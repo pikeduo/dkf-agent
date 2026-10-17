@@ -41,11 +41,11 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 - 每组最多64个占位与64个边界、V1正文最多1MiB、每页关联父块最多512个。边界须唯一匹配discarded父块、全页index无冲突、确在页面边缘且index在正文前/后，边界原文逐字可核对；同一边界父块不能重复使用，目标在V1中的位置也必须唯一。多Span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为MERGE_EVIDENCE；真空正文/表格/公式仍为EMPTY_BLOCK，不落半份Block、不发布成功缓存。
 - `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
 
-归一化缓存身份更新为 `mineru-adapter-v2`，Native 缓存版本不变。旧成功文件不删除、不改写；旧 v1 云缓存不混入新版 Whole/视觉键，Reindex 遇到版本不一致安全返回 CACHE_CONFIG_CHANGED，不自动重算或收费。已经验证的同 Job 缓存可按原检查点恢复；尚未完成的旧冻结任务在 POST/PUT/GET 前拒绝版本不一致，不用新版结果覆盖旧键。所有进程须由用户按 README 手动重启。
+归一化缓存身份现为`mineru-adapter-v3`，Native版本不变。表格恢复改变正文/附注的页归属，必须与旧v1/v2 Whole/视觉/片缓存隔离；不删除旧成功结果、改写旧Job或复用旧键发布新语义。Reindex/旧冻结任务遇版本不一致返回CACHE_CONFIG_CHANGED，不自动重算/收费。部署时由用户重启各进程；旧付费Job的v2→v3比较只能显式在诊断副本执行，见下节。
 
 #### MERGE_EVIDENCE只读诊断与原Batch复用
 
-调用链是`jobs.check_step → download_result(内存) → normalize → restore_merged_text → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因`result_downloaded`日志而假定已有缓存。没有来源证据时仍拒绝，不新增多Span拼接、跨页猜测、空项跳过或y坐标排序。后续已兼容经过严格验证的非连续页边界，不改变原已接受输入的输出/Block ID，沿用Normalizer v2；不据此自动复活旧失败Job或改写缓存。
+调用链是`jobs.check_step → download_result(内存) → normalize → 文本/表格恢复 → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因result_downloaded日志而假定已有缓存。文本仍不拼未知多Span或猜跨页；新表格逻辑必须证明完整来源，不能跳空项或按y重排。Normalizer v3不自动复活旧失败Job或覆盖旧缓存。
 
 | 内部子码示例 | 拒绝条件 |
 |---|---|
@@ -88,7 +88,34 @@ MERGE终态不属于已有JOB_TIMEOUT/传输错误Retry白名单，当前不建�
 
 此前诊断回归140 passed、日志相关44 passed，历史三份ZIP转换通过；只读身份报告`results/mineru_merge_dceb1360_verified_03.json`保留不改写。本次取得`data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip`后，确认TARGET_TEXT是把夹在目标与占位之间的header当成目标。修复后真实`restore_merged_text`恢复1处，仅原0-based索引864/866变化，865页眉和其余2290项不变；两段124+229字符无损还原原353字符，重复恢复一致。
 
-**完整normalize仍未通过：** 原V1索引1820/1893/2102（物理页155/162/183）为table，却无table_body且caption/footnote为空，触发原有EMPTY_BLOCK。未删除这些项、未改成图片/空成功块、未拿layout或Markdown补表。此独立表格问题须另行分析可验证的结构来源，不能用合并修复成功宣称整片解析完成。新相邻回归167 passed（7.00秒）；真实验证使用既有分片的实际geometry并核对Hash，只读原ZIP/分片，未访问数据库或调用云端。结果摘要见本地`results/mineru_merge_noncontiguous_01.json`。
+前次完整normalize被原V1索引1820/1893/2102的空表格阻断，167项回归及报告`results/mineru_merge_noncontiguous_01.json`保留。现已补下述严格跨页表格恢复，但**本片最终Completeness仍有独立缺页问题**，不能宣称整片已可入库。
+
+#### 跨页表格恢复（Normalizer v3）
+
+- 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，只能跨已验证的页边界，最多16页和64个边界。
+- V1合并HTML必须与目标para的HTML完全一致；preproc仅用于证明各源表行/单元格和归属。受限标准库HTMLParser不渲染/执行，只接受table、单一可选tbody、tr、td/th和br；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。
+- 按已证明的源行数只切取V1原始行字符串，共用V1外壳；不从layout拷正文，不补重复表头。逐行核对单元格数、td/th、原序、空白标准化后的文字、br及rowspan；切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，保持单元格邻接/覆盖关系，不改V1的colspan。例如本次第三组源4列到合并10列的映射是可验证细化，不是把单元格拆开。
+- Caption/footnote必须由preproc唯一Span、para移动结果及后页删除标记共同证明，逐字验证已有V1列表并按原来源归还；未知/重复/乱序来源拒绝，不额外生成标题或附注。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
+- 恢复按原数组索引写回，保留原page/bbox/类型；新版本/同一拟用身份下Block ID稳定，图像/原ZIP不改写。真正空table即使有caption也不能冒充表体，EMPTY_BLOCK诊断给固定子原因、1-based page/item_index及结构类型；恢复日志不等于持久化成功。
+
+当前真实ZIP验证：文本恢复1处；表格14+14→28行（86+86个单元格）、9+9→18行（45+45个）、31+8→39行（118+73个），共453个单元格逐项核对，前两组后页footnote归还原页。完整Adapter通过、2263个Block、198个有Block的页面，未解释空正文/空表格为0。
+
+**Guard仍失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，尚不能判断绘图是纯装饰还是供应商漏解析。不得删除required页、伪造Block或把Guard失败改成通过。实际最终报告仍为`FAIL / COMPLETENESS`，不是ADAPTER_PASS_NOT_RECOVERED。
+
+显式只读比较旧付费Job（本轮已执行，不会修改Job、发布缓存或提交第二片）：
+
+```powershell
+conda activate dkf-agent
+python scripts/mineru_merge_diagnostic.py --job-id dceb1360-addc-4411-9d63-0e48ddc59df7 --batch-id f3234a37-7cf3-4a47-8e9e-edc408d22fe1 --zip data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip --allow-normalizer-upgrade --output results/mineru_table_merge_acceptance_04.json
+```
+
+该开关只允许v2→v3诊断；报告保留frozen_normalizer_version、拟用版本、两套不同adapter_identity和升级许可，不改原options_hash/Batch/Data ID。无开关默认CACHE_CONFIG_CHANGED。每次使用新output；本轮最终报告为`results/mineru_table_merge_acceptance_03.json`，旧报告不覆盖。后续必须人工确认131/188页及恢复方案，不能因此再POST、Force或修改SQL。
+
+本轮Mock回归280 passed（9.89秒），日志定向44 passed（1.42秒），不含真实数据库写入/云端/Worker验收。覆盖正常多页、缺/重复行、单元格乱序/改值、rowspan切口/网格细化、删除标记/歧义/错页、caption/footnote归属、图片身份、空结构脱敏及生产旧付费Job在Provider前拒绝版本变化。手动复测：
+
+```powershell
+python -m pytest tests/test_mineru_table_merge.py tests/test_mineru_merge.py tests/test_mineru_merge_boundaries.py tests/test_mineru_merge_diagnostic.py tests/test_parse_cache.py tests/test_mineru_order.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_provider.py -q -ra -p no:cacheprovider
+```
 
 ```powershell
 conda activate dkf-agent

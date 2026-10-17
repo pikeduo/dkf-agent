@@ -7,13 +7,15 @@ import re
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services.mineru.adapter import MinerUResultAdapter, MergeEvidenceError, page_geometry
+from app.services.mineru.adapter import (MinerUResultAdapter, MergeEvidenceError, EmptyBlockError,
+    page_geometry, read_content_list, read_layout_pages, restore_merged_text)
 from app.services.mineru.errors import MinerUError
 from app.services.parse_cache import NORMALIZER_VERSION, ParseCache, canonical, key_for
 
@@ -38,7 +40,8 @@ def file_hash(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def inspect_job(document, job, settings, batch_id: str, archive_path: Path | None) -> dict:
+def inspect_job(document, job, settings, batch_id: str, archive_path: Path | None,
+                *, allow_normalizer_upgrade=False) -> dict:
     """验证原文档/分片/Batch/冻结版本；只返回脱敏摘要，成功也不写缓存、SQL或投递任务。
 
     ZIP本身通常不包含可验证的Batch签名，离线通过不是导入授权或供应商身份认证。
@@ -56,10 +59,17 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
             or part.batch_id != batch_id or job.batch_id != batch_id or job.data_id != part.data_id
             or not part.upload_complete or not job.upload_complete or not part.submission_attempted):
         raise MinerUError("DIAGNOSTIC_IDENTITY", "原文档、当前片或原Batch身份无法核对")
-    check_normalizer_recipe(job)
     frozen = job.parse_options.get("_cache_recipe")
-    if not isinstance(frozen, dict) or frozen.get("normalizer_version") != NORMALIZER_VERSION:
+    if not isinstance(frozen, dict):
         raise MinerUError("CACHE_CONFIG_CHANGED", "缺少一致的冻结归一化版本，未恢复任务")
+    frozen_version = frozen.get("normalizer_version")
+    upgrade = frozen_version != NORMALIZER_VERSION
+    if upgrade and not (allow_normalizer_upgrade and frozen_version == "mineru-adapter-v2"
+                        and NORMALIZER_VERSION == "mineru-adapter-v3"):
+        raise MinerUError("CACHE_CONFIG_CHANGED", "旧Job版本不一致，须显式允许仅诊断的v2到v3升级")
+    # 只在内存副本校验拟用版本；绝不修改原Job、原缓存键或冻结参数。
+    check_normalizer_recipe(SimpleNamespace(parse_options=job.parse_options | {
+        "_cache_recipe": frozen | {"normalizer_version": NORMALIZER_VERSION}}))
     option_names = ("model_version", "language", "is_ocr", "enable_table", "enable_formula")
     options = {name: job.parse_options.get(name) for name in option_names}
     if (any(name not in frozen or name not in job.parse_options or frozen[name] != options[name]
@@ -74,13 +84,16 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
     if (file_hash(source_path(document)) != document.file_hash
             or path.stat().st_size != part.size_bytes or file_hash(path) != part.file_hash):
         raise MinerUError("PDF_SPLIT_CHANGED", "原件或分片Hash不一致，未恢复任务")
-    identity = key_for(piece_recipe(job, part))
+    old_recipe = piece_recipe(job, part)
+    identity = key_for(old_recipe | {"normalizer_version": NORMALIZER_VERSION})
     report = {"doc_id": str(document.doc_id), "job_id": str(job.job_id), "batch_id": batch_id,
         "data_id": part.data_id, "document_status": document.status, "job_state": job.state,
         "part_state": part.state, "part_ordinal": part.ordinal,
         "original_page_start": part.page_start, "original_page_end": part.page_end,
         "original_sha256": document.file_hash, "part_sha256": part.file_hash,
         "part_size_bytes": part.size_bytes, "normalizer_version": NORMALIZER_VERSION,
+        "frozen_normalizer_version": frozen_version, "normalizer_upgrade_explicit": upgrade,
+        "frozen_adapter_identity": key_for(old_recipe),
         "frozen_options_verified": True,
         "adapter_identity": identity, "source_hashes_verified": True,
         "part_result_cached": part.result is not None,
@@ -102,9 +115,36 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         geometry = page_geometry(path, "pdf")
         if len(geometry) != part.page_end - part.page_start + 1:
             raise MinerUError("PDF_SPLIT_GEOMETRY", "分片真实页数与原账本不一致")
+        from io import BytesIO
+        from zipfile import ZipFile
+        from app.services.mineru.table_merge import restore_merged_tables
+        items, restored_count = restore_merged_text(read_content_list(archive), read_layout_pages(archive))
+        with ZipFile(BytesIO(archive)) as zipped:
+            members = zipped.namelist()
+        _, table_groups = restore_merged_tables(items, read_layout_pages(archive), archive_members=members)
+        report.update(text_restored_count=restored_count, table_restoration=table_groups)
         parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
             file_name=document.file_name, file_type="pdf", geometry=geometry, identity=identity)
-        validate_piece(document, job, part, parsed)
+        report.update(adapter_normalize="PASS", block_count=len(parsed.blocks),
+                      adapter_unexplained_empty_text_or_tables=0,
+                      original_pages=sorted({part.page_start + block.page - 1 for block in parsed.blocks}))
+        try:
+            validate_piece(document, job, part, parsed)
+        except MinerUError as error:
+            report["completeness_guard"] = "FAIL"
+            if error.code == "COMPLETENESS":
+                from app.parsers.routing.contracts import RouteDecision
+                decision = RouteDecision.model_validate(job.parse_options.get("_route_decision")
+                                                       or job.parse_options["_cache_guard"])
+                required = {p.page for p in decision.signals.pages
+                            if p.required and part.page_start <= p.page <= part.page_end}
+                report["missing_required_original_pages"] = sorted(required - set(report["original_pages"]))
+                report["missing_required_page_signals"] = [{
+                    "page": p.page, "text_chars": p.text_chars, "image_count": p.image_count,
+                    "drawing_count": p.drawing_count, "annotation_count": p.annotation_count}
+                    for p in decision.signals.pages if p.page in report["missing_required_original_pages"]]
+            raise
+        report["completeness_guard"] = "PASS"
     except MinerUError as error:
         report.update(status="FAIL", error_code=error.code)
         if isinstance(error, MergeEvidenceError):
@@ -112,13 +152,18 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
             if "page_idx" in detail:
                 detail["original_page"] = part.page_start + detail["page_idx"]
             report["merge_diagnostic"] = detail
+        elif isinstance(error, EmptyBlockError):
+            report["empty_diagnostic"] = dict(error.diagnostic) | {
+                "original_page": part.page_start + error.diagnostic["page"] - 1}
         return report
     report.update(status="ADAPTER_PASS_NOT_RECOVERED", error_code=None, block_count=len(parsed.blocks),
+                  unexplained_empty_text_or_tables=0,
                   original_pages=sorted({part.page_start + block.page - 1 for block in parsed.blocks}))
     return report
 
 
-def inspect_database(job_id: UUID, settings, batch_id: str, archive_path: Path | None) -> dict:
+def inspect_database(job_id: UUID, settings, batch_id: str, archive_path: Path | None,
+                     *, allow_normalizer_upgrade=False) -> dict:
     """在有界只读事务中取当前检查点并退出；不调用带行锁/提交/恢复副作用的业务入口。"""
     from sqlalchemy import select, text
     from sqlalchemy.orm import Session, defer
@@ -136,7 +181,8 @@ def inspect_database(job_id: UUID, settings, batch_id: str, archive_path: Path |
                 defer(DocumentParseJob.upload_url), defer(DocumentParseJob.error_message))).one_or_none()
             if row is None:
                 raise MinerUError("DIAGNOSTIC_JOB", "未找到原解析Job")
-            return inspect_job(*row, settings, batch_id, archive_path)
+            return inspect_job(*row, settings, batch_id, archive_path,
+                               allow_normalizer_upgrade=allow_normalizer_upgrade)
         finally:
             # 即使离线Adapter失败也显式回滚；无flush/commit/状态修改。
             session.rollback()
@@ -166,6 +212,8 @@ def main(argv=None) -> int:
     parser.add_argument("--batch-id", required=True)
     parser.add_argument("--zip", type=Path)
     parser.add_argument("--output", required=True, help="必须是results下尚不存在的JSON文件")
+    parser.add_argument("--allow-normalizer-upgrade", action="store_true",
+                        help="显式仅在离线诊断副本允许冻结v2使用v3，不修改或恢复原Job")
     args = parser.parse_args(argv)
     try:
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", args.batch_id):
@@ -179,7 +227,8 @@ def main(argv=None) -> int:
         from app.core.business_logging import configure_logging
         settings = get_settings()
         configure_logging(settings, role="mineru-diagnostic-cli")
-        report = inspect_database(args.job_id, settings, args.batch_id, args.zip)
+        report = inspect_database(args.job_id, settings, args.batch_id, args.zip,
+                                  allow_normalizer_upgrade=args.allow_normalizer_upgrade)
     except MinerUError as error:
         report = {"status": "BLOCKED", "error_code": error.code,
                   "cloud_submitted": False, "database_modified": False, "cache_published": False}
