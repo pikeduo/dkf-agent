@@ -11,7 +11,8 @@ from lxml import etree
 from app.core.config import Settings
 from app.core.file_formats import FileFormatError, validate_file_content
 from app.parsers.common import ParserError
-from app.parsers.routing.contracts import Inspection, PageSignals, StructuralSignals
+from app.parsers.routing.contracts import PDF_COVERAGE_VERSION, Inspection, PageSignals, StructuralSignals
+from app.parsers.routing.pdf_coverage import margin_rule_only
 from app.parsers.text import FENCE, read_text
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -283,7 +284,7 @@ def has_columns(lines: list[tuple], width: float) -> bool:
 
 
 def inspect_pdf(path: Path, settings: Settings) -> Inspection:
-    """逐页发现扫描、混合内容与明显复杂版式；小图片面积阈值可配置，绝不改阅读顺序。"""
+    """逐页预检并冻结覆盖 v2；仅严格白名单装饰页免覆盖，未知绘图保守要求结果。"""
 
     pages, risks = [], []
     with pymupdf.open(path) as document:
@@ -329,6 +330,13 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
             )
             visual = ratio >= settings.router_pdf_image_area_ratio
             required = bool(text or images or drawings or annotations)
+            if not required:
+                # shading/不可提取的绘制可能不在 get_drawings 中，未知绘制不能冒充空白页。
+                required = bool(page.get_bboxlog())
+            decorative = (not (text or images or annotations) and bool(drawings)
+                          and margin_rule_only(page, drawings))
+            if decorative:
+                required = False
             pages.append(
                 PageSignals(
                     page=page.number + 1,
@@ -338,6 +346,9 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                     drawing_count=len(drawings),
                     annotation_count=annotations,
                     required=required,
+                    decorative_drawing_count=len(drawings) if decorative else 0,
+                    coverage_reason=("margin_rule_only" if decorative else
+                                     "content_or_uncertain" if required else "empty"),
                 )
             )
             if not text and required:
@@ -346,11 +357,11 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                 risks.append("PDF_TEXT_IMAGE_MIXED")
             if visual and len(text) < settings.router_pdf_min_text_chars:
                 risks.append("PDF_INSUFFICIENT_TEXT")
-            if len(drawings) >= settings.router_pdf_drawing_count or any(
+            if not decorative and (len(drawings) >= settings.router_pdf_drawing_count or any(
                 (pymupdf.Rect(item["rect"]) & page.rect).get_area() / area
                 >= settings.router_pdf_drawing_area_ratio
                 for item in drawings
-            ):
+            )):
                 risks.append("PDF_COMPLEX_DRAWING")
             if annotations:
                 risks.append("PDF_HAS_ANNOTATION")
@@ -366,7 +377,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                 risks.append("PDF_ROTATED_TEXT")
         return Inspection(
             signals=StructuralSignals(
-                page_count=document.page_count, pages=tuple(pages)
+                page_count=document.page_count, pages=tuple(pages), pdf_coverage_version=PDF_COVERAGE_VERSION
             ),
             risks=tuple(dict.fromkeys(risks)),
         )

@@ -32,6 +32,16 @@
 
 Guard 在最终 Block 替换前检查有效正文、非空 PDF 页面覆盖/范围、Native XLSX 有效 Sheet 数和章节、来源、逻辑页、Office 空 bbox。不改变 Block/ID/顺序、不拆表格公式、不补 OCR 字符。Native 解析/检查/整体替换/CHUNKING 同事务；失败回滚后独立记安全原因，旧结果不被半份新块覆盖。
 
+### PDF 页面覆盖 v2（不改变 Normalizer）
+
+`RouteDecision.decision_version`仍为`router-v1`；新PDF预检另外冻结`signals.pdf_coverage_version=pdf-coverage-v2`。每页保留原始`drawing_count`，增加`decorative_drawing_count`及固定`coverage_reason`（empty/content_or_uncertain/margin_rule_only）。旧JSON缺字段时仅按v1/legacy读取，原`required`不重算。
+
+仅当整页没有文字绘制（含隐藏文字）、图片、批注和其他绘制，全部路径共同构成页顶/页底10%内**同一条≤2pt高、宽度≥页面80%的不透明中性灰横线**时，才认定`margin_rule_only / required=false`。形状只允许完整长矩形及两端≤2pt直线封口；逐项核对路径、填充及完整bboxlog序列。32路径是检查资源预算，不是按数量判装饰。彩色、曲线、内容区线条、旋转页、图表/公式/流程图、额外/未知绘制或证据不足仍保守要求覆盖。
+
+Inspector负责证据分类和冻结；Guard仍只消费该快照，缺少任何required页照常失败，不看文件名/验收页号，也不从云端缺页反推装饰。分片原页摘要仅平移页号，保留同一规则版本/依据；不改Block、原物理页、bbox、顺序或ID。原生PDF Parser本轮不改，其无文本绘图页仍可触发既有一次云回退；此白名单不宣称Native已能完整处理任意矢量内容。
+
+Normalizer保持`mineru-adapter-v3`，解析正文/缓存键未改；缓存命中仍须通过当前/冻结Guard。旧付费Job不自动升级覆盖规则或恢复；显式只读比较见[MinerU缺页调查与比较](MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。新Mock用例在`tests/test_pdf_coverage.py`，本轮未执行。
+
 auto Native 只有明确 OCRRequiredError/CompletenessError、且平台支持该格式时最多回退一次。空/非法 CSV、损坏文档、普通 ParserError 不回退。MinerU 失败不降 Native；路由远端明确 failed 后不自动申请第二批，由管理员决定新代次。显式入口远端 failed 也不自动新建批次；PUT/GET/下载临时重试保留同 batch。
 
 云交接只在当前文档行锁和代次下创建 Job，换新云代次使旧 Native 消息/失败回调失效，提交后才投递既有短任务。投递确认失败留活动 Job，可用已有 `/mineru` 恢复同一代次。数据库与 Broker 非原子，进程中断不自动补投。

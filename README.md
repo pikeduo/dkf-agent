@@ -759,7 +759,7 @@ MinerU远端done、ZIP已下载但出现EMPTY_BLOCK时，保留原结果并按[�
 
 出现`MERGE_EVIDENCE`时，Adapter之前下载的ZIP可能尚未缓存；先从**原已完成Batch**保留结果，再按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对Hash、版本与具体子原因。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
 
-旧v2付费Job需要用v3比较结果时，只有诊断CLI的显式`--allow-normalizer-upgrade`允许使用内存副本，报告同时保留旧/新身份；这不是部署、缓存迁移或业务恢复授权。Adapter通过但Completeness Guard失败仍判失败，不自动忽略缺页。
+旧v2付费Job需要用v3比较结果时，只有诊断CLI的显式`--allow-normalizer-upgrade`允许使用内存副本，报告同时保留旧/新身份。PDF新预检仅对严格证明的页边缘灰细横线免覆盖，未知绘图仍要求结果；旧冻结覆盖默认不变，另有独立`--allow-coverage-upgrade`只读比较，见[MinerU完整性故障排查](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。这些开关不是部署、缓存迁移或业务恢复授权，不自动忽略缺页或继续收费批次。
 
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 

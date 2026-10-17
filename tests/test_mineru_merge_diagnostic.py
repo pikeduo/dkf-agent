@@ -237,3 +237,169 @@ def test_database_inspection_enforces_read_only_and_rollback_on_error(monkeypatc
     assert calls[-1] == "ROLLBACK" and "SELECT" in calls[-2]
     assert all(not any(word in statement.upper() for word in ("FOR UPDATE", "INSERT ", "DELETE ", "COMMIT"))
                for statement in calls)
+
+
+def coverage_context(context, monkeypatch):
+    """在原诊断上下文增加两个物理页摘要；新预检只给元数据Stub，不打开PDF。"""
+    from app.parsers.routing import inspector
+    from app.parsers.routing.contracts import Inspection, StructuralSignals
+    from app.parsers.routing.router import decide_route
+
+    document, job, settings, path = context
+    rows = [dict(page=1, text_chars=20, image_count=0, image_area_ratio=0,
+                 drawing_count=0, annotation_count=0, required=True),
+            dict(page=2, text_chars=0, image_count=0, image_area_ratio=0,
+                 drawing_count=4, annotation_count=0, required=True)]
+    frozen = decide_route("pdf", "mineru", Inspection(signals=StructuralSignals(page_count=2, pages=rows)))
+    job.parse_options["_route_decision"] = frozen.model_dump(mode="json")
+    # 用缺省版本字段的旧JSON模拟真实冻结数据，禁止因为新增默认值就改写它。
+    job.parse_options["_route_decision"]["signals"].pop("pdf_coverage_version")
+    for row in job.parse_options["_route_decision"]["signals"]["pages"]:
+        row.pop("coverage_reason")
+        row.pop("decorative_drawing_count")
+    proposed = deepcopy(rows)
+    proposed[0].update(coverage_reason="content_or_uncertain")
+    proposed[1].update(required=False, coverage_reason="margin_rule_only", decorative_drawing_count=4)
+    inspected = Inspection(signals=StructuralSignals(page_count=2, pages=proposed,
+                                                    pdf_coverage_version="pdf-coverage-v2"))
+
+    def inspect_stub(*args):
+        """仅返回已验证的结构摘要，不读取或生成文档。"""
+        return inspected
+
+    monkeypatch.setattr(inspector, "inspect_pdf", inspect_stub)
+    return inspected
+
+
+def test_coverage_comparison_requires_flag_and_preserves_frozen_failure(context, tmp_path, monkeypatch):
+    """冻结缺页默认失败；显式覆盖比较只在副本通过原Guard，不改块/旧身份或发布缓存。"""
+    from app.services.mineru import pdf_split_jobs
+    from app.parsers.routing.contracts import RouteDecision
+    from app.parsers.routing.guard import guard_result, CompletenessError
+    coverage_context(context, monkeypatch)
+    document, job, settings, _ = context
+    values, layout, _ = merged_case()
+    archive = tmp_path / "input.zip"
+    archive.write_bytes(result_zip(values, layout=layout))
+    calls = []
+
+    def real_guard(doc, task, part, parsed):
+        """记录相同正文/ID并调用真实Guard；此测试片从原页1开始，不需额外平移。"""
+        calls.append(parsed.model_dump_json())
+        try:
+            guard_result(parsed, RouteDecision.model_validate(task.parse_options["_route_decision"]))
+        except CompletenessError:
+            raise MinerUError("COMPLETENESS", "缺少必需页面") from None
+
+    monkeypatch.setattr(pdf_split_jobs, "validate_piece", real_guard)
+    before = deepcopy(vars(job)), deepcopy(vars(document))
+    default = tool.inspect_job(document, job, settings, "original-batch", archive)
+    assert default["status"] == "FAIL" and default["error_code"] == "COMPLETENESS"
+    assert default["missing_required_original_pages"] == [2]
+    report = tool.inspect_job(document, job, settings, "original-batch", archive, allow_coverage_upgrade=True)
+    assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED"
+    assert report["frozen_completeness_guard"] == "FAIL" and report["completeness_guard"] == "PASS"
+    assert report["guard_evaluation_scope"] == "proposed_coverage_only"
+    assert report["frozen_missing_required_original_pages"] == [2]
+    assert report["missing_required_original_pages"] == []
+    assert report["coverage_change_pages"] == [{"page": 2, "frozen_required": True,
+        "proposed_required": False, "reason": "margin_rule_only", "drawing_count": 4,
+        "decorative_drawing_count": 4}]
+    assert report["normalizer_version"] == "mineru-adapter-v3"
+    assert not report["normalizer_changed_by_coverage_comparison"]
+    assert report["frozen_adapter_identity"] == report["adapter_identity"]
+    assert all(value == calls[0] for value in calls)
+    assert (vars(job), vars(document)) == before
+    assert not report["database_modified"] and not report["cloud_submitted"] and not report["cache_published"]
+    assert not list(settings.parsed_dir.rglob("ready.json"))
+
+
+@pytest.mark.parametrize("change", ["missing_page", "count", "page_count", "uncertain",
+                                   "required_page", "conflicting_guard", "new_frozen_version"])
+def test_coverage_upgrade_rejects_ambiguous_or_unexplained_change(context, monkeypatch, change):
+    """来源范围/计数或冻结版本不一致、非装饰覆盖变更均拒绝，不用新预检替换未知旧快照。"""
+    from app.parsers.routing import inspector
+    inspected = coverage_context(context, monkeypatch)
+    document, job, settings, _ = context
+    if change == "missing_page":
+        signals = inspected.signals.model_copy(update={"pages": inspected.signals.pages[:1]})
+        inspected = inspected.model_copy(update={"signals": signals})
+    elif change in {"count", "required_page"}:
+        first = inspected.signals.pages[0].model_copy(update={"text_chars": 19} if change == "count"
+            else {"required": False, "coverage_reason": "empty"})
+        inspected = inspected.model_copy(update={"signals": inspected.signals.model_copy(
+            update={"pages": (first, inspected.signals.pages[1])})})
+    elif change == "page_count":
+        inspected = inspected.model_copy(update={"signals": inspected.signals.model_copy(update={"page_count": 3})})
+    elif change == "uncertain":
+        inspected = inspected.model_copy(update={"uncertain": True})
+    elif change == "conflicting_guard":
+        job.parse_options["_cache_guard"] = deepcopy(job.parse_options["_route_decision"])
+        job.parse_options["_cache_guard"]["parse_mode"] = "auto"
+    else:
+        job.parse_options["_route_decision"]["signals"] = inspected.signals.model_dump(mode="json")
+
+    def inspect_stub(*args):
+        """向比较入口提供故障摘要，不操作真实原件。"""
+        return inspected
+
+    monkeypatch.setattr(inspector, "inspect_pdf", inspect_stub)
+    before = deepcopy(vars(job))
+    manifest = split.checked_manifest(document, job)
+    with pytest.raises(MinerUError) as error:
+        tool.compare_pdf_coverage(document, job, settings, manifest)
+    assert error.value.code == "DIAGNOSTIC_COVERAGE" and vars(job) == before
+
+
+def test_coverage_upgrade_does_not_authorize_normalizer_upgrade(context, tmp_path, monkeypatch):
+    """覆盖许可与Normalizer许可独立，旧v2没有单独许可仍在读取ZIP之前停止。"""
+    coverage_context(context, monkeypatch)
+    document, job, settings, path = context
+    job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v2"
+    with pytest.raises(MinerUError) as error:
+        tool.inspect_job(document, job, settings, "original-batch", path, allow_coverage_upgrade=True)
+    assert error.value.code == "CACHE_CONFIG_CHANGED"
+
+
+def test_comparison_rechecks_source_hash_after_inspection(context, monkeypatch):
+    """只读预检前后都核对原件Hash，避免期间原件变化仍解除页面覆盖要求。"""
+    from app.parsers.routing import inspector
+    inspected = coverage_context(context, monkeypatch)
+    document, job, settings, _ = context
+
+    def mutate_source(*args):
+        """仅破坏测试临时字节哨兵，模拟其他进程并发替换原件。"""
+        from pathlib import Path
+        Path(document.file_path).write_bytes(b"changed-source")
+        return inspected
+
+    monkeypatch.setattr(inspector, "inspect_pdf", mutate_source)
+    with pytest.raises(MinerUError) as error:
+        tool.compare_pdf_coverage(document, job, settings, split.checked_manifest(document, job))
+    assert error.value.code == "PDF_SPLIT_CHANGED"
+
+
+def test_cli_passes_two_independent_permissions_without_running_business(tmp_path, monkeypatch):
+    """CLI精确传递两个许可；本用例只记录参数及生成临时摘要，不运行预检/Normalizer/数据库。"""
+    from app.core import business_logging, config
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    calls = []
+
+    def settings_stub():
+        """拒绝读取用户.env，返回无凭据的内存配置。"""
+        return Settings(_env_file=None)
+
+    def logging_stub(*args, **kwargs):
+        """不建立真实日志文件。"""
+
+    def database_stub(*args, **kwargs):
+        """记录许可但不连接数据库，缺ZIP状态不能伪装为验收通过。"""
+        calls.append(kwargs)
+        return {"status": "BLOCKED", "error_code": "ZIP_REQUIRED"}
+
+    monkeypatch.setattr(config, "get_settings", settings_stub)
+    monkeypatch.setattr(business_logging, "configure_logging", logging_stub)
+    monkeypatch.setattr(tool, "inspect_database", database_stub)
+    assert tool.main(["--job-id", str(uuid4()), "--batch-id", "original-batch", "--output", "results/report.json",
+                      "--allow-normalizer-upgrade", "--allow-coverage-upgrade"]) == 2
+    assert calls == [{"allow_normalizer_upgrade": True, "allow_coverage_upgrade": True}]

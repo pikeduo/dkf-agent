@@ -2,12 +2,13 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.file_formats import FileType
 
 ParseMode = Literal["auto", "native", "mineru"]
 RouteStrategy = Literal["native", "mineru_whole", "hybrid_bundle", "failed"]
+PDF_COVERAGE_VERSION = "pdf-coverage-v2"
 REASON_CODES = frozenset(
     {
         "PREFLIGHT_LIMIT",
@@ -75,6 +76,25 @@ class PageSignals(BaseModel):
     drawing_count: int = Field(ge=0)
     annotation_count: int = Field(ge=0)
     required: bool
+    decorative_drawing_count: int = Field(default=0, ge=0)
+    coverage_reason: Literal["legacy", "empty", "content_or_uncertain", "margin_rule_only"] = "legacy"
+
+    @model_validator(mode="after")
+    def validate_coverage(self):
+        """新摘要必须说明白名单依据；旧快照保留 required，不通过默认值重新推断。"""
+        if self.coverage_reason == "legacy":
+            valid = self.decorative_drawing_count == 0
+        elif self.coverage_reason == "empty":
+            valid = not (self.required or self.text_chars or self.image_count or self.drawing_count
+                         or self.annotation_count or self.decorative_drawing_count)
+        elif self.coverage_reason == "margin_rule_only":
+            valid = (not self.required and not (self.text_chars or self.image_count or self.annotation_count)
+                     and self.drawing_count == self.decorative_drawing_count > 0)
+        else:
+            valid = self.required and self.decorative_drawing_count == 0
+        if not valid:
+            raise ValueError("PDF 页面覆盖依据与结构计数不一致")
+        return self
 
 
 class StructuralSignals(BaseModel):
@@ -91,6 +111,16 @@ class StructuralSignals(BaseModel):
     embedded_count: int = Field(default=0, ge=0)
     image_reference_count: int = Field(default=0, ge=0)
     pages: tuple[PageSignals, ...] = ()
+    # 缺省视为旧规则；新预检显式冻结独立版本，不改 Normalizer/供应商参数。
+    pdf_coverage_version: Literal["pdf-coverage-v1", "pdf-coverage-v2"] = "pdf-coverage-v1"
+
+    @model_validator(mode="after")
+    def validate_pdf_coverage_version(self):
+        """禁止新旧覆盖依据混装，确保旧付费 Job 不会因读取而自动升级。"""
+        legacy = self.pdf_coverage_version == "pdf-coverage-v1"
+        if any((page.coverage_reason == "legacy") != legacy for page in self.pages):
+            raise ValueError("PDF 页面覆盖规则版本与逐页依据不一致")
+        return self
 
 
 class RouteDecision(BaseModel):

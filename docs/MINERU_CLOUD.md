@@ -100,7 +100,7 @@ MERGE终态不属于已有JOB_TIMEOUT/传输错误Retry白名单，当前不建�
 
 当前真实ZIP验证：文本恢复1处；表格14+14→28行（86+86个单元格）、9+9→18行（45+45个）、31+8→39行（118+73个），共453个单元格逐项核对，前两组后页footnote归还原页。完整Adapter通过、2263个Block、198个有Block的页面，未解释空正文/空表格为0。
 
-**Guard仍失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，尚不能判断绘图是纯装饰还是供应商漏解析。不得删除required页、伪造Block或把Guard失败改成通过。实际最终报告仍为`FAIL / COMPLETENESS`，不是ADAPTER_PASS_NOT_RECOVERED。
+**历史报告03的Guard失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，当时尚未核对原页，报告为`FAIL / COMPLETENESS`。该报告保留不改写；后续只读原页调查及新规则见下节，旧冻结Job默认仍失败，不能直接删除required页、伪造Block或修改SQL。
 
 显式只读比较旧付费Job（本轮已执行，不会修改Job、发布缓存或提交第二片）：
 
@@ -121,6 +121,29 @@ python -m pytest tests/test_mineru_table_merge.py tests/test_mineru_merge.py tes
 conda activate dkf-agent
 python -m pytest tests/test_mineru_merge_boundaries.py tests/test_mineru_merge.py tests/test_mineru_order.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py -q -ra -p no:cacheprovider
 ```
+
+#### PDF 页面完整性：装饰横线与冻结覆盖比较
+
+已只读核对原257页PDF及相邻页，原Hash、首片Hash、ZIP Hash与原记录一致。物理131/188页为612×792pt、未旋转，均无文字/字体/文字绘制、图片或批注。4个不透明灰色填充路径（两个长矩形和两个端部直线封口）共同组成宽约575.775pt、高1.3515625pt的分隔线；y分别为39.1484～40.5pt、20.9219～22.2734pt，包围盒约占页面0.1605%。Poppler预览显示除此横线外为空白；相同相对路径/灰度模板在原件33页出现，包括有正常正文的189页。这不是4个图表，也未发现需要补OCR的业务内容。
+
+本地新调查报告为`results/mineru_completeness_pages_01/investigation.json`，同目录保留130/131/132/187/188/189页PNG预览；不含正文摘录、Token或下载URL，受`/results/`忽略。本轮仅执行原页结构/视觉调查及ZIP的V1/layout读取，**未执行pytest、完整normalize或Guard诊断**，不沿用上次的280/44项结果冒充本轮通过。
+
+新预检采用独立`pdf-coverage-v2`，只有几何/全部绘制证据严格匹配页边缘灰细横线白名单才免覆盖；未知绘图仍required，详见[Router覆盖规则](PARSER_ROUTER.md#pdf-页面覆盖-v2不改变-normalizer)。Inspector分类、Guard执行冻结要求；生产Guard及分片平移逻辑未改，Normalizer仍为v3、正文和缓存键不变。
+
+旧Job的Normalizer v2及旧覆盖v1不能被静默覆盖。诊断CLI新增独立`--allow-coverage-upgrade`，只在Hash一致且原257页逐页原始计数完全相同、旧快照完整时，重新预检原件并构造内存副本；只允许白名单装饰页的required=true→false。页数/计数/旧快照冲突或其他变化均`DIAGNOSTIC_COVERAGE`，原件期间变更为`PDF_SPLIT_CHANGED`。新规则不是重新选择路由，仍保留原mineru_whole/参数/批次。此许可与Normalizer升级许可独立，生产Worker没有这两个开关。
+
+用户手动执行（输出文件必须不存在；无新云调用、缓存发布、业务SQL写入或第二片投递）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_pdf_coverage.py tests/test_parser_router.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_table_merge.py tests/test_mineru_merge_boundaries.py -q -ra -p no:cacheprovider
+python scripts/mineru_merge_diagnostic.py --job-id dceb1360-addc-4411-9d63-0e48ddc59df7 --batch-id f3234a37-7cf3-4a47-8e9e-edc408d22fe1 --zip data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip --allow-normalizer-upgrade --allow-coverage-upgrade --output results/mineru_completeness_acceptance_01.json
+Get-Content -Encoding UTF8 results/mineru_completeness_acceptance_01.json
+```
+
+预期而非已执行：文本恢复1处、表格恢复3组、2263 Block；`frozen_completeness_guard=FAIL`（131/188）、`guard_evaluation_scope=proposed_coverage_only`、新`completeness_guard=PASS`、`status=ADAPTER_PASS_NOT_RECOVERED`。报告保留新旧覆盖版本、两套决策Hash、逐页变更、原冻结Normalizer/拟用版本/Adapter身份，并明确coverage比较不改Normalizer。缺少coverage开关仍按旧冻结要求FAIL/COMPLETENESS；两个开关都不加则旧Normalizer在读取ZIP前CACHE_CONFIG_CHANGED。
+
+诊断成功也不恢复FAILED Job、不标Cache READY、不继续第二片；后续仍须单独授权并实现前述可审计恢复方案。本轮无数据库迁移、环境变量、新依赖或真实MinerU请求。
 
 先运行 Mock 单测（不需要数据库、Worker、GPU或云端）：
 

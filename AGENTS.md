@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**32数据冻结保留；超限PDF首片原ZIP文本恢复1处、跨页表格3组及完整Adapter通过（2263 Block），Normalizer升级v3并隔离旧身份。280项相关Mock/44项日志回归通过；原Guard因131/188页无块仍失败，付费Job未恢复、无新批次，不进入33～36。**
+当前阶段：**32数据冻结保留；首片既有Adapter v3通过2263 Block及文本/表格恢复不变。已只读确认131/188页仅装饰横线，新增覆盖v2白名单和显式只读冻结比较；本轮测试仅编写，完整ZIP/Guard待用户执行。旧Job仍未恢复、无新批次，不进入33～36。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 多选上传/日志/PDF分片与Windows句柄修复保留；文本可跨已验证页边界，跨页表格按V1原行/附注及严格网格证明归还原页，真实Adapter通过；缺页Guard/业务恢复待验收 |
+| 配套功能 | 多选上传/日志/PDF分片与Windows句柄/文本表格恢复保留；新增严格装饰横线覆盖v2及独立只读比较，未知绘图仍必需；新Mock/完整Guard与旧Job恢复待验收 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
@@ -169,6 +169,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - RouteDecision 版本固定，只含模式/格式/策略、白名单理由、结构计数、页摘要和回退次数，不含正文、地址、凭据或虚构置信度；任务结果与 job 的 `_route_decision` 保存，不参与供应商参数 Hash、不透传 API。
 - auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。所有云入口远端 failed 不自动追加批次，云失败不降 Native；PUT/GET/下载有限重试仍用同批次。
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
+- PDF覆盖独立版本化为`pdf-coverage-v2`，不改变Normalizer v3/正文/缓存键；只凭全部绘制证据证明页边缘单条不透明灰细横线才免覆盖，保留原drawing_count、固定依据/装饰计数。未知矢量/隐藏文字/图像/批注/复杂图表仍要求覆盖，不以绘图数量或云端缺页推断装饰。旧快照默认v1且required不重算；仅诊断显式`--allow-coverage-upgrade`可在Hash/原始计数一致时比较内存副本，与Normalizer升级许可独立，不改Job/Guard/缓存、不恢复或投递收费任务。详见[覆盖比较](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。
 - 云交接保持行锁/代次检查、提交后投递；路由拒绝为 Document=FAILED、Celery=FAILURE，固定安全理由可追踪，无新 Block/云调用。交接成功不等于解析成功，查询 Document/Parse Job。
 - 云费用按 doc_id/job_id/batch_id 去重：普通Whole/Bundle计划1，PDF分片计划数以实际物化manifest为准；每个确认Batch的文件计1，片缓存命中计0，不直接累加重复日志。提交不确定不等于未计费，须平台核对。
 
