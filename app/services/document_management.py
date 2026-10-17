@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.business_logging import log_event
@@ -103,24 +103,34 @@ def active_job(session, document):
 
 
 def retry_cloud_job(session, document, settings):
-    """显式Retry只恢复当前代次的本地超时批次；不复活远端失败、未知POST或旧代次。"""
+    """显式Retry恢复原超时 Batch 或分片传输故障；保留成功片，不新建收费身份。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
+    from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
     job = active_job(session, document)
     if job is None and document.status == "FAILED":
         job = session.scalar(select(DocumentParseJob).where(
             DocumentParseJob.doc_id == document.doc_id,
             DocumentParseJob.task_id == document.processing_task_id,
             DocumentParseJob.state == "failed", DocumentParseJob.is_active.is_(False),
-            DocumentParseJob.error_code == "JOB_TIMEOUT").with_for_update())
+            # 普通任务仍只接受 JOB_TIMEOUT；分片传输错误在下方按白名单严格核对。
+            or_(DocumentParseJob.error_code == "JOB_TIMEOUT",
+                DocumentParseJob.parse_options.has_key("_pdf_split")),
+            ).with_for_update())
         if not isinstance(job, DocumentParseJob):
             return None
+        try:
+            split_resume = resumable_split(document, job)
+            permitted = job.error_code == "JOB_TIMEOUT" or split_resume
+        except MinerUError:
+            raise ManagementError("MANAGEMENT_CHECKPOINT") from None
         if (job.doc_id != document.doc_id or job.task_id != document.processing_task_id
-                or job.is_active or job.state != "failed" or job.error_code != "JOB_TIMEOUT"
-                or job.file_hash != document.file_hash or not job.batch_id or not job.upload_complete
+                or job.is_active or job.state != "failed" or not permitted
+                or job.file_hash != document.file_hash
+                or not (job.batch_id and job.upload_complete or split_resume)
                 or job.provider != "mineru_cloud"):
             raise ManagementError("MANAGEMENT_CHECKPOINT")
-        # 只有已确认上传的原batch可以重新观察；不创建Job、不更换data_id/task_id、不申请链接。
+        # 续看原Batch，或恢复从未提交的分片；不创建Job、不更换片身份、不重发已提交片。
         try:
             renew_local_wait(job, settings)
         except MinerUError:
@@ -128,6 +138,7 @@ def retry_cloud_job(session, document, settings):
         job.is_active, job.state, job.finished_at = True, "pending", None
         job.error_code = job.error_message = document.error_message = None
         document.status = "PARSING"
+        sync_current(document, job, settings)
     elif job is not None:
         try:
             renew_local_wait(job, settings)

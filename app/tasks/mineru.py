@@ -16,6 +16,7 @@ from app.models import DocumentParseJob
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import check_step, record_error, submit_step, restore_cached_result
 from app.services.mineru.provider import MinerUCloudProvider
+from app.services.parse_cache import CacheError
 from app.parsers.hybrid import BundleManifest
 from app.services.hybrid_processing import metrics
 from app.tasks.documents import DocumentProcessingError, processing_session
@@ -50,7 +51,7 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
 
 
 def execute_step(task, job_id: str, step: str) -> dict:
-    """执行一次 HTTP 步骤后结束；临时错误按持久化次数指数退避，永久错误立即失败。"""
+    """执行单片短步骤；摘要按实际不同分片 Batch 计数，永久失败不继续后续分片。"""
 
     try:
         identifier = UUID(job_id)
@@ -73,11 +74,13 @@ def execute_step(task, job_id: str, step: str) -> dict:
                 )
             job = session.get(DocumentParseJob, identifier)
             route_summary = {}
+            if job is not None:
+                from app.services.mineru.pdf_split_jobs import submitted_count
+                route_summary["mineru_file_submit_count"] = submitted_count(job)
             if job is not None and "_route_decision" in job.parse_options:
-                route_summary = {
+                route_summary.update({
                     "route_decision": job.parse_options["_route_decision"],
-                    "mineru_file_submit_count": int(job.batch_id is not None),
-                }
+                })
                 if "_hybrid" in job.parse_options:
                     route_summary.update(metrics(BundleManifest.model_validate(
                         job.parse_options["_hybrid"]["manifest"]
@@ -106,6 +109,8 @@ def execute_step(task, job_id: str, step: str) -> dict:
         return summary
     except MinerUError as exc:
         error = exc
+    except CacheError as exc:
+        error = MinerUError(exc.code, str(exc))
     except (OperationalError, OSError):
         error = MinerUError(
             "DATABASE", "MinerU 数据库或文件访问暂时不可用", retryable=True

@@ -25,7 +25,7 @@ NATIVE_VERSION = "native-v1"
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACTS = frozenset({"normalized_document.json", "raw/mineru_result.zip",
     "content_list.json", "full.md", "hybrid/bundle_manifest.json",
-    "hybrid/visual_bundle.pdf", "hybrid/normalized_visual_blocks.json"})
+    "hybrid/visual_bundle.pdf", "hybrid/normalized_visual_blocks.json", "pdf_split/manifest.json"})
 OPTION_NAMES = ("model_version", "language", "is_ocr", "enable_table", "enable_formula")
 
 
@@ -75,8 +75,8 @@ def cloud_options(settings: Settings) -> dict:
 
 
 def recipe(document, settings: Settings, strategy: str, *, scope: str = "complete",
-           manifest=None) -> dict:
-    """按原件、Provider、模型选项及覆盖策略生成缓存身份；Hybrid 与 Whole 隔离。"""
+           manifest=None, pdf_split_policy=None) -> dict:
+    """按原件/模型/覆盖生成身份；超限 PDF 另冻结分片策略，普通旧缓存身份不变。"""
 
     if strategy not in {"native", "mineru_whole", "hybrid_bundle"} or scope not in {"complete", "explicit_native_scope"}:
         raise CacheError()
@@ -92,6 +92,11 @@ def recipe(document, settings: Settings, strategy: str, *, scope: str = "complet
                  "enable_table": True, "enable_formula": True} if native else cloud_options(settings))}
     if document.file_type == "xlsx":
         value["native_primary_version"] = "xlsx-primary-v1"
+    if pdf_split_policy is not None:
+        from app.services.mineru.pdf_split import policy
+        if document.file_type != "pdf" or strategy != "mineru_whole" or pdf_split_policy != policy():
+            raise CacheError("CACHE_CONFIG_CHANGED")
+        value["pdf_split"] = pdf_split_policy
     if strategy == "hybrid_bundle":
         if manifest is None:
             raise CacheError()
@@ -328,7 +333,7 @@ class ParseCache:
             raise CacheError() from None
 
     def replay(self, document, settings: Settings) -> ParsedDocument:
-        """Reindex 只读取最近成功结果；配置/Hash 变化或缓存缺失明确拒绝，永不发云请求。"""
+        """Reindex 回放原件级完整缓存含分片策略；不重新生成分片或发起云请求。"""
 
         pointer = self.path(str(document.doc_id), "latest.json")
         if not pointer.exists():
@@ -337,6 +342,7 @@ class ParseCache:
             record = ReadyRecord.model_validate_json(self.read_bytes(pointer, 65536))
             current = recipe(document, settings, record.recipe["route_strategy"],
                              scope=record.recipe["coverage_scope"],
+                             pdf_split_policy=record.recipe.get("pdf_split"),
                              manifest=None) if record.recipe["route_strategy"] != "hybrid_bundle" else None
             if current is None:
                 # Hybrid 映射已冻结；此处只核对参数/配置，不能为了 Reindex 重跑 Extractor。

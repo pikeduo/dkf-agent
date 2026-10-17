@@ -1,6 +1,6 @@
 # 整份文档 Parser Router v1（11B.1）
 
-当前链路为 `Preflight → Decision → Cache / Native / MinerU Whole / Hybrid → Guard`；无法安全处理明确 FAILED，不设置 Review。XLSX 增强见 [Selective Hybrid](SELECTIVE_HYBRID.md)，缓存/维护见 [Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。仍无 Chunk/Embedding/RAG，验收由用户完成。
+当前链路为 `Preflight → Decision → Cache / Native / MinerU Whole / Hybrid → Guard`；无法安全处理明确 FAILED，不设置 Review。实际云路由的超限PDF可在Whole内部连续分片，仍是一个原文档/一次完整覆盖策略，不是逐页Native/云混合；全片成功后Guard再接原Chunk/Embedding/Index。见[MinerU分片](MINERU_CLOUD.md#超限-pdf连续分片)、[Selective Hybrid](SELECTIVE_HYBRID.md)与[Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。新增分片待人工验收。
 
 ## 1. 使用和兼容边界
 
@@ -123,7 +123,7 @@ tests/test_parser_router.py、tests/parser_router_smoke.py 覆盖格式矩阵、
 
 旧 XLS 的公式退化/视觉遗漏不由路由修复。新增 XLSX Hybrid 与保留公式的 Whole 合并尚未真实验证，不承诺任意视觉语义完整。真实鉴权、上传、ZIP/Adapter/落库及混合完整性必须手动验证，Mock 通过不能替代。
 
-费用摘要：初始结果实际提交 0、云计划 1；确认 batch 后提交 1，PUT/GET/下载重试不建新源文件任务。重复日志/快照不能累加为真实配额，应按 job_id/batch_id 去重。POST 确认丢失/平台拒绝时本地无法证明实际收费/额度，以平台核对为准。开启 Hybrid 后同样最多一份 Bundle；零视觉页为零云文件，没有每图/每表调用。
+费用摘要：初始实际提交0，普通Whole/Hybrid云计划1；超限PDF计划数须待Worker按实际字节物化后确定，初始为null。按不同片确认Batch计实际文件数，PUT/GET/下载重试不新增收费身份，成功片缓存命中为0新提交。重复日志/快照不能累加配额；POST确认不明确须平台核对。Hybrid仍最多一份Bundle，零视觉页零云文件，没有每图/每表调用。
 
 最新授权已接入阶段12缓存，不改变完整性底线；已有收费历史的失败操作不得按旧说明自动申请新批次。11B.2 和缓存仍待人工验收，不进入阶段13。
 

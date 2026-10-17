@@ -19,7 +19,9 @@ def lock_keys(session, keys: list[str]) -> None:
 
 
 def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_reparse: bool):
-    """miss 时检查已提交/不确定历史；活动解析绝不并行付费，终态收费历史要求 Reparse。"""
+    """miss 检查完整及分片提交历史；当前片尚未提交不抹去前片费用保护。"""
+
+    from app.services.mineru.pdf_split_jobs import has_submission_history
 
     key = key_for(value)
     lock_keys(session, [key, *visual_keys])
@@ -30,10 +32,10 @@ def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_
         log_event("cache.busy", doc_id=document.doc_id, cache_key=key, error_code="CACHE_IN_PROGRESS")
         raise MinerUError("CACHE_IN_PROGRESS", "相同内容已有活动云任务，未重复提交；完成后重试即可复用缓存")
     # 同代次已有 batch/申请意图包括失败或 done 后本地结果缺失，普通重试不重复花费。
-    if not force_reparse and any(job.submission_attempted or job.batch_id for job in previous):
+    if not force_reparse and any(has_submission_history(job) for job in previous):
         raise MinerUError("CACHE_REPARSE_REQUIRED", "相同内容已有云提交历史但可用缓存缺失；未自动收费，请核对旧批次或显式 Reparse")
     legacy = session.scalars(select(DocumentParseJob).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.file_hash == document.file_hash,
         DocumentParseJob.provider == "mineru_cloud")).all()
-    if not force_reparse and any(job.submission_attempted or job.batch_id for job in legacy):
+    if not force_reparse and any(has_submission_history(job) for job in legacy):
         raise MinerUError("CACHE_REPARSE_REQUIRED", "该文档已有云提交但当前参数下无可用缓存；普通重试不重新收费，请核对后显式 Reparse")

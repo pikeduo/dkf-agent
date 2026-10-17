@@ -5,7 +5,7 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段30已补有限LangGraph工作流、薄Tool、同范围/来源与云许可保护、可序列化协议和Mock用例，未执行；阶段29及此前真实验收待办保留。** 不自动进入31。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段32已冻结OHR/OCB各100原件与完整官方QA；新增超限云PDF连续分片代码/Mock，未执行分片/云调用/测试。** 此前未完成的业务验收保留，不进入33～36。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
@@ -3420,7 +3420,14 @@ LangChain Tool / Prompt Adapter Test
 
 OCB保留原始expected_assertions、weights、track、reference_files和Parquet行号，expected_answer=null；739条入选官方断言供后续人工逐项判分，未实现自动答案评分。另32条Domain任务/1138条断言因RAG适用性需审，不纳入正式QA分母。OHR保留原始0-based证据页和1-based投影，news兼容已补；multi仍按现有未支持规则单列排除，不伪造拆题。
 
-入口`scripts/prepare_stage32_dataset.py`默认dry-run；真实提取必须显式`--execute --confirm-local-use --run stage32_run_01`，本轮已按用户单独授权执行，**不要重跑覆盖**。新实验必须另选未存在run，不自动复制更多原件或追加到冻结目录。输出包含documents、qa、manifests和reports；双向校验PASS仅代表200原件/官方QA完整，缺依赖、孤立文件、重复Hash/ID均0，不代表解析或回答正确。OHR3份超过200页，后续整份云解析能力须另审，不改原件或自动拆分。
+入口`scripts/prepare_stage32_dataset.py`默认dry-run；真实提取必须显式`--execute --confirm-local-use --run stage32_run_01`，本轮已按用户单独授权执行，**不要重跑覆盖**。新实验必须另选未存在run，不自动复制更多原件或追加到冻结目录。输出包含documents、qa、manifests和reports；双向校验PASS仅代表200原件/官方QA完整，缺依赖、孤立文件、重复Hash/ID均0，不代表解析或回答正确。OHR3份超过200页，不改冻结原件/Hash/QA；新增的云PDF分片能力仅代码/Mock已编写，真实分片与收费验收须另行授权。
+
+### 配套：MinerU 超限 PDF（待人工验收，不启动33～36）
+
+- 只在实际选择MinerU且PDF超过200页或200MB（保守取200,000,000字节）时由Worker生成连续页段，实际文件大小二分校验，每段<=200页/200MB，单页仍超限明确失败；Native可完整覆盖不拆，非PDF超限沿用安全拒绝。
+- 一个原Document/Parse Job，现有parse_options JSONB保存版本化分片账本；不新增表或迁移。分片物化后再逐片申请/上传/检查；Batch/提交意图与片结果检查点可恢复，成功片复用缓存，未知提交不盲目重发，按真实文件数共享限流/计费观测。
+- 全部片完整成功后映射原物理页、稳定合并同页原序，原件级成功缓存和完整Block提交后才推进原Chunk/Embedding/Index。任何片失败不发布半份Block/READY，不改Evidence/Citation与OHR官方0-based页码。
+- 不绕过原上传/预检/缓存/切片资源上限。具体检查点、费用边界、Mock命令和真实人工验收见[MinerU Cloud](MINERU_CLOUD.md#超限-pdf连续分片)。本轮不执行pytest、真实分片、迁移、收费API或模型。
 
 阶段33～36读取两个QA JSONL、文档manifest及qa_file_mapping.csv，以项目根目录解析source_file_paths，使用稳定file_id/SHA、官方QA ID/行号和OHR页码；不读取业务preset或复用不完整QA。真实上传/检索/RAG/云费用和性能评测仍须用户另行授权。原先10～50题的最低设计目标保留为历史建议，不限制当前固定官方题库规模。
 
@@ -3811,7 +3818,7 @@ Codex 必须遵守：
 31. Visual Bundle 只降低文件任务数，不等于不消耗页面额度；必须同时保护 bundle 页数、文件大小、MinerU 200 页限制和平台高优先级页额度。
 32. Hybrid Merge 必须保留 Native 的确定性结构，不得用 MinerU 计算结果覆盖 XLSX 公式原式；临时 bundle_page 不得作为原文档业务页码。
 33. Hybrid 失败不得逐元素补发 MinerU，也不得自动再提交 Whole-MinerU 造成不可控额度翻倍；失败后由显式重试 / 管理员决策处理。
-34. PDF 与 PPT/PPTX 第一版继续 Whole-MinerU，不因 Hybrid 能力存在就提前做逐页 / 逐元素拼接；DOCX Hybrid 只在 XLSX Hybrid 验证稳定后再评估。
+34. PDF 与 PPT/PPTX 保持 Whole-MinerU 业务策略；仅超限PDF在执行层连续分片、全片成功后原页合并，不是逐页Native/云混合。Office不套用PDF分片；DOCX Hybrid须另行评估。
 35. Markdown 图片引用在单文件上传下属于附件完整性问题，不自动抓取任意远程 URL，也不把未上传图片引用误判为完整解析。
 36. LlamaIndex 计划从阶段 15A 起接入；当前阶段 11A 不安装、不实现、不提前改造 Retrieval。
 37. LlamaIndex 只能作为 RAG 编排层，不得重新接管 Native/MinerU Parse、Parse Cache、Chunk、BGE-M3 文档 Embedding 或 PostgreSQL 业务真相表。

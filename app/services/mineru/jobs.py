@@ -44,8 +44,14 @@ def parse_options(settings: Settings) -> dict:
     }
 
 
-def local_file(document: Document, job: DocumentParseJob) -> LocalFile:
-    """整份任务读取原件；Hybrid 仅映射一个受检 Bundle，Document 仍属于源 XLSX。"""
+def local_file(document: Document, job: DocumentParseJob, settings: Settings | None = None) -> LocalFile:
+    """整份读取原件，Hybrid/超限 PDF 读取受检派生文件；始终保留原 Document 身份。"""
+
+    if "_pdf_split" in job.parse_options:
+        from app.services.mineru.pdf_split_jobs import source_for_part
+        if settings is None:
+            raise MinerUError("PDF_SPLIT_CHECKPOINT", "PDF 分片缺少存储配置")
+        return source_for_part(document, job, settings)
 
     if "_hybrid" in job.parse_options:
         path, file_hash = bundle_file(document, job.parse_options["_hybrid"])
@@ -165,8 +171,16 @@ def create_job(
             signals=guard_inspection.signals)
         options = options | {"_cache_guard": guard_decision.model_dump(mode="json")}
     manifest = BundleManifest.model_validate(hybrid_context["manifest"]) if hybrid_context else None
+    split_policy = None
+    if document.file_type == "pdf" and hybrid_context is None:
+        from app.services.mineru.pdf_split import MAX_BYTES, MAX_PAGES, policy
+        page_count = guard_decision.signals.page_count
+        if page_count and (page_count > MAX_PAGES or source_path(document).stat().st_size > MAX_BYTES):
+            split_policy = policy()
+            options = options | {"_pdf_split_request": {"policy": split_policy, "page_count": page_count}}
+            identity = hashlib.sha256(canonical(parse_options(settings) | {"pdf_split": split_policy})).hexdigest()
     cache_recipe = recipe(document, settings, "hybrid_bundle" if hybrid_context else "mineru_whole",
-                          manifest=manifest)
+                          manifest=manifest, pdf_split_policy=split_policy)
     cache_key = key_for(cache_recipe)
     visual_keys = sorted({key_for(visual_recipe(entry.content_hash, options, manifest.version))
         for entry in manifest.entries if entry.source_type == "embedded_image"
@@ -199,8 +213,8 @@ def create_job(
         submission_attempted=False,
         upload_complete=False,
     )
-    if cached is None:
-        validate_local_file(local_file(document, job))
+    if cached is None and split_policy is None:
+        validate_local_file(local_file(document, job, settings))
     if document.status == "FAILED":
         transition_document(document, "UPLOADED")
     transition_document(document, "PARSING")
@@ -251,6 +265,11 @@ def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[st
         if "_hybrid" in job.parse_options:
             completed = json.loads(files["hybrid/bundle_manifest.json"])
             job.parse_options = job.parse_options | {"_hybrid_result": completed}
+        if "_pdf_split_request" in job.parse_options:
+            from app.services.mineru.pdf_split import checked_manifest
+            completed = json.loads(files["pdf_split/manifest.json"])
+            job.parse_options = job.parse_options | {"_pdf_split": completed}
+            checked_manifest(document, job)
         finish_job(session, document, job, parsed)
         session.commit()
         log_event("cache.persisted", doc_id=document.doc_id, job_id=job_id,
@@ -308,9 +327,12 @@ def check_deadline(job: DocumentParseJob, settings: Settings) -> None:
 
 
 def renew_local_wait(job: DocumentParseJob, settings: Settings) -> None:
-    """仅供显式Retry延长已上传批次的过期观察窗口；不重置费用身份或自动重试计数。"""
+    """显式Retry延长原Batch或未提交分片的观察窗口，不重置收费身份/重试预算。"""
 
-    if not job.batch_id or not job.upload_complete:
+    waiting_split = "_pdf_split" in job.parse_options and (
+        not job.batch_id and not job.submission_attempted
+        or job.batch_id and job.upload_url and job.upload_expires_at and job.upload_expires_at > datetime.now(UTC))
+    if not (job.batch_id and job.upload_complete or waiting_split):
         return
     check_normalizer_recipe(job)
     try:
@@ -322,19 +344,35 @@ def renew_local_wait(job: DocumentParseJob, settings: Settings) -> None:
 
 
 def check_normalizer_recipe(job: DocumentParseJob) -> None:
-    """新转换只能使用当前归一化冻结身份；旧已验证结果由缓存恢复，不重新付费。"""
+    """新转换使用冻结归一化/分片生成器；旧已验证结果可回放，不悄悄更换收费输入。"""
 
     frozen = job.parse_options.get("_cache_recipe")
     if frozen is not None and (
         not isinstance(frozen, dict) or frozen.get("normalizer_version") != NORMALIZER_VERSION
     ):
         raise MinerUError("CACHE_CONFIG_CHANGED", "MinerU 归一化版本已变化，旧任务未重新解析或提交云批次")
+    if "_pdf_split_request" in job.parse_options:
+        from app.services.mineru.pdf_split import policy
+        if job.parse_options["_pdf_split_request"].get("policy") != policy():
+            raise MinerUError("PDF_SPLIT_CHECKPOINT", "PDF 分片生成器版本已变化，未重新提交")
+
+
+def prepare_split_step(session, document, job, settings):
+    """物化分片后重新获得行锁，片缓存命中每个短任务最多推进一片。"""
+    from app.services.mineru.pdf_split_jobs import ensure_plan, complete_cached_piece
+
+    ensure_plan(session, document, job, settings)
+    locked = lock_job(session, job.job_id)
+    if not locked:
+        return None, ("skipped", 0)
+    document, job = locked
+    return locked, complete_cached_piece(session, document, job, settings)
 
 
 def submit_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """先核对冻结版本，再持久化意图及 batch 后 PUT；同批次恢复不重复 POST。"""
+    """先核对整份/当前片版本，提交意图及 Batch 后 PUT；恢复不重复收费 POST。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -344,6 +382,11 @@ def submit_step(
         return "skipped", 0
     document, job = locked
     check_normalizer_recipe(job)
+    if "_pdf_split_request" in job.parse_options:
+        locked, completed = prepare_split_step(session, document, job, settings)
+        if completed is not None:
+            return completed
+        document, job = locked
     if job.upload_complete:
         return "check", 0
     check_deadline(job, settings)
@@ -356,10 +399,15 @@ def submit_step(
             raise MinerUError(
                 "SUBMIT_UNCERTAIN", "MinerU 提交结果不确定，禁止自动重复申请批次"
             )
-        source = local_file(document, job)
+        source = local_file(document, job, settings)
         validate_local_file(source)
+        if "_pdf_split" in job.parse_options:
+            from app.services.mineru.pdf_split_jobs import claim_piece
+            claim_piece(session, document, job)
         job.submission_attempted = True
         job.submission_started_at = datetime.now(UTC)
+        from app.services.mineru.pdf_split_jobs import sync_current
+        sync_current(document, job, settings)
         # 必须在非幂等 POST 前提交意图；重启时不能无条件再创建远端批次。
         session.commit()
         try:
@@ -377,11 +425,17 @@ def submit_step(
         job.upload_url = batch.urls[0]
         job.upload_expires_at = datetime.now(UTC) + timedelta(hours=24)
         job.submitted_at = datetime.now(UTC)
+        sync_current(document, job, settings)
         batch_log = {
             "doc_id": document.doc_id,
             "job_id": job_id,
             "batch_id": job.batch_id,
         }
+        if "_pdf_split" in job.parse_options:
+            from app.services.mineru.pdf_split import checked_manifest
+            from app.services.mineru.pdf_split_jobs import current_part
+            manifest = checked_manifest(document, job)
+            batch_log.update(file_index=current_part(manifest).ordinal, file_count=len(manifest.parts))
         # 申请结果先提交，再开始 PUT；临时上传失败继续使用同一 URL 与 batch。
         session.commit()
         log_event("mineru.batch_created", **batch_log)
@@ -393,10 +447,12 @@ def submit_step(
         document, job = locked
     if job.upload_expires_at is None or job.upload_expires_at <= datetime.now(UTC):
         raise MinerUError("UPLOAD_EXPIRED", "MinerU 上传链接已失效，请人工重新提交")
-    provider.upload(job.upload_url, local_file(document, job))
+    provider.upload(job.upload_url, local_file(document, job, settings))
     job.upload_complete = True
     job.upload_url = None
     job.error_code = job.error_message = document.error_message = None
+    from app.services.mineru.pdf_split_jobs import sync_current
+    sync_current(document, job, settings)
     upload_log = {"doc_id": document.doc_id, "job_id": job_id, "batch_id": job.batch_id}
     session.commit()
     log_event("mineru.upload_complete", **upload_log, upload_complete=True)
@@ -428,7 +484,7 @@ def result_failure(payload: dict) -> MinerUError:
 def check_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """一次检查后原子写块；沿用已验证缓存，拒绝用新归一化覆盖旧冻结身份。"""
+    """每次仅查询当前片；全片完成后原子写块，拒绝部分成功或改换冻结身份。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -438,6 +494,11 @@ def check_step(
         return "skipped", 0
     document, job = locked
     check_normalizer_recipe(job)
+    if "_pdf_split_request" in job.parse_options:
+        locked, completed = prepare_split_step(session, document, job, settings)
+        if completed is not None:
+            return completed
+        document, job = locked
     if not job.upload_complete or not job.batch_id:
         check_deadline(job, settings)
         return "submit", 0
@@ -460,6 +521,8 @@ def check_step(
         # Worker停机时间不是供应商失败：已提交批次先做一次GET，done仍可回收；未完成才停止调度。
         check_deadline(job, settings)
         job.error_code = job.error_message = document.error_message = None
+        from app.services.mineru.pdf_split_jobs import sync_current
+        sync_current(document, job, settings)
         session.commit()
         return "check", settings.mineru_poll_interval_seconds
     archive = provider.download_result(result.get("full_zip_url"))
@@ -469,15 +532,23 @@ def check_step(
         job_id=job_id,
         size_bytes=len(archive),
     )
-    source = local_file(document, job)
+    source = local_file(document, job, settings)
     validate_local_file(source)
+    if "_pdf_split" in job.parse_options:
+        # SQL 提交失败时沿用同片 Batch；片结果的 ID 不依赖临时文件名或 Celery 消息。
+        from app.services.mineru.pdf_split import checked_manifest, piece_recipe
+        from app.services.mineru.pdf_split_jobs import current_part
+        part = current_part(checked_manifest(document, job))
+        adapter_identity = key_for(piece_recipe(job, part))
+    else:
+        adapter_identity = job.file_hash + ":" + job.options_hash
     parsed = MinerUResultAdapter().normalize(
         archive,
         doc_id=document.doc_id,
         file_name=document.file_name,
         file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
         geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
-        identity=job.file_hash + ":" + job.options_hash,
+        identity=adapter_identity,
     )
     log_event(
         "mineru.adapter_validated",
@@ -485,6 +556,9 @@ def check_step(
         job_id=job_id,
         block_count=len(parsed.blocks),
     )
+    if "_pdf_split" in job.parse_options:
+        from app.services.mineru.pdf_split_jobs import complete_piece
+        return complete_piece(session, document, job, settings, parsed, archive)
     hybrid_metrics = {}
     original_visual = parsed
     if "_hybrid" in job.parse_options:
@@ -583,7 +657,7 @@ def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -
 def record_error(
     session: Session, job_id: UUID, error: MinerUError, settings: Settings
 ) -> bool:
-    """独立事务保存安全错误及 Hybrid 失败账本；旧任务不能覆盖新代次或完成结果。"""
+    """独立事务保存安全错误及派生账本；分片失败保留成功片，旧代次不能覆盖新结果。"""
 
     locked = lock_job(session, job_id)
     if not locked:
@@ -602,7 +676,8 @@ def record_error(
     else:
         job.state, job.is_active = "failed", False
         job.finished_at = datetime.now(UTC)
-        job.upload_url = None
+        if "_pdf_split" not in job.parse_options:
+            job.upload_url = None
         transition_document(document, "FAILED", str(error))
         if "_hybrid" in job.parse_options:
             try:
@@ -616,6 +691,18 @@ def record_error(
                 ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
             job.parse_options = job.parse_options | {"_hybrid_result": ledger}
     job.error_code, job.error_message = error.code, str(error)
+    from app.services.mineru.pdf_split_jobs import sync_current
+    try:
+        sync_current(document, job, settings, error_code=error.code)
+    except MinerUError:
+        # 坏账本不能再次阻止失败落库；保留原JSON供人工核对，不猜测/修补收费身份。
+        retry = False
+        job.state, job.is_active, job.finished_at = "failed", False, datetime.now(UTC)
+        job.error_code = "PDF_SPLIT_CHECKPOINT"
+        job.error_message = "PDF 分片检查点无效，请核对原批次，未重新提交"
+        transition_document(document, "FAILED", job.error_message)
+        log_event("mineru.split_checkpoint_invalid", doc_id=document.doc_id, job_id=job_id,
+                  error_code=job.error_code)
     if retry:
         document.error_message = str(error)
     session.commit()

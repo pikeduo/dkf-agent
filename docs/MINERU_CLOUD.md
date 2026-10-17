@@ -210,7 +210,7 @@ WHERE doc_id = '替换为文档UUID' GROUP BY block_type;
 
 5. **质量**：四类样本均有实际正文；source=mineru_cloud。核对页码、阅读顺序、bbox 与原件一致；表格样本至少出现 table，公式样本至少出现 formula，文本内容与原件对应，未知置信度允许 NULL。图片 OCR 可能返回 text 而非 image_text，不强行改造类型。扫描 PDF 不得只有第一页结果。
 6. **幂等**：重复请求活动任务仍为同一 job_id；完成后再次提交应 409。记录块数与 Block ID，确认重复短消息不新增块（Mock 已覆盖）；不要为了测试在真实平台反复创建付费批次。
-7. **异常**：可用一个无效 Token 在独立测试环境验证安全失败，再恢复有效 Token；确认前端、Worker 日志和 Celery 结果无 Token / 签名 URL。空文件、损坏原件、超 200 页应在提交前拒绝，不消耗 API 额度。429、临时失败、日额度和 Worker 重启主要由 Mock / 共享限流测试覆盖，不向平台发压测来耗尽真实额度。
+7. **异常**：可用一个无效 Token 在独立测试环境验证安全失败，再恢复有效 Token；确认前端、Worker 日志和 Celery 结果无 Token / 签名 URL。空文件、损坏原件应在提交前拒绝；超限PDF按下节连续分片，单页仍超限则全份停止、尚未提交任何片。429、临时失败、日额度和 Worker 重启主要由 Mock / 共享限流测试覆盖，不向平台发压测耗尽真实额度。
 8. **恢复**：如果 Broker 中断导致 503，先查询已保存 doc_id / job_id，修复服务后调用显式提交入口恢复，不重新上传；若 SUBMIT_UNCERTAIN，先人工核对远端孤立批次，不直接重试。
 
 ### 结果下载与代理排查
@@ -337,3 +337,85 @@ ORDER BY d.file_name, b.block_index;
 阶段 10 已完成人工验收；最新开发计划记录 DOC/DOCX、PPT/PPTX 和 XLS 的真实云结果及质量边界，XLSX 云结果仍需独立对照，不能从 XLS 推断。本轮没有重新调用真实 API，11B.1 新路由仍需人工验收。Mock 不能替代真实鉴权、格式转换、页面语义和视觉质量，也不等于真实 429 或所有网络故障均已验证。
 
 默认 auto 与 XLSX Hybrid 保留，阶段12新增整份/视觉缓存和显式 Reparse，待人工验证。上文“失败后重新提交可收费”仅是历史行为，当前必须明确 Force Reparse；不使用 Review，不进入 Chunk/Embedding/RAG，质量边界不由缓存修复。
+
+## 超限 PDF：连续分片
+
+本节为新增代码与Mock设计，**未执行真实分片、云API、数据库迁移或pytest**，不表示阶段32解析/评测通过。
+
+### 范围、身份和限制
+
+- Router依旧决定Native/Whole/Hybrid；仅最终需要MinerU的PDF超过200页或200 MB时进入分片。分片保守取十进制200,000,000字节，不放宽Provider原边界。完整Native不拆，普通云PDF与Office/图片流程不变。原上传上限默认50MiB；大原件需要用户评估后手动配置，不能借分片绕过上传/预检限制。
+- Worker先为全部原页规划连续闭区间，优先尝试200页；实际生成文件大于200MB时有界二分缩小，每片最多10次尝试。接受前核对实际字节和SHA256，生成器保留原裁剪框/旋转/视口；任何单页仍超限均在第一个云POST之前停止。当前安全上限128片，原Router页数上限仍默认1000、可配置至2000；超限明确失败，不丢页。
+- 原件只读，Document.doc_id/file_hash/file_name和官方QA完全不变；无子Document、无新表/迁移/环境变量。一个父Parse Job用现有JSONB的`_pdf_split_request`、`_pdf_split`保存版本/原Hash/总页数/每片原页范围、Hash、字节、状态和收费身份。
+- 每片有稳定的data_id和逻辑task_id；后者不是Celery消息ID。父Job/task_id仍是当前原文档解析代次，父行batch_id/data_id/upload_complete表示**当前片**，历史片必须查账本，不把父Job行数当费用。
+- 文件位于`PARSED_DIR/<doc_id>/pdf_split/<job_id>/part-0001.pdf`，并有manifest.json和同片结果指针。JSONB是收费状态真相，磁盘manifest仅为不含URL/正文的可核对副本；写副本失败记录安全事件，不据副本重建收费身份。仅允许服务自有目录，拒绝链接/越界，不覆盖不匹配的旧片。备份需包含整个PARSED_DIR及数据库。
+
+### 短任务、缓存和原子性
+
+每个短任务只推进当前片，复用原Provider：申请前提交意图，PUT前提交Batch，查询/下载错误沿用同Batch和原Redis共享限流。按实际每片一个文件预留额度；确认Batch的不同片计入`mineru_file_submit_count`，未知POST可能已计费，必须人工核对，不能当成确定零费用。
+
+片结果先通过局部Guard，保存原ZIP/content_list/可选full.md/标准化块到内容缓存，再保存不可变代次指针和游标。SQL回滚可恢复同片指针，不另POST；完全相同片Hash、模型/参数/归一化/分片策略可跨原件复用。Force Reparse只绕过原件级成功入口，**仍有效的成功片不重复收费**；只有确实缺少结果且已明确允许新收费的片才提交。普通重试遇到收费历史但结果缺失安全停止。
+
+所有片成功并核对原件Hash/分片Hash/页覆盖后，按原页排序且同页稳定保留Adapter原序，整体保留table/formula/text/bbox/source；Block ID绑定原doc_id、缓存身份和原位置，不含消息ID。映射公式：`原物理页 = page_start + 片内1-based页 - 1`；OHR原0-based证据页仅在评测侧+1，不改官方数据。不得全局按y排序或让临时局部页成为引用。
+
+只在全片完成时发布**原件级完整缓存**，一次事务替换全部Block并推进CHUNKING；之后原管理任务接续Chunk→Embedding→Index，仍只有Index可置READY。任一片失败不发布部分Block；已有旧块保持但Document退出READY。Reindex只回放完整缓存，不重拆或发云请求。分片缓存/整份缓存都受现有容量限额保护。
+
+活动消息丢失可用原入口或文档级Retry续同Job。显式Retry可恢复原已上传Batch的JOB_TIMEOUT/传输错误、仍有效签名链接的原Batch PUT，以及从未提交片的频控/缓存占用等待；保留成功片和网络预算，不重建收费身份。远端失败、SUBMIT_UNCERTAIN、坏ZIP/来源/缓存不自动复活，先核对平台、备份和原结果；确需新解析再由管理员确认Force费用。单片观察窗口与重试预算有限，成功推进到下一片才重置本片窗口，管理cloud窗口相应续开；不会自动复活已失败的管理任务。
+
+### 用户手动验证（先Mock，真实执行另行确认）
+
+纯Mock不需要启动服务、真实原件或GPU（本轮Codex没有执行）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_provider.py tests/test_parse_cache.py tests/test_document_management.py tests/test_business_logging.py tests/test_smoke_stage16_17.py -q -ra
+```
+
+新增用例覆盖257/217/382页、实际字节限制/双超限/单页超限、有界规划、连续无重复页、原件/片Hash、原页与QA索引、Chunk来源页、稳定ID、全片失败保护、重复消息、PUT重试、未知POST、缓存/SQL回滚恢复及Native/Office兼容。Stub事务不是PostgreSQL真实原子性或多Worker并发证明；原有`tests/mineru_db_smoke.py`等隔离DB回归及真实恢复仍由用户另行确认执行。
+
+真实验收方案：用户先确认独立ACTIVE验收库、原件外传权、各分片预计费用、CPU/GPU与磁盘预算，重启新版API、CPU solo Worker与原GPU Worker（命令见README）。**本任务未授权Codex执行以下步骤，不自动处理阶段32原件。** 在获准的独立原件中选一份确需云解析的超限PDF，记录原Hash；实际字节拆分数只能在规划后确认。示例命令仅供用户确认后自行运行：
+
+```powershell
+$kbId = "替换为独立验收知识库UUID"
+$pdfPath = Read-Host "输入已获外传许可的测试PDF绝对路径"
+if ((Read-Host "确认自动分片会产生多个MinerU文件任务并接受费用，输入YES") -cne "YES") { throw "未授权" }
+Get-FileHash -LiteralPath $pdfPath -Algorithm SHA256
+$uploaded = curl.exe --fail-with-body -sS -X POST -F "file=@$pdfPath" -F "parse_mode=auto" "http://127.0.0.1:8000/api/admin/knowledge-bases/$kbId/documents" | ConvertFrom-Json
+$docId = $uploaded.doc_id
+Invoke-RestMethod "http://127.0.0.1:8000/api/admin/documents/$docId/status"
+Invoke-RestMethod "http://127.0.0.1:8000/api/admin/knowledge-bases/$kbId/documents/$docId/parse-jobs"
+```
+
+在pgAdmin执行只读SQL，替换一次文档UUID；不要导出整个parse_options（包含私有配置/签名上传检查点）：
+
+```sql
+SELECT j.job_id, j.state AS parent_state, j.error_code,
+       p->>'ordinal' AS part_no, p->>'page_start' AS original_start,
+       p->>'page_end' AS original_end, p->>'size_bytes' AS actual_bytes,
+       p->>'file_hash' AS part_sha256, p->>'data_id' AS data_id,
+       p->>'batch_id' AS batch_id, p->>'state' AS part_state,
+       p->>'submission_attempted' AS attempted,
+       p->>'upload_complete' AS uploaded, p->>'error_code' AS part_error
+FROM document_parse_jobs j
+CROSS JOIN LATERAL jsonb_array_elements(
+  COALESCE(j.parse_options->'_pdf_split'->'parts', '[]'::jsonb)) p
+WHERE j.doc_id = '替换为文档UUID'::uuid
+ORDER BY j.created_at, (p->>'ordinal')::int;
+
+SELECT d.doc_id, d.file_name, d.file_hash, d.status,
+       d.management_config->>'operation' AS operation,
+       d.management_config->>'state' AS management_state,
+       (SELECT count(*) FROM document_blocks b WHERE b.doc_id=d.doc_id) AS blocks,
+       (SELECT count(*) FROM document_chunks c WHERE c.doc_id=d.doc_id) AS chunks,
+       (SELECT count(embedding) FROM document_chunks c WHERE c.doc_id=d.doc_id) AS vectors
+FROM documents d WHERE d.doc_id = '替换为文档UUID'::uuid;
+
+SELECT block_index, page, block_type, source
+FROM document_blocks WHERE doc_id='替换为文档UUID'::uuid ORDER BY block_index;
+SELECT chunk_id, page_start, page_end, chunk_metadata->>'page_semantics' AS page_semantics
+FROM document_chunks WHERE doc_id='替换为文档UUID'::uuid ORDER BY page_start, chunk_id;
+```
+
+验收预期：一个doc_id；各片原页从1连续到末页无重叠、每片<=200页/200,000,000字节；257/217/382页在字节不超限时分别为200+57/17/182。首片完成、后片未完成时没有新半份Block/READY；全片成功后原页201确实对应第二片局部1页。最终READY、ingest/done、chunk_count=vector_count>0；仍需原阶段15检查1024维/单位向量及Evidence反查，并人工核对跨片表格/段落/章节质量。账本Batch数和平台费用逐一对应，不能累加重复日志；整份缓存命中可零新提交、无本代次分片账本，属于正常复用。
+
+本地超时/Worker停机后先查询原Job/Batch，确认允许续查而非新收费，再手动`POST /api/admin/documents/{doc_id}/retry`；SUBMIT_UNCERTAIN停止并核对平台。分片丢失、Hash不符或缓存损坏应从备份恢复，不删除旧Job、篡改SQL状态、清Redis或盲目Force。生成器版本变化会安全拒绝继续，不自动更换输入。真实CRC/裁剪旋转、云接口/版面质量、多进程DB锁及费用恢复尚未由本轮验证。

@@ -250,7 +250,8 @@ def run_routed_step(
         "task_id": str(job.task_id),
         "route_decision": decision.model_dump(mode="json"),
         "mineru_file_submit_count": 0,
-        "planned_mineru_file_count": 1,
+        # 实际字节分片只能由 Worker 生成后确定；此时不把页数估算冒充收费文件数。
+        "planned_mineru_file_count": None if "_pdf_split_request" in job.parse_options else 1,
         **hybrid_metrics,
     }
 

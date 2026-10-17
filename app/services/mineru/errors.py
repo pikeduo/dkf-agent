@@ -1,5 +1,9 @@
 """仅传递安全中文说明，不携带 Token、响应原文、签名 URL 或原始 HTTP 异常。"""
 
+PDF_SPLIT_ERROR_CODES = frozenset({"PDF_SPLIT_CHECKPOINT", "PDF_SPLIT_PATH", "PDF_SPLIT_LIMIT",
+    "PDF_SPLIT_CHANGED", "PDF_SPLIT_INVALID", "PDF_SPLIT_GEOMETRY", "PDF_SPLIT_SINGLE_PAGE",
+    "PDF_SPLIT_IO", "PDF_SPLIT_RESULT", "PDF_SPLIT_INCOMPLETE", "PDF_SPLIT_PAGE", "PDF_SPLIT_MISSING"})
+
 
 class MinerUError(Exception):
     """供应商错误分类及建议延迟；消息只能来自受控映射。"""

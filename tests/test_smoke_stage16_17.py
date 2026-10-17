@@ -404,6 +404,21 @@ def test_unknown_error_text_not_logged():
     assert tool.safe_code("   ") is None
 
 
+def test_pdf_split_fee_report_counts_actual_parts_not_parent_job():
+    """父Job当前batch不能代表整份费用；片级确认/未知提交分别统计且不输出私有配置。"""
+    units = [{"batch_id": "batch-1", "submission_attempted": True},
+             {"batch_id": "batch-2", "submission_attempted": True},
+             {"batch_id": None, "submission_attempted": True}]
+    jobs = [{"batch_id": None, "submission_attempted": True, "pdf_parts": units},
+            {"batch_id": "batch-3", "submission_attempted": True},
+            {"batch_id": None, "submission_attempted": False}]
+    summary = tool.cloud_fee_summary(jobs)
+    assert summary == {"confirmed_batch_ids": ["batch-1", "batch-2", "batch-3"],
+        "distinct_confirmed_batches": 3, "file_jobs_with_batch": 3, "submission_outcome_unknown": 1}
+    assert tool.safe_job_code("PDF_SPLIT_SINGLE_PAGE") == "PDF_SPLIT_SINGLE_PAGE"
+    assert tool.safe_job_code("PDF_SPLIT_PRIVATE_SECRET") == "UNKNOWN_ERROR_CODE"
+
+
 @pytest.mark.parametrize("value,expected", [
     (None, None), ("", None), ("   ", None),
     ("EMPTY_BLOCK", "EMPTY_BLOCK"), ("CONTENT_LIST", "CONTENT_LIST"), ("NO_TEXT", "NO_TEXT"),

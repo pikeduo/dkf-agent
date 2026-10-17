@@ -62,6 +62,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `mineru.http_started / http_response / http_failed` | 官方 API 请求摘要；PUT/ZIP 下载使用阶段名称而非签名 URL，HTTP 成功不代表业务 envelope 成功 |
 | `mineru.batch_created / upload_complete / remote_state` | 已提交批次检查点、上传完成检查点、收到供应商单文件状态；远端 done 仍可能下载或落库失败 |
 | `mineru.result_downloaded / adapter_validated / blocks_persisted` | ZIP 下载完成、统一结构校验通过、Block 与任务/文档状态已事务提交 |
+| `mineru.split_planned / split_piece_done / split_manifest_failed / split_checkpoint_invalid` | 超限PDF计划已提交/成功片缓存/磁盘副本失败/坏检查点安全停止；仅UUID、数量与安全码。实际费用按片Batch去重，父Job行数不是云文件数，提交不确定须平台核对 |
 | `mineru.merge_restored / merge_rejected` | 按唯一布局来源无损恢复 V1 合并占位 / 证据不足安全拒绝；仅 doc_id、占位数量、阶段、错误码，恢复不等于落库 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |

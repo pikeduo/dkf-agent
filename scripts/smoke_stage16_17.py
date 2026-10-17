@@ -455,13 +455,14 @@ def safe_code(message):
 
 
 def safe_job_code(code):
-    """校验独立 Job.error_code，不拼接冒号；保留已知 MinerU/HTTP/API 代码，未知值不透传。"""
+    """校验 Job/分片安全代码，不拼接冒号；未知值不透传，也不加载Provider/模型。"""
+    from app.services.mineru.errors import PDF_SPLIT_ERROR_CODES
     if code is None or (isinstance(code, str) and not code.strip()):
         return None
     if not isinstance(code, str):
         return "UNKNOWN_ERROR_CODE"
     value = code.strip()
-    if value in MINERU_ERROR_CODES or re.fullmatch(r"HTTP_[1-5][0-9]{2}", value):
+    if value in MINERU_ERROR_CODES | PDF_SPLIT_ERROR_CODES or re.fullmatch(r"HTTP_[1-5][0-9]{2}", value):
         return value
     # 复用供应商的纯错误映射，不导入 Provider/Parser，不发请求或加载配置/模型。
     from app.services.mineru.errors import api_error
@@ -691,7 +692,7 @@ def validate_export(document, item, kb_id):
 
 
 def export_snapshot(plan, kb_id):
-    """只导出同库、同 SHA 的必要 Block/Chunk，SQL 核对全量向量，不导出向量及私有配置。"""
+    """只读导出同库 Block/Chunk/分片收费摘要及向量统计，不导出向量/私有配置。"""
     from sqlalchemy import func, or_, select
     from app.models import Document, DocumentBlock, DocumentChunk, DocumentParseJob, KnowledgeBase
     from app.services.indexing import IndexingError, checked_index_config, require_complete_vectors
@@ -723,6 +724,7 @@ def export_snapshot(plan, kb_id):
                 DocumentChunk.kb_id == kb_id)).one()
             jobs = session.execute(select(DocumentParseJob.job_id, DocumentParseJob.task_id, DocumentParseJob.state,
                 DocumentParseJob.batch_id, DocumentParseJob.upload_complete, DocumentParseJob.submission_attempted,
+                DocumentParseJob.parse_options["_pdf_split"]["parts"].label("pdf_parts"),
                 DocumentParseJob.error_code, DocumentParseJob.is_active).where(DocumentParseJob.doc_id == d.doc_id)
                 .order_by(DocumentParseJob.created_at, DocumentParseJob.job_id)).all()
             document = {"doc_id": str(d.doc_id), "kb_id": str(d.kb_id), "file_name": d.file_name,
@@ -740,6 +742,10 @@ def export_snapshot(plan, kb_id):
                 "parse_jobs": [{"job_id": str(j.job_id), "task_id": str(j.task_id), "state": j.state,
                     "batch_id": j.batch_id, "upload_complete": j.upload_complete,
                     "is_active": j.is_active,
+                    # 仅导出收费/原页摘要，不导出私有 URL、缓存配方或正文。
+                    "pdf_parts": [{key: part.get(key) for key in ("ordinal", "data_id", "task_id", "page_start",
+                        "page_end", "file_hash", "size_bytes", "batch_id", "state", "upload_complete",
+                        "submission_attempted", "error_code")} for part in (getattr(j, "pdf_parts", None) or [])],
                     "submission_attempted": j.submission_attempted, "error_code": safe_job_code(j.error_code)}
                     for j in jobs]}
             issues = validate_export(document, item, kb_id)
@@ -1043,8 +1049,18 @@ def dataset_reports(plan, verification, dense, export):
     return reports
 
 
+def cloud_fee_summary(jobs):
+    """按分片/普通文件计数确认Batch与不确定提交；不由父行数或重复日志推算收费。"""
+    units = [part for job in jobs for part in (job.get("pdf_parts") or [job])]
+    batches = sorted({unit["batch_id"] for unit in units if unit.get("batch_id")})
+    return {"confirmed_batch_ids": batches, "distinct_confirmed_batches": len(batches),
+            "file_jobs_with_batch": sum(bool(unit.get("batch_id")) for unit in units),
+            "submission_outcome_unknown": sum(bool(unit.get("submission_attempted") and not unit.get("batch_id"))
+                                              for unit in units)}
+
+
 def generate_report(run, plan, *, error=None, error_step=None):
-    """三数据集分别报告链路/检索/人工质量；旧报告保留，不将断言或 GT 当问答准确率。"""
+    """分数据集报告链路/质量并按实际分片统计收费；旧报告保留，不冒充问答准确率。"""
     verification = latest_artifact(run, "verify")
     dense = latest_artifact(run, "dense")
     process = latest_artifact(run, "process")
@@ -1077,7 +1093,7 @@ def generate_report(run, plan, *, error=None, error_step=None):
         statuses.append("FAIL")
     status = "FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses else "PASS"
     jobs = [job for document in export["documents"] for job in document["parse_jobs"]]
-    batches = sorted({job["batch_id"] for job in jobs if job["batch_id"]})
+    fees = cloud_fee_summary(jobs)
     events = [common.json_file(path) for path in sorted((run / "events").glob("*.json"))]
     upload_confirmed = {row["sha256"] for row in events if row["operation"] == "upload"
                         and row["phase"] == "confirmed" and row.get("http_status") in {201, 202}}
@@ -1097,9 +1113,7 @@ def generate_report(run, plan, *, error=None, error_step=None):
         "preparation_gaps": gaps, "process": process, "error_code": unresolved,
         "task_and_batch_summary": [{"doc_id": d["doc_id"], **{field: d[field] for field in TASK_FIELDS},
                                    "parse_jobs": d["parse_jobs"]} for d in export["documents"]],
-        "potential_cost": {"confirmed_batch_ids": batches, "distinct_confirmed_batches": len(batches),
-            "file_jobs_with_batch": sum(bool(job["batch_id"]) for job in jobs),
-            "submission_outcome_unknown": sum(job["submission_attempted"] and not job["batch_id"] for job in jobs),
+        "potential_cost": {**fees,
             "upload_intents_not_reconciled": len(unreconciled_uploads),
             "money_amount": None, "billing_verification": "manual_pending; check MinerU account, not log line counts"},
         "quality_boundary": "仅自动结构/字符证据检查；视觉区域/阅读顺序/公式语义仍人工待核；无 LLM 或问答准确率",
@@ -1123,7 +1137,7 @@ def generate_report(run, plan, *, error=None, error_step=None):
         + ("本次 Dense 未执行，未加载 Query 模型；统计项为 null，不是零命中率。\n\n" if dense and dense.get("executed") is False else "")
         + f"准备缺口：`{json.dumps(gaps, ensure_ascii=False)}`。\n\n"
         + (f"阻塞错误：`{unresolved}`。\n\n" if unresolved else "")
-        + f"确认云批次 {len(batches)}；金额未知，需人工核对 MinerU 平台；同文件多个 Job 要人工排查。\n\n"
+        + f"确认云批次 {fees['distinct_confirmed_batches']}；按实际分片计数，金额仍需人工核对 MinerU 平台。\n\n"
         + "正式阶段16：**BLOCKED / 待验收**。仍需 ≥10 份真实独立内容、DOC/XLS/PPT、≥3 种现代格式、七类真实标签、正式 preset 导入与幂等/质量/费用确认；不降低原预检标准。\n\n"
         + "官方完整基准质量评测：**NOT_APPLICABLE**。READY、文档命中、GT 标签都不等于回答准确；无人工区域映射的 Omni 指标为 not_applicable/manual_pending。\n\n"
         + "Block 序号通过不代表视觉阅读顺序正确。OHR 字面证据未保留为 review_required，需对照原 PDF；表格/公式语义不自动裁判。\n\n"

@@ -46,6 +46,7 @@
 为兼容现有 `document_blocks.page` 非空约束，`page` 必须显式提供正整数，从 1 开始，拒绝 0、负数、布尔值和数字字符串。
 
 - PDF 使用真实物理页码，不能用逻辑页替代已知物理页。
+- 超限PDF走MinerU时，片内`page_idx+1`仅为中间页；全片成功后转为`原页起点+局部页-1`，以原doc_id/文件名整体持久化。原件Hash/QA不改，后续Chunk/Evidence仍只消费原物理页；片缓存/恢复见[MinerU分片](MINERU_CLOUD.md#超限-pdf连续分片)。
 - 单张图片使用第 1 页。
 - Native TXT/MD/CSV/DOCX/XLSX 使用逻辑页 1，Sheet 名放 section，不能以工作表序号冒充打印页码。六种 Office 云结果保留 MinerU 转换后的 `page_idx + 1`，是云端逻辑页，不是原始 Office 排版页。后续 Evidence 必须区分页码语义。
 - `bbox` 为 `null` 或四个有限数值组成的数组 `[x0, y0, x1, y1]`，左上角到右下角，要求 `x1 >= x0`、`y1 >= y0`。

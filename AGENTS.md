@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**32固定评测数据：用户单独授权本地提取OHR/OCB各100份，关联3588/499条官方QA，双向身份/页码/Hash校验通过；不含Omni，不执行33～36。阶段30/31及此前未完成的业务验收保留，不自动视为通过。**
+当前阶段：**32固定评测数据已冻结；配套新增超限PDF的MinerU连续分片、原页合并与片级收费/缓存检查点，代码及Mock待用户验收。未执行真实分片/云调用，不改变阶段32原件/QA，不进入33～36；此前未完成的业务验收保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 已实现原接口多选上传、中文业务日志；MinerU 合并空占位的原页/bbox恢复及 v2 缓存隔离已补齐，用例与旧 ZIP 转换待用户验收 |
+| 配套功能 | 多选上传/中文日志/合并占位恢复保留；新增超限PDF连续分片、原页原身份合并、片缓存与费用保护；Mock未运行、真实分片待授权 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
@@ -63,7 +63,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
 - 阶段30的LangGraph仅封装原Search/Query/Formula服务，不改Parser/上传/检索/原RAG Prompt或索引语义；此前业务验收不会因阶段32数据提取自动通过，后续模型/云端/测试仍须另行授权。
-- 用户后续单独授权阶段32本地数据提取，固定于`data/dataset/stage32_run_01/`，仅OHR/OCB；历史阶段16三基准工具/素材保留，不再为本轮处理Omni。正式QA必须全依赖在新目录存在且Hash一致，每原件至少一题；断言不拼答案，Domain适用性未审不纳入。3份OHR超200页，本地可读不代表可整份发MinerU；不自动拆分、上传、评测或覆盖旧run。
+- 用户后续单独授权阶段32本地数据提取，固定于`data/dataset/stage32_run_01/`，仅OHR/OCB；历史阶段16三基准工具/素材保留。正式QA必须全依赖存在且Hash一致，每原件至少一题；断言不拼答案，Domain未审不纳入。3份OHR超200页，后续可由新云PDF分片机制处理，但Codex不得自行执行真实分片、上传、评测或覆盖旧run。
 - 当前自动路由规则以本节和用户最新要求为准，开发计划中历史 Review/默认关闭描述不再用于正式路由；第 0 节测试禁令保持最高优先级。
 - 联合冒烟使用 `docs/test/stage16_smoke/` 与独立 ACTIVE 测试库，默认 dry-run；用户显式准备/上传/Query 后才生成真实结论，不写正式 preset/manifest、不降低十份/旧Office/七标签标准；小样本通过不代表阶段16正式或官方全量质量验收通过。
 - 新准备默认 OHR5份/Omni3图/OCB三类Office各2份；旧双数据集计划不改写。OCB复用本地归档与Parquet、依赖完整才选；不重下载、不要求补43份或许可Excel。原断言保留manual_pending，不猜答案/物理页；下载成功不授予云外传，用户须明确确认本轮全部样本。
@@ -138,7 +138,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process`及旧嵌套维护接口保留历史逐阶段语义；新`/api/admin/documents`提供统一管理，Reindex仅缓存回放后自动Chunk/Embedding/Index至READY，Reparse仍须force=true。活动任务不能覆盖，数据库/文件/消息/云端非原子，无Outbox，不宣称exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
-- Windows CPU threads 仅用于既有开发验证；启用 Hybrid 的 PDF Bundle 处理使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
+- Windows CPU threads 仅用于既有开发验证；Hybrid PDF Bundle、超限PDF分片处理均使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
 ### Parser、证据与质量
 
@@ -154,10 +154,11 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 仅官方精准解析 API V4，不用轻量 Agent API、本地 MinerU、火山/百度 OCR；HTTP 只在 MinerUCloudProvider，申请链接 → 签名 PUT → 批次 GET。
 - 固定 `trust_env=False` 直连 API/上传/下载，无代理回退、保持 TLS 校验，不绕过 VPN/TUN 或修改系统网络。对象存储不带 API Token、不设上传 Content-Type、不跟随重定向，只接受官方 HTTPS 签名域名。
 - Token 仅本地 `MINERU_API_TOKEN`，SecretStr 遮盖、不自动刷新。校验 Hash、实际格式及大小：平台 200 MB/200 页，应用取更小限制，Office 未知页数由平台检查，不猜 Sheet/Slide 页数。
+- 仅实际云路由的超限PDF可连续分片，Native可完整覆盖则不拆；一个原doc_id/hash，JSONB私有分片账本及PARSED_DIR持久文件。每片按实际字节/页数/Hash校验，单页超限失败；意图/Batch先提交、沿用共享限流，成功片不重复收费。只有全片Guard通过才整体写Block/CHUNKING，原页=`片起始页+局部页-1`；Chunk/Evidence不暴露局部页。非PDF不套用；原件/QA不改，Codex不得自行执行真实分片/收费验收。详见[MinerU分片](docs/MINERU_CLOUD.md#超限-pdf连续分片)。
 - 保留 Redis Lua 共享原子限流：50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9；滚动 24 小时日额度，1000 优先页仅按 UTC 日观测。按文件/查询数计量，同账户共用 Redis/命名空间，Redis 故障关闭云调用。
 - submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
 - POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
-- 唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
+- 每个云结果ZIP的唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
 - 已证实的合并空占位只在前后 layout 父块/span 唯一、完整 V1 字符可无损核对时恢复到原项，保留原页/bbox/ID；跨页须有相邻后一页 cross_page=true。未知合并仍失败，不用 layout 补字或跳过真空正文；归一化缓存 v2 与旧版本隔离，不自动复活 FAILED、回填旧 ZIP 或新增收费批次。
 
 ### 整份 Router v1
@@ -168,7 +169,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。所有云入口远端 failed 不自动追加批次，云失败不降 Native；PUT/GET/下载有限重试仍用同批次。
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
 - 云交接保持行锁/代次检查、提交后投递；路由拒绝为 Document=FAILED、Celery=FAILURE，固定安全理由可追踪，无新 Block/云调用。交接成功不等于解析成功，查询 Document/Parse Job。
-- 云费用按 doc_id/job_id/batch_id 去重：提交前实际 0、计划 1，确认 batch 后计 1；不直接累加重复日志，提交不确定以平台核对。
+- 云费用按 doc_id/job_id/batch_id 去重：普通Whole/Bundle计划1，PDF分片计划数以实际物化manifest为准；每个确认Batch的文件计1，片缓存命中计0，不直接累加重复日志。提交不确定不等于未计费，须平台核对。
 
 ### XLSX Selective Hybrid
 
