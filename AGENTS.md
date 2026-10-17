@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**32固定评测数据已冻结；超限PDF的Windows保存句柄修复已通过8项隔离离线用例及51项分片Mock回归。AES真实原件/云端分片与完整入库仍待用户验收，不改变阶段32原件/QA，不进入33～36；此前待办保留。**
+当前阶段：**32固定评测数据已冻结；超限PDF首片真实Batch已done但Adapter报MERGE_EVIDENCE，待用户提供原ZIP定位。已补安全子码/只读诊断，140项相关Mock及44项日志检查通过，未恢复FAILED任务或新增云批次；不改变阶段32原件/QA，不进入33～36，此前待办保留。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 多选上传/日志/合并占位恢复及PDF连续分片保留；Windows无预开句柄保存/独占发布/安全异常分类已补，8项离线+51项Mock通过，真实原件/云端待验收 |
+| 配套功能 | 多选上传/日志/合并占位恢复/PDF连续分片及Windows句柄修复保留；新增MERGE安全子码和原Batch只读ZIP诊断，Mock与历史ZIP回归通过，本次失败ZIP缺失，恢复待授权 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |

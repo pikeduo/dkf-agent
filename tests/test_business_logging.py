@@ -100,6 +100,7 @@ def test_llm_provider_uses_safe_enum_and_generic_event_labels(events, provider):
     ("bm25-cli", "BM25 CLI"), ("hybrid-cli", "Hybrid CLI"),
     ("rerank-cli", "Reranker CLI"), ("retrieval-acceptance", "检索验收"),
     ("rag-cli", "RAG CLI"),
+    ("mineru-diagnostic-cli", "MinerU Diagnostic CLI"),
     ("evidence-cli", "Evidence CLI"),
     ("formula-cli", "Formula CLI"),
     ("formula-binding-cli", "Formula Binding CLI"),

@@ -757,6 +757,8 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 MinerU 远端 done、ZIP 已下载但出现 EMPTY_BLOCK 时，先保留旧结果并按 [合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标) 核对。新版归一化缓存为 mineru-adapter-v2，用户需按原命令重启 API/CPU Worker；旧冻结任务或 Reindex 版本不一致会安全拒绝，不自动付费重解析。不要删除旧缓存、修改文档状态或盲目 Force Reparse。
 
+出现`MERGE_EVIDENCE`时，Adapter之前下载的ZIP可能尚未缓存；先从**原已完成Batch**保留结果，再按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对Hash、版本与具体子原因。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
+
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 
 ## 6. 开发文档

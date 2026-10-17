@@ -39,9 +39,53 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 - 逐字符核对整段 V1，允许段落间空白与 Markdown 标点转义。输出直接切取 V1 原字符串，所有切片拼接须等于原字符串；不模糊匹配、改写 OCR、重复拼入 layout 文字或丢掉额外内容。
 - 每个切片回到原数组位置，保留该项的 page_idx、bbox、类型、source、置信度及稳定 Block ID。跨页只接受相邻后一页且目标 span 明确 cross_page=true；不跨页排序、不按 y 排序，不拆 table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
 - 第一版最多64个连续占位、每组合并 V1 正文最多1 MiB、每页关联父块最多512个。多 span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为 `MERGE_EVIDENCE`；没有合并证据的真空正文/表格/公式仍为 `EMPTY_BLOCK`，失败不落半份 Block、不发布成功缓存。
-- `mineru.merge_restored / merge_rejected` 只记录 doc_id、数量、阶段或安全错误码；恢复日志不等于事务提交。原来的 blocks_persisted 仍在 SQL 提交后记录。
+- `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
 
 归一化缓存身份更新为 `mineru-adapter-v2`，Native 缓存版本不变。旧成功文件不删除、不改写；旧 v1 云缓存不混入新版 Whole/视觉键，Reindex 遇到版本不一致安全返回 CACHE_CONFIG_CHANGED，不自动重算或收费。已经验证的同 Job 缓存可按原检查点恢复；尚未完成的旧冻结任务在 POST/PUT/GET 前拒绝版本不一致，不用新版结果覆盖旧键。所有进程须由用户按 README 手动重启。
+
+#### MERGE_EVIDENCE只读诊断与原Batch复用
+
+调用链是`jobs.check_step → download_result(内存) → normalize → restore_merged_text → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因`result_downloaded`日志而假定已有缓存。没有来源证据时仍拒绝，不新增多Span拼接、跨页猜测、空项跳过或y坐标排序。本轮仅细分诊断，不改变归一化正文/Block ID/版本。
+
+| 内部子码示例 | 拒绝条件 |
+|---|---|
+| LAYOUT_PAGE / TEXT_LEVEL / ITEM_BBOX | 页声明/正文级别/坐标关联依据不可用 |
+| PARENT_LIST / PARENT_LIMIT / PARENT_INDEX / PARENT_MATCH / PARENT_INDEX_MISMATCH | 前后父块缺失、超过每页512项、重复或不一致index、bbox关联不唯一 |
+| LINES_MISSING / LINE_SCHEMA / LINE_SPAN_COUNT / SPAN_TYPE / SPAN_TEXT | lines结构不符、单行多Span、非纯文本或空Span |
+| GROUP_NO_TARGET / GROUP_LIMIT / PLACEHOLDER_MATCH / TARGET_TEXT / TARGET_DELETED / SOURCE_NOT_DELETED | 占位前无正文、超过64项、占位关联歧义或删除标记不成立 |
+| SOURCE_SPAN_COUNT / SOURCE_SPAN_BBOX / SOURCE_BBOX_COVERAGE / TARGET_SPAN_COUNT | 一个源段落多行Span、来源坐标缺失/覆盖不符或目标Span数量不符 |
+| SOURCE_PAGE / MOVED_TEXT / MOVED_CROSS_PAGE / SOURCE_CROSS_PAGE / MOVED_BBOX | 非相邻页、移动前后文字/位置不一致或跨页标记不符 |
+| TEXT_LIMIT / SOURCE_TEXT / TEXT_CHARACTER / TEXT_TRAILING | 超过1MiB、来源文本无效、逐字符不一致或有未归属尾字 |
+
+200页是分片限制，不是上述每页/每组预算。大型PDF更可能包含多行、多Span或复杂跨页，但**在取得真实ZIP前不能据此认定本次根因**。可用只读工具精确复现第一个失败条件：
+
+```powershell
+conda activate dkf-agent
+# 先核对已有Job/当前片/Hash/版本；缺ZIP返回BLOCKED/ZIP_REQUIRED和退出码2，属预期。
+python scripts/mineru_merge_diagnostic.py --job-id dceb1360-addc-4411-9d63-0e48ddc59df7 --batch-id f3234a37-7cf3-4a47-8e9e-edc408d22fe1 --output results/mineru_merge_identity_01.json
+```
+
+工具只对现有PostgreSQL开启有界`REPEATABLE READ, READ ONLY`事务并回滚，不申请行锁、不flush/commit；核对当前代次、父/片Batch和Data ID、已上传检查点、原件Hash、片Hash/实际字节、分片策略及冻结Normalizer。无ZIP不读PDF页面。输出仅允许`results/`下的新文件，自动建父目录，不覆盖旧报告、业务缓存或manifest。正常CLI角色为`mineru-diagnostic-cli`。
+
+**本次需要用户提供：原Batch `f3234a37-7cf3-4a47-8e9e-edc408d22fe1` 中Data ID `dkf-3e27beea2aef5a4eb05231f2e77b7fd0`、原页1～200的完整原始结果ZIP**。在MinerU平台找到这个已经done的批次并下载结果，勿点重新解析/再次上传；日志记录当时大小为14,339,844字节，大小本身不是身份或完整性证明。可保存为`results/mineru_batch_f3234a37.zip`，不要解压改写内容，也不要公开签名链接。若平台仅能提供链接，先联系用户确认允许查询原Batch并下载，不能因此新建POST。
+
+```powershell
+python scripts/mineru_merge_diagnostic.py --job-id dceb1360-addc-4411-9d63-0e48ddc59df7 --batch-id f3234a37-7cf3-4a47-8e9e-edc408d22fe1 --zip results/mineru_batch_f3234a37.zip --output results/mineru_merge_zip_01.json
+Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
+```
+
+预期：失败时`FAIL/MERGE_EVIDENCE`和固定子原因、局部0-based页/原页、原数组位置；缺文件/身份异常是BLOCKED；通过时只返回`ADAPTER_PASS_NOT_RECOVERED`。已有ZIP被有界读取并计算SHA256；完整性Guard使用**真实分片geometry和原冻结页摘要**，不是拿ZIP声明尺寸冒充原件验证。报告不保存Block正文/坐标。诊断既不向云发送请求，也不写数据库/成功缓存，不推进第二片。每次换新的output文件名。
+
+**待单独授权的显式恢复方案（目前无FAILED-MERGE ZIP回放接口，不可执行SQL改状态代替）：**
+
+1. 备份原Job、分片和ZIP，平台人工确认Batch/Data ID及下载来源；ZIP通常没有可验证的Batch签名，不能仅凭ZIP文件名或本地Hash证明云身份。
+2. 取得真实失败子原因并补通用证据兼容及回归；若Normalizer语义变化，设计明确的旧付费Job兼容审计，不能伪造旧缓存版本或为升级重新POST。
+3. 新显式恢复入口须固定doc/job/代次/片号/Batch/Data ID/原Hash/片Hash/ZIP Hash/解析参数及版本；默认dry-run，事务行锁下重核对，过期代次/来源不一致拒绝。仅Adapter+局部Guard成功后复用原片缓存发布和检查点，不跳过Parse Job或伪造READY。
+4. 恢复与投递下一片必须分开授权：本次第二片尚无Batch，现有`complete_piece → advance_piece`会返回`submit`；不得直接调用它并自动投递。恢复原第一片**不应再次收费**，但第二片首次提交仍可能收费，需用户另行确认。只有全部片成功才原事务整体入Block并继续Chunk/Embedding/Index。
+
+MERGE终态不属于已有JOB_TIMEOUT/传输错误Retry白名单，当前不建议`/retry`、`/process`或Force。先保留失败状态与账本，提供ZIP，禁止删除Job/缓存或盲目新增批次。
+
+本轮授权验证：修改前merge/order 61 passed；修改后merge/order/诊断/分片Mock 140 passed，日志相关44 passed；历史三份真实ZIP离线重复转换135/72/14个Block及稳定ID通过（尺寸来自历史layout，只证明兼容回归，不是原件几何验真）。本次AES Batch ZIP缺失，**未定位真实子原因、未完成该ZIP回归、未恢复业务任务**。最终只读核对报告见本地`results/mineru_merge_dceb1360_verified_03.json`，含分片专用options_hash校验，不得把历史样本或Mock通过当成本次修复完成。
 
 先运行 Mock 单测（不需要数据库、Worker、GPU或云端）：
 

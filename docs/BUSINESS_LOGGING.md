@@ -28,6 +28,7 @@
 | knowledge-agent-cli | Knowledge Agent CLI |
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
+| mineru-diagnostic-cli | MinerU Diagnostic CLI |
 | unknown / 未注册角色 | 未知进程 |
 
 API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角色；预置导入使用preset-cli；联合冒烟的检索步骤使用retrieval-acceptance。角色变化只改固定前缀中的显示名称，白名单摘要、脱敏、真实PID、每日合并、上下文和异常降级不变。更新代码后用户重启相应进程，旧日志不改写。
@@ -64,7 +65,7 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 | `mineru.result_downloaded / adapter_validated / blocks_persisted` | ZIP 下载完成、统一结构校验通过、Block 与任务/文档状态已事务提交 |
 | `mineru.split_planned / split_piece_done / split_manifest_failed / split_checkpoint_invalid` | 超限PDF计划已提交/成功片缓存/磁盘副本失败/坏检查点安全停止；仅UUID、数量与安全码。实际费用按片Batch去重，父Job行数不是云文件数，提交不确定须平台核对 |
 | `mineru.split_io_failed` | 分片本地I/O失败；仅安全错误码、异常类型和固定stage/step源码位置，不记录异常原文/文件路径。保存/发布错误为PDF_SPLIT_WRITE，读取/生成/校验错误为PDF_SPLIT_IO |
-| `mineru.merge_restored / merge_rejected` | 按唯一布局来源无损恢复 V1 合并占位 / 证据不足安全拒绝；仅 doc_id、占位数量、阶段、错误码，恢复不等于落库 |
+| `mineru.merge_restored / merge_rejected` | 无损恢复/安全拒绝；对外仍MERGE_EVIDENCE，内部step固定子码、stage固定项目函数/结构角色，附原数组item_index、局部1-based page、受限数量和异常类型；不输出正文/bbox明细，恢复不等于落库 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |

@@ -40,6 +40,7 @@ ROLE_LABELS = MappingProxyType({
     "knowledge-agent-cli": "Knowledge Agent CLI",
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
+    "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
     "unknown": "未知进程",
 })
 FIELDS = {
@@ -77,6 +78,8 @@ FIELDS = {
     "batch_index",
     "batch_count",
     "item_count",
+    "item_index",
+    "page",
     "artifact_reused",
     "retry_count",
     "delay_seconds",
@@ -363,6 +366,8 @@ FIELD_LABELS = {
     "batch_index": "批序号",
     "batch_count": "批次数",
     "item_count": "文本数",
+    "item_index": "原数组序号",
+    "page": "局部页码",
     "artifact_reused": "复用本地向量结果",
     "file_count": "文件数",
     "file_index": "文件序号",
@@ -447,6 +452,8 @@ def safe_fields(fields: dict) -> dict:
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        if key in {"page", "item_index"} and (type(value) is not int or not 1 <= value <= 1024**2):
             continue
         if key in AGENT_LOG_ENUMS and (not isinstance(value, str) or value not in AGENT_LOG_ENUMS[key]):
             continue

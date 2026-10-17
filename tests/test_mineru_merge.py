@@ -190,6 +190,20 @@ def test_uncertain_merge_fails_atomically_with_safe_reason(damage):
     with pytest.raises(MinerUError) as error:
         normalize_case(values, layout, geometry)
     assert error.value.code == "MERGE_EVIDENCE"
+    expected_reasons = {
+        "missing_preproc": "PARENT_LIST", "duplicate_index": "PARENT_INDEX",
+        "different_index": "PARENT_INDEX_MISMATCH", "ambiguous_bbox": "PARENT_MATCH",
+        "wrong_bbox": "MOVED_BBOX", "undeleted_lines": "SOURCE_NOT_DELETED",
+        "empty_original": "SPAN_TEXT", "mixed_span": "SPAN_TYPE",
+        "multiple_source_spans": "LINE_SPAN_COUNT", "reversed_spans": "MOVED_TEXT",
+        "changed_span": "MOVED_TEXT", "extra_v1_text": "TEXT_TRAILING",
+        "missing_v1_text": "TEXT_CHARACTER", "missing_cross_page": "MOVED_CROSS_PAGE",
+        "bool_page": "LAYOUT_PAGE", "nonadjacent_page": "SOURCE_PAGE",
+        "wrong_cross_page": "MOVED_CROSS_PAGE", "title_source": "TEXT_LEVEL",
+        "missing_bbox": "ITEM_BBOX", "target_deleted": "TARGET_DELETED",
+    }
+    assert error.value.diagnostic["reason"] == expected_reasons[damage]
+    assert error.value.diagnostic["stage"].startswith("adapter.")
     assert not error.value.retryable
     assert "private-unit-content" not in str(error.value)
     assert "http" not in str(error.value) and "C:\\" not in str(error.value)
@@ -215,6 +229,8 @@ def test_success_and_failure_logs_only_identifiers_and_counts(monkeypatch):
         normalize_case(values, layout, geometry)
     assert events[-1][0] == "mineru.merge_rejected"
     assert events[-1][1]["error_code"] == "MERGE_EVIDENCE"
+    assert events[-1][1]["step"] == "TEXT_TRAILING"
+    assert events[-1][1]["page"] == 1 and events[-1][1]["item_index"] == 1
     assert "private-unit-content" not in str(events)
 
 
@@ -225,3 +241,79 @@ def test_merge_limits_and_missing_characters_are_not_relaxed():
         merged_text_slices("a" * (1024**2 + 1), ["a"])
     with pytest.raises(MinerUError):
         merged_text_slices("abcX def", ["abc", "def"])
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("source_lines", "LINES_MISSING"), ("line_schema", "LINE_SCHEMA"),
+    ("source_multiline", "SOURCE_SPAN_COUNT"), ("source_span_bbox", "SOURCE_SPAN_BBOX"),
+    ("source_bbox_coverage", "SOURCE_BBOX_COVERAGE"), ("target_span_count", "TARGET_SPAN_COUNT"),
+    ("original_cross_page", "SOURCE_CROSS_PAGE"), ("parent_limit", "PARENT_LIMIT"),
+    ("page_parent_limit", "PAGE_PARENT_LIMIT"), ("placeholder_match", "PLACEHOLDER_MATCH"),
+    ("group_no_target", "GROUP_NO_TARGET"), ("group_limit", "GROUP_LIMIT"),
+    ("target_text", "TARGET_TEXT"),
+])
+def test_merge_structural_subreasons_remain_strict_and_distinct(change, reason):
+    """多行Span、父块预算和占位结构继续拒绝，诊断区分具体条件而不放宽证据要求。"""
+    from app.services.mineru.adapter import restore_merged_text
+    values, layout, _ = merged_case()
+    page = layout["pdf_info"][0]
+    source = page["preproc_blocks"][1]
+    target = page["para_blocks"][0]
+    if change == "source_lines":
+        source["lines"] = []
+    elif change == "line_schema":
+        source["lines"] = [None]
+    elif change == "source_multiline":
+        source["lines"].append(deepcopy(source["lines"][0]))
+    elif change == "source_span_bbox":
+        source["lines"][0]["spans"][0].pop("bbox")
+    elif change == "source_bbox_coverage":
+        source["lines"][0]["spans"][0]["bbox"][0] += 20
+    elif change == "target_span_count":
+        target["lines"].pop()
+    elif change == "original_cross_page":
+        source["lines"][0]["spans"][0]["cross_page"] = True
+    elif change == "parent_limit":
+        page["preproc_blocks"] *= 300
+    elif change == "page_parent_limit":
+        page["para_blocks"] *= 300
+    elif change == "placeholder_match":
+        page["para_blocks"].append(deepcopy(page["para_blocks"][1]))
+    elif change == "group_no_target":
+        values = values[1:]
+    elif change == "group_limit":
+        values.extend(deepcopy(values[1]) for _ in range(64))
+    else:
+        values[0]["type"] = "table"
+    before = deepcopy(values), deepcopy(layout)
+    with pytest.raises(MinerUError) as error:
+        restore_merged_text(values, {0: page})
+    assert error.value.code == "MERGE_EVIDENCE" and error.value.diagnostic["reason"] == reason
+    assert (values, layout) == before
+
+
+def test_diagnostic_inputs_never_export_arbitrary_text_coordinates_or_booleans():
+    """未知子码及字段不透传，内部定位仅限整数；错误仍为永久MERGE_EVIDENCE。"""
+    from app.services.mineru.adapter import merge_evidence_error
+    error = merge_evidence_error("PRIVATE_TOKEN", page_idx=True, item_index=7, observed=-1,
+        expected=10**9, bbox=[1, 2, 3, 4], text="PRIVATE_BODY", url="PRIVATE_URL")
+    assert error.diagnostic == {"reason": "UNCLASSIFIED", "stage": "adapter.restore_merged_text", "item_index": 7}
+    assert error.code == "MERGE_EVIDENCE" and not error.retryable
+    assert "PRIVATE" not in str(error) and "PRIVATE" not in str(error.diagnostic)
+
+
+def test_group_diagnostic_keeps_original_array_position_on_later_physical_page():
+    """大型PDF前置199页不影响错误定位；原数组序号和局部页均不靠坐标重排推断。"""
+    from app.services.mineru.adapter import restore_merged_text
+    values, layout, _ = merged_case()
+    page = layout["pdf_info"][0]
+    page["page_idx"] = 199
+    for value in values:
+        value["page_idx"] = 199
+    page["preproc_blocks"][1]["lines"][0]["spans"].append(
+        deepcopy(page["preproc_blocks"][1]["lines"][0]["spans"][0]))
+    prefix = [{"type": "text", "text": "非合并元数据", "page_idx": index} for index in range(199)]
+    with pytest.raises(MinerUError) as error:
+        restore_merged_text(prefix + values, {199: page})
+    assert error.value.diagnostic == {"reason": "LINE_SPAN_COUNT", "stage": "adapter.plain_layout_spans",
+        "observed": 2, "expected": 1, "page_idx": 199, "item_index": 201, "span_role": "source"}

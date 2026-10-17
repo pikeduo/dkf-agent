@@ -313,12 +313,53 @@ def convert_bbox(value: object, size: tuple[float, float]) -> list[float] | None
     ]
 
 
-def merge_evidence_error() -> MinerUError:
-    """生成固定安全错误；不带正文、坐标、文件地址或上游异常，且不自动重试收费。"""
+# 诊断子码仅用于内部定位；对外错误码/重试策略/缓存版本和恢复判定均保持不变。
+MERGE_REASONS = {
+    "LAYOUT_PAGE": "matched_text_layout", "TEXT_LEVEL": "matched_text_layout",
+    "ITEM_BBOX": "matched_text_layout", "PARENT_LIST": "matched_text_layout",
+    "PARENT_LIMIT": "matched_text_layout", "PARENT_INDEX": "matched_text_layout",
+    "PARENT_MATCH": "matched_text_layout", "PARENT_INDEX_MISMATCH": "matched_text_layout",
+    "LINES_MISSING": "plain_layout_spans", "LINE_SCHEMA": "plain_layout_spans",
+    "LINE_SPAN_COUNT": "plain_layout_spans", "SPAN_TYPE": "plain_layout_spans",
+    "SPAN_TEXT": "plain_layout_spans", "TEXT_LIMIT": "merged_text_slices",
+    "SOURCE_TEXT": "merged_text_slices", "TEXT_CHARACTER": "merged_text_slices",
+    "TEXT_TRAILING": "merged_text_slices", "PAGE_PARENT_LIMIT": "restore_merged_text",
+    "PLACEHOLDER_MATCH": "restore_merged_text", "GROUP_NO_TARGET": "restore_merged_text",
+    "GROUP_LIMIT": "restore_merged_text", "TARGET_TEXT": "restore_merged_text",
+    "TARGET_DELETED": "restore_merged_text", "SOURCE_NOT_DELETED": "restore_merged_text",
+    "SOURCE_SPAN_COUNT": "restore_merged_text", "SOURCE_SPAN_BBOX": "restore_merged_text",
+    "SOURCE_BBOX_COVERAGE": "restore_merged_text", "TARGET_SPAN_COUNT": "restore_merged_text",
+    "SOURCE_PAGE": "restore_merged_text", "MOVED_TEXT": "restore_merged_text",
+    "MOVED_CROSS_PAGE": "restore_merged_text", "SOURCE_CROSS_PAGE": "restore_merged_text",
+    "MOVED_BBOX": "restore_merged_text",
+}
 
-    return MinerUError(
-        "MERGE_EVIDENCE", "MinerU 合并段落的正文或来源证据无法唯一核对，未保存不完整结果"
-    )
+
+class MergeEvidenceError(MinerUError):
+    """附带固定阶段/子码及受限整数定位，不携带正文、坐标、路径或底层异常。"""
+
+    def __init__(self, reason: str, **counts) -> None:
+        """只接受注册子码和受限计数，未知输入不进入日志或离线报告。"""
+        super().__init__("MERGE_EVIDENCE", "MinerU 合并段落的正文或来源证据无法唯一核对，未保存不完整结果")
+        self.diagnostic = {"reason": reason if reason in MERGE_REASONS else "UNCLASSIFIED",
+                           "stage": "adapter." + MERGE_REASONS.get(reason, "restore_merged_text")}
+        self.locate(**counts)
+
+    def locate(self, **counts) -> None:
+        """补充原数组位置/局部页、受限计数及固定结构角色；拒绝布尔值与外部字符串。"""
+        for name in ("item_index", "page_idx", "observed", "expected"):
+            value = counts.get(name)
+            if type(value) is int and 0 <= value <= 1024**2 + 1:
+                self.diagnostic.setdefault(name, value)
+        for name, allowed in {"layout_group": {"para_blocks", "preproc_blocks"},
+                              "span_role": {"source", "target"}}.items():
+            if isinstance(counts.get(name), str) and counts[name] in allowed:
+                self.diagnostic.setdefault(name, counts[name])
+
+
+def merge_evidence_error(reason: str, **counts) -> MergeEvidenceError:
+    """生成不可收费重试的安全子错误；不改变外部 MERGE_EVIDENCE 契约。"""
+    return MergeEvidenceError(reason, **counts)
 
 
 def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict, list]:
@@ -326,21 +367,25 @@ def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict,
 
     index = item.get("page_idx")
     page = pages.get(index) if type(index) is int else None
-    if (not isinstance(page, dict) or type(item.get("text_level", 0)) is not int
-            or item.get("text_level", 0) != 0):
-        raise merge_evidence_error()
+    if not isinstance(page, dict):
+        raise merge_evidence_error("LAYOUT_PAGE", page_idx=index)
+    if type(item.get("text_level", 0)) is not int or item.get("text_level", 0) != 0:
+        raise merge_evidence_error("TEXT_LEVEL", page_idx=index)
     box = convert_bbox(item.get("bbox"), (1000, 1000))
     if box is None:
-        raise merge_evidence_error()
+        raise merge_evidence_error("ITEM_BBOX", page_idx=index)
     matches = []
     for group in ("para_blocks", "preproc_blocks"):
         blocks = page.get(group)
-        if not isinstance(blocks, list) or not 1 <= len(blocks) <= 512:
-            raise merge_evidence_error()
+        if not isinstance(blocks, list) or not blocks:
+            raise merge_evidence_error("PARENT_LIST", page_idx=index, layout_group=group)
+        if len(blocks) > 512:
+            raise merge_evidence_error("PARENT_LIMIT", page_idx=index, observed=len(blocks), expected=512,
+                                       layout_group=group)
         indices = [b.get("index") for b in blocks if isinstance(b, dict)]
         if (len(indices) != len(blocks) or any(type(i) is not int or i < 0 for i in indices)
                 or len(set(indices)) != len(indices)):
-            raise merge_evidence_error()
+            raise merge_evidence_error("PARENT_INDEX", page_idx=index, layout_group=group)
         found = []
         for block in blocks:
             candidate = layout_bbox(block, page.get("page_size"))
@@ -348,10 +393,11 @@ def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict,
                     and all(abs(a - b) <= 2 for a, b in zip(box, candidate))):
                 found.append(block)
         if len(found) != 1:
-            raise merge_evidence_error()
+            raise merge_evidence_error("PARENT_MATCH", page_idx=index, observed=len(found), expected=1,
+                                       layout_group=group)
         matches.append(found[0])
     if matches[0]["index"] != matches[1]["index"]:
-        raise merge_evidence_error()
+        raise merge_evidence_error("PARENT_INDEX_MISMATCH", page_idx=index)
     return matches[0], matches[1], page["page_size"]
 
 
@@ -360,17 +406,18 @@ def plain_layout_spans(block: dict) -> list[dict]:
 
     lines = block.get("lines")
     if not isinstance(lines, list) or not lines:
-        raise merge_evidence_error()
+        raise merge_evidence_error("LINES_MISSING")
     spans = []
     for line in lines:
         if not isinstance(line, dict) or not isinstance(line.get("spans"), list):
-            raise merge_evidence_error()
+            raise merge_evidence_error("LINE_SCHEMA")
         if len(line["spans"]) != 1:
-            raise merge_evidence_error()
+            raise merge_evidence_error("LINE_SPAN_COUNT", observed=len(line["spans"]), expected=1)
         span = line["spans"][0]
-        if (not isinstance(span, dict) or span.get("type") != "text"
-                or not isinstance(span.get("content"), str) or not span["content"].strip()):
-            raise merge_evidence_error()
+        if not isinstance(span, dict) or span.get("type") != "text":
+            raise merge_evidence_error("SPAN_TYPE")
+        if not isinstance(span.get("content"), str) or not span["content"].strip():
+            raise merge_evidence_error("SPAN_TEXT")
         spans.append(span)
     return spans
 
@@ -382,9 +429,10 @@ def merged_text_slices(text: str, originals: list[str]) -> list[str]:
     留在前一切片，切片拼接必须与 V1 原字符串完全相同，拒绝遗漏或额外文字。
     """
 
-    if (len(text) > 1024**2 or not originals
-            or any(not isinstance(part, str) or not part.strip() for part in originals)):
-        raise merge_evidence_error()
+    if len(text) > 1024**2:
+        raise merge_evidence_error("TEXT_LIMIT", observed=len(text), expected=1024**2)
+    if not originals or any(not isinstance(part, str) or not part.strip() for part in originals):
+        raise merge_evidence_error("SOURCE_TEXT")
     escapable = frozenset("\\`*_{}[]()#+-.!$<>|")
     cursor, cuts = 0, [0]
     for original in originals:
@@ -396,12 +444,12 @@ def merged_text_slices(text: str, originals: list[str]) -> list[str]:
             elif (char in escapable and text[cursor:cursor + 2] == "\\" + char):
                 cursor += 2
             else:
-                raise merge_evidence_error()
+                raise merge_evidence_error("TEXT_CHARACTER")
         while cursor < len(text) and text[cursor].isspace():
             cursor += 1
         cuts.append(cursor)
     if cursor != len(text):
-        raise merge_evidence_error()
+        raise merge_evidence_error("TEXT_TRAILING")
     return [text[left:right] for left, right in pairwise(cuts)]
 
 
@@ -428,7 +476,8 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
         page = pages.get(item["page_idx"], {})
         candidates = page.get("para_blocks", [])
         if isinstance(candidates, list) and len(candidates) > 512:
-            raise merge_evidence_error()
+            raise merge_evidence_error("PAGE_PARENT_LIMIT", page_idx=item["page_idx"], item_index=offset + 1,
+                                       observed=len(candidates), expected=512)
         box = convert_bbox(item.get("bbox"), (1000, 1000))
         marked = []
         if isinstance(candidates, list) and box is not None:
@@ -442,48 +491,82 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             offset += 1
             continue
         if len(marked) != 1:
-            raise merge_evidence_error()
+            raise merge_evidence_error("PLACEHOLDER_MATCH", page_idx=item["page_idx"], item_index=offset + 1,
+                                       observed=len(marked), expected=1)
         end = offset
         while (end < len(items) and items[end].get("type") == "text"
                and items[end].get("text") == ""):
             end += 1
-        if offset == 0 or end - offset > 64:
-            raise merge_evidence_error()
+        if offset == 0:
+            raise merge_evidence_error("GROUP_NO_TARGET", page_idx=item["page_idx"], item_index=offset + 1)
+        if end - offset > 64:
+            raise merge_evidence_error("GROUP_LIMIT", page_idx=item["page_idx"], item_index=offset + 1,
+                                       observed=end - offset, expected=64)
         group = items[offset - 1:end]
         target = group[0]
         if (target.get("type") != "text" or not isinstance(target.get("text"), str)
                 or not target["text"].strip()):
-            raise merge_evidence_error()
-        evidence = [matched_text_layout(value, pages) for value in group]
+            raise merge_evidence_error("TARGET_TEXT", page_idx=target.get("page_idx"), item_index=offset)
+        evidence = []
+        for position, value in enumerate(group, start=offset):
+            try:
+                evidence.append(matched_text_layout(value, pages))
+            except MergeEvidenceError as error:
+                error.locate(page_idx=value.get("page_idx"), item_index=position)
+                raise
         if evidence[0][0].get("lines_deleted", False) is not False:
-            raise merge_evidence_error()
+            raise merge_evidence_error("TARGET_DELETED", page_idx=target.get("page_idx"), item_index=offset)
         source_spans = []
         for index, (parent, before, size) in enumerate(evidence):
             if index and (parent.get("lines_deleted") is not True or parent.get("lines") != []):
-                raise merge_evidence_error()
-            spans = plain_layout_spans(before)
-            if len(spans) != 1 or layout_bbox(spans[0], size) is None:
-                raise merge_evidence_error()
+                raise merge_evidence_error("SOURCE_NOT_DELETED", page_idx=group[index].get("page_idx"),
+                                           item_index=offset + index)
+            try:
+                spans = plain_layout_spans(before)
+            except MergeEvidenceError as error:
+                error.locate(page_idx=group[index].get("page_idx"), item_index=offset + index, span_role="source")
+                raise
+            if len(spans) != 1:
+                raise merge_evidence_error("SOURCE_SPAN_COUNT", page_idx=group[index].get("page_idx"),
+                                           item_index=offset + index, observed=len(spans), expected=1)
+            if layout_bbox(spans[0], size) is None:
+                raise merge_evidence_error("SOURCE_SPAN_BBOX", page_idx=group[index].get("page_idx"),
+                                           item_index=offset + index)
             # 当前只处理源 span 覆盖整个段落的情形，不把局部 span 坐标冒充整个源块。
             span_box, parent_box = layout_bbox(spans[0], size), layout_bbox(before, size)
             if any(abs(a - b) > 2 for a, b in zip(span_box, parent_box)):
-                raise merge_evidence_error()
+                raise merge_evidence_error("SOURCE_BBOX_COVERAGE", page_idx=group[index].get("page_idx"),
+                                           item_index=offset + index)
             source_spans.append(spans[0])
-        target_spans = plain_layout_spans(evidence[0][0])
+        try:
+            target_spans = plain_layout_spans(evidence[0][0])
+        except MergeEvidenceError as error:
+            error.locate(page_idx=target.get("page_idx"), item_index=offset, span_role="target")
+            raise
         if len(target_spans) != len(source_spans):
-            raise merge_evidence_error()
-        for value, original, moved, (_, _, size) in zip(group, source_spans, target_spans, evidence):
+            raise merge_evidence_error("TARGET_SPAN_COUNT", page_idx=target.get("page_idx"), item_index=offset,
+                                       observed=len(target_spans), expected=len(source_spans))
+        for position, (value, original, moved, (_, _, size)) in enumerate(
+                zip(group, source_spans, target_spans, evidence), start=offset):
             source_page, target_page = value.get("page_idx"), target.get("page_idx")
+            location = {"page_idx": source_page, "item_index": position}
             if (type(source_page) is not int or type(target_page) is not int
-                    or source_page not in {target_page, target_page + 1}
-                    or moved.get("content") != original["content"]
-                    or moved.get("cross_page", False) is not (source_page != target_page)
-                    or original.get("cross_page", False) is not False):
-                raise merge_evidence_error()
+                    or source_page not in {target_page, target_page + 1}):
+                raise merge_evidence_error("SOURCE_PAGE", **location)
+            if moved.get("content") != original["content"]:
+                raise merge_evidence_error("MOVED_TEXT", **location)
+            if moved.get("cross_page", False) is not (source_page != target_page):
+                raise merge_evidence_error("MOVED_CROSS_PAGE", **location)
+            if original.get("cross_page", False) is not False:
+                raise merge_evidence_error("SOURCE_CROSS_PAGE", **location)
             moved_box, original_box = layout_bbox(moved, size), layout_bbox(original, size)
             if moved_box is None or any(abs(a - b) > 2 for a, b in zip(moved_box, original_box)):
-                raise merge_evidence_error()
-        parts = merged_text_slices(target["text"], [s["content"] for s in source_spans])
+                raise merge_evidence_error("MOVED_BBOX", **location)
+        try:
+            parts = merged_text_slices(target["text"], [s["content"] for s in source_spans])
+        except MergeEvidenceError as error:
+            error.locate(page_idx=target.get("page_idx"), item_index=offset)
+            raise
         for index, (value, text) in enumerate(zip(group, parts), start=offset - 1):
             restored[index] = value | {"text": text}
         count += end - offset
@@ -515,8 +598,14 @@ class MinerUResultAdapter:
             try:
                 items, restored_count = restore_merged_text(items, pages)
             except MinerUError as exc:
+                detail = exc.diagnostic if isinstance(exc, MergeEvidenceError) else {}
                 log_event("mineru.merge_rejected", level=logging.WARNING,
-                          doc_id=doc_id, error_code=exc.code, stage="adapter")
+                          doc_id=doc_id, error_code=exc.code,
+                          stage=".".join(filter(None, (detail.get("stage", "adapter"),
+                              detail.get("layout_group"), detail.get("span_role")))),
+                          step=detail.get("reason"), item_index=detail.get("item_index"),
+                          page=(detail["page_idx"] + 1) if "page_idx" in detail else None,
+                          item_count=detail.get("observed"), error_type=type(exc).__name__)
                 raise
             if restored_count:
                 log_event("mineru.merge_restored", doc_id=doc_id,
