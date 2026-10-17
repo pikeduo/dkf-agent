@@ -282,6 +282,7 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
         "source_hashes_verified": True, "zip_batch_provenance": "validated_local_receipt",
         "adapter_normalize": "NOT_EXECUTED", "completeness_guard": "NOT_EXECUTED"}
     try:
+        report["adapter_normalize"] = "RUNNING"
         parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
             file_name=document.file_name, file_type="pdf", geometry=page_geometry(path, "pdf"),
             identity=job.file_hash + ":" + job.options_hash)
@@ -293,6 +294,8 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
             raise MinerUError("FILE_HASH", "转换期间原件Hash变化，未接受结果")
         report.update(status="ADAPTER_PASS_NOT_RECOVERED", completeness_guard="PASS", error_code=None)
     except (MinerUError, CompletenessError) as error:
+        if report["adapter_normalize"] == "RUNNING":
+            report["adapter_normalize"] = "FAIL"
         report["error_code"] = getattr(error, "code", "COMPLETENESS")
         if isinstance(error, MergeEvidenceError):
             report["merge_diagnostic"] = dict(error.diagnostic)

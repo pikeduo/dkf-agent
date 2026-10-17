@@ -8,14 +8,14 @@
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_mineru_stage33_regressions.py tests/test_mineru_table_merge.py tests/test_mineru_merge.py tests/test_mineru_merge_boundaries.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_recovery.py tests/test_mineru_pdf_split_jobs.py tests/test_document_management.py tests/test_stage33_pipeline.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_mineru_stage33_text_compat.py tests/test_mineru_stage33_regressions.py tests/test_mineru_table_merge.py tests/test_mineru_merge.py tests/test_mineru_merge_boundaries.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_recovery.py tests/test_mineru_pdf_split_jobs.py tests/test_document_management.py tests/test_stage33_pipeline.py tests/test_business_logging.py -q -ra
 ```
 
 对每份已有原ZIP做只读离线验证。Whole支持从归档回执自动定位；此命令仅GET数据库只读快照、本地转换/Guard和写新报告，不恢复任务、不调用MinerU：
 
 ```powershell
-python scripts/mineru_merge_diagnostic.py --job-id 46929a5f-b866-4c90-9ea6-8df70d0e4289 --batch-id 59d163c7-815f-46aa-83a3-7f527e23a98b --output results/stage33_adapter_check_01.json
-Get-Content -Encoding UTF8 results/stage33_adapter_check_01.json
+python scripts/mineru_merge_diagnostic.py --job-id 46929a5f-b866-4c90-9ea6-8df70d0e4289 --batch-id 59d163c7-815f-46aa-83a3-7f527e23a98b --output results/stage33_adapter_check_02.json
+Get-Content -Encoding UTF8 results/stage33_adapter_check_02.json
 ```
 
 报告已存在则换新文件名，绝不覆盖。批量诊断当前检查点的合并失败（保留所有200条输入）：
@@ -46,7 +46,9 @@ python -c "import sys; from pathlib import Path; from app.core.config import get
 
 新事件router.preflight_rejected只记PDF_PAGE_LIMIT/PDF_LINE_LIMIT/PDF_OBJECT_LIMIT及页/计数。不要为了这份文件直接提高预算或删掉绘图检查。
 
-先由用户检查全部离线报告，**当前仍有非相邻目标、混合Span、缺失附注/行等未解决结构，不能直接认为所有失败已修复**。仅对诊断通过的同BatchJob显式Retry，例如替换为报告中的doc_id：
+本轮新增严格兼容：原样图表/旁注间隔的唯一布局关联、文字/行内公式多Span的原序核对、跨栏边界二维相交检查，以及已证实为空的页眉原项保留。Normalizer仍为v3：只扩大此前拒绝的结构，已通过输入的V1字符/原位置/ID规则不变；不自动升级旧v2任务或缓存。空边界不算正文/必需页覆盖，也不生成空Chunk。缺失附注/行、未知Span及来源歧义仍失败，**并非所有失败都已修复，新增用例与真实ZIP回放待用户执行**。Whole报告中已进入Adapter再失败会记`adapter_normalize=FAIL`，不会再误记NOT_EXECUTED；Guard独立计状态。
+
+先检查全部离线报告。仅对诊断通过的同BatchJob显式Retry，例如替换为报告中的doc_id：
 
 ```powershell
 $docId = "填写离线报告通过的doc_id"
@@ -55,6 +57,14 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/admin/documents/$docId/status"
 ```
 
 原云片归档有效时只本地重放；**分片后续尚未提交的片及未上传的新文档仍可能收费**。不因ZIP/Adapter通过直接置READY。缺归档不自动重新POST；原Batch云下载若需要联网，另行确认权限，不能用Force代替。
+
+若本轮只要恢复原失败项，不要执行一般的全量续传命令。用户确认Mock/离线报告及费用、更新并重启API/CPU Worker后，沿用原run和知识库执行：
+
+```powershell
+python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --execute --resume --retry-failed-only --allow-cloud --max-inflight 2 --timeout 604800 --poll-interval 10
+```
+
+此模式固定启动时checkpoint中FAILED的范围，对照数据库同Hash、同doc_id，只通过原`/retry`恢复；绝不调用上传接口，不处理那166份未尝试文件，不改READY文档或阶段32数据。所有200条和4087题依然保留在报告，故恢复批次结束仍可能显示INCOMPLETE/退出码1，不代表这批恢复全部失败，请查看逐文档状态。其他已有在途任务照常由Worker推进，且占用并发额度。无checkpoint/身份变更停止；旧`retry_intent=true`不清除、不盲重投，需人工核对上次请求。每次运行每份最多请求一次；超时不取消后台任务。PREFLIGHT_LIMIT未解决可能再次失败；本模式不是跳过预检。失败分片的后续首次提交仍可能收费，不能将“只恢复失败”理解为零费用。
 
 修复剩余阻塞、确认全部潜在费用后，沿用原run/原知识库恢复全范围调度（READY只读取接管，不重导入/重建）：
 

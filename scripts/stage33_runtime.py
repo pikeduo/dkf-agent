@@ -222,16 +222,26 @@ class API:
 
 
 def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_interval=10,
-               retry_failed=False, reader=read_snapshot, clock=monotonic, pause=sleep):
-    """全200范围的资源有界调度；先落意图、后只读确认，恢复不重传已有Hash或盲目补投。"""
+               retry_failed=False, retry_failed_only=False, reader=read_snapshot, clock=monotonic, pause=sleep):
+    """全量登记、有界调度；失败项恢复模式仅Retry原失败身份，绝不上传缺失文件。
+
+    Retry仍由原管理接口核对归档和收费历史；意图不明不重发，不改变成功文档。
+    """
     state_path = run / "import_checkpoint.json"
     from scripts.stage33_common import read_json
+    if retry_failed_only and not state_path.exists():
+        raise Stage33Error("IMPORT_CHECKPOINT_REQUIRED")
     state = read_json(state_path) if state_path.exists() else {d["file_id"]: {
         "file_id": d["file_id"], "dataset": d["dataset"], "file_path": d["file_path"],
         "sha256": d["sha256"], "file_type": d["file_type"], "execution_status": "NOT_ATTEMPTED"}
         for d in data["documents"]}
     if set(state) != {d["file_id"] for d in data["documents"]}:
         raise Stage33Error("IMPORT_CHECKPOINT")
+    # 固定本轮恢复范围，不能在观察过程中把新失败/未尝试文档纳入写请求。
+    targets = {fid for fid, item in state.items() if item["execution_status"] == "FAILED"} if retry_failed_only else set(state)
+    original_ids = {fid: state[fid].get("doc_id") for fid in targets}
+    if retry_failed_only:
+        retry_failed = True
     deadline = clock() + timeout
     retried = set()
     write_json(state_path, state)
@@ -250,6 +260,11 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
                 item.update(execution_status="INPUT_FAILED", error_code=data["file_issues"][doc["file_id"]])
                 continue
             row = rows.get(doc["sha256"])
+            if retry_failed_only and doc["file_id"] in targets and (
+                    row is None or not original_ids[doc["file_id"]]
+                    or row["doc_id"] != original_ids[doc["file_id"]]):
+                item.update(execution_status="RETRY_UNCONFIRMED", error_code="RETRY_IDENTITY_UNCONFIRMED")
+                continue
             if row:
                 item.update(row)
                 item["execution_status"] = "READY" if is_ready(row) else (
@@ -257,17 +272,21 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
                     else "WAITING")
                 if row["status"] == "READY" and not is_ready(row):
                     item["error_code"] = "READY_VALIDATION_FAILED"
-                if (retry_failed and item["execution_status"] == "FAILED" and doc["file_id"] not in retried
+                if (retry_failed and doc["file_id"] in targets and item["execution_status"] == "FAILED" and doc["file_id"] not in retried
                         and active < max_inflight and not item.get("retry_intent")):
                     retried.add(doc["file_id"])
                     item["retry_intent"] = True
                     write_json(state_path, state)
+                    changed = True
+                    # HTTP确认丢失也可能已接收；与上传一样先占并发，下一轮只读确认。
+                    active += 1
                     try:
                         api.retry(row["doc_id"])
-                        active += 1
                         item["execution_status"] = "WAITING"
                     except Stage33Error as error:
                         item.update(execution_status="RETRY_UNCONFIRMED", error_code=error.code)
+                continue
+            if retry_failed_only:
                 continue
             if item.get("upload_intent"):
                 item.update(execution_status="UPLOAD_UNCONFIRMED", error_code="UPLOAD_IDENTITY_UNCONFIRMED")
@@ -286,15 +305,18 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
             changed = True
         write_json(state_path, state)
         terminal = {"READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}
+        pending_retry = retry_failed and any(state[fid]["execution_status"] == "FAILED"
+            and fid not in retried and not state[fid].get("retry_intent") for fid in targets)
         # 本轮刚发过请求时再观察一轮，HTTP超时但已落库的文档不能被过早判为失联。
-        if not changed and all(item["execution_status"] in terminal for item in state.values()):
+        if not changed and not pending_retry and all(state[fid]["execution_status"] in terminal for fid in targets):
             break
         if changed:
             print(f"导入已登记：{sum(bool(x.get('upload_intent')) for x in state.values())}/{len(state)}；"
                   f"READY={sum(x['execution_status'] == 'READY' for x in state.values())}")
         pause(min(poll_interval, max(0, deadline - clock())))
     # 所有文件始终保留；超时不是后台取消，也不把未调度文件当作成功。
-    for item in state.values():
+    for fid in targets:
+        item = state[fid]
         if item["execution_status"] not in {"READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}:
             item["execution_status"] = "TIMEOUT_PENDING"
     write_json(state_path, state)

@@ -254,6 +254,141 @@ def test_formal_cli_has_no_first_n_or_sample_switch():
     assert parser.parse_args(["--max-inflight", "1"]).max_inflight == 1
 
 
+def recovery_checkpoint(data, rows):
+    """保留全量检查点范围，仅把已有失败文档标为恢复候选。"""
+    return {doc["file_id"]: {"file_id": doc["file_id"], "dataset": doc["dataset"],
+        "file_path": doc["file_path"], "file_type": doc["file_type"], "sha256": doc["sha256"],
+        "execution_status": "NOT_ATTEMPTED"} | (rows.get(doc["sha256"], {})) | (
+        {"execution_status": rows[doc["sha256"]]["status"]} if doc["sha256"] in rows else {})
+        for doc in data["documents"]}
+
+
+def test_retry_failed_only_restores_original_failures_without_uploading_other_166(tmp_path):
+    """原200条全部保留，只恢复25个失败身份；不上传166个未尝试或重建原READY。"""
+    data, kb, now, calls = inputs(), uuid4(), [0], []
+    rows = {doc["sha256"]: ready(doc, kb) for doc in data["documents"][:34]}
+    for doc in data["documents"][:25]:
+        rows[doc["sha256"]].update(status="FAILED", error_code="MERGE_EVIDENCE")
+    for doc in data["documents"][32:34]:
+        rows[doc["sha256"]].update(status="PARSING", management={"state": "running"})
+    state = recovery_checkpoint(data, rows)
+    # 两个既有等待项仍占满并发，下一次观察才完成；不能因此提前结束恢复。
+    before = deepcopy(state)
+    common.write_json(tmp_path / "import_checkpoint.json", state)
+
+    def reader(kb_id):
+        """虚拟时间推进后既有等待项完成，不接触真实任务或数据库。"""
+        assert kb_id == kb
+        if now[0]:
+            for doc in data["documents"][32:34]:
+                rows[doc["sha256"]].update(status="READY", management={"state": "done"})
+        return deepcopy(rows)
+
+    def retry(doc_id):
+        """模拟原管理接口完成同身份恢复，不创建新的文档或向量代次。"""
+        calls.append(doc_id)
+        for row in rows.values():
+            if row["doc_id"] == doc_id:
+                row.update(status="READY", management={"state": "done"})
+
+    def no_upload(*args):
+        """恢复模式不得上传任何新文件。"""
+        pytest.fail("失败项恢复不允许调用上传接口")
+
+    def clock():
+        """读取虚拟时钟。"""
+        return now[0]
+
+    def pause(seconds):
+        """仅推进内存时间，不真实等待。"""
+        now[0] += seconds
+
+    result = runtime.import_all(data, tmp_path, kb, SimpleNamespace(upload=no_upload, retry=retry),
+        reader=reader, clock=clock, pause=pause, retry_failed_only=True, timeout=30, poll_interval=1)
+    assert len(result) == 200 and len(calls) == len(set(calls)) == 25
+    assert all(result[doc["file_id"]]["execution_status"] == "READY" for doc in data["documents"][:34])
+    for doc in data["documents"][34:]:
+        assert result[doc["file_id"]] == before[doc["file_id"]]
+    for doc in data["documents"][25:32]:
+        assert result[doc["file_id"]] == before[doc["file_id"]]
+
+
+@pytest.mark.parametrize("damage", ["missing_row", "changed_doc_id", "unknown_retry"])
+def test_failed_only_never_posts_when_identity_or_prior_retry_is_unconfirmed(tmp_path, damage):
+    """原身份缺失/变更或旧意图未确认时保留阻塞，不重POST、上传或清检查点。"""
+    data, kb = inputs(2), uuid4()
+    row = ready(data["documents"][0], kb) | {"status": "FAILED"}
+    rows = {data["documents"][0]["sha256"]: row}
+    state = recovery_checkpoint(data, rows)
+    if damage == "unknown_retry":
+        state[data["documents"][0]["file_id"]]["retry_intent"] = True
+    common.write_json(tmp_path / "import_checkpoint.json", state)
+    if damage == "missing_row":
+        rows.clear()
+    elif damage == "changed_doc_id":
+        row["doc_id"] = str(uuid4())
+
+    def reader(kb_id):
+        """仅返回内存快照。"""
+        return deepcopy(rows)
+
+    def forbidden(*args):
+        """不确定身份禁止任何写请求。"""
+        pytest.fail("不应发起恢复或上传")
+
+    result = runtime.import_all(data, tmp_path, kb, SimpleNamespace(upload=forbidden, retry=forbidden),
+        reader=reader, retry_failed_only=True)
+    first = result[data["documents"][0]["file_id"]]
+    assert first["execution_status"] == ("FAILED" if damage == "unknown_retry" else "RETRY_UNCONFIRMED")
+    assert result[data["documents"][1]["file_id"]]["execution_status"] == "NOT_ATTEMPTED"
+
+
+def test_failed_only_requires_existing_checkpoint_and_cli_import_resume(tmp_path, monkeypatch):
+    """恢复入口必须显式沿用原run；非法参数在读取数据/连接服务前拒绝。"""
+    with pytest.raises(common.Stage33Error, match="IMPORT_CHECKPOINT_REQUIRED"):
+        runtime.import_all(inputs(), tmp_path, uuid4(), SimpleNamespace(), retry_failed_only=True)
+
+    def forbidden(*args):
+        """非法入口不应读取真实数据或启动任何服务。"""
+        pytest.fail("无效恢复参数应在读取数据前拒绝")
+
+    monkeypatch.setattr(cli, "load_dataset", forbidden)
+    assert cli.main(["--step", "evaluate", "--resume", "--retry-failed-only"]) == 1
+    assert cli.main(["--step", "import", "--retry-failed-only"]) == 1
+
+
+def test_failed_only_lost_retry_response_is_observed_without_second_write(tmp_path):
+    """Retry响应丢失但原文档已完成时下一轮观察接管，不重复提交或提前退出。"""
+    data, kb, calls, now = inputs(2), uuid4(), [], [0]
+    row = ready(data["documents"][0], kb) | {"status": "FAILED"}
+    rows = {data["documents"][0]["sha256"]: row}
+    common.write_json(tmp_path / "import_checkpoint.json", recovery_checkpoint(data, rows))
+
+    def reader(kb_id):
+        """返回API已保存的状态，不产生数据库访问。"""
+        return deepcopy(rows)
+
+    def retry(doc_id):
+        """同一文档完成后模拟HTTP确认丢失，不允许盲目再次写。"""
+        calls.append(doc_id)
+        row["status"] = "READY"
+        raise common.Stage33Error("API_WRITE_UNCONFIRMED")
+
+    def clock():
+        """提供虚拟时钟。"""
+        return now[0]
+
+    def pause(seconds):
+        """推进观察时钟，不真实休眠。"""
+        now[0] += seconds
+
+    result = runtime.import_all(data, tmp_path, kb, SimpleNamespace(retry=retry),
+        retry_failed_only=True, reader=reader, clock=clock, pause=pause, timeout=5, poll_interval=1)
+    assert calls == [row["doc_id"]]
+    assert result[data["documents"][0]["file_id"]]["execution_status"] == "READY"
+    assert result[data["documents"][1]["file_id"]]["execution_status"] == "NOT_ATTEMPTED"
+
+
 def test_evaluation_resume_reuses_only_identical_model_scope_and_qa(tmp_path, monkeypatch):
     """相同QA/索引/模型断点不重复检索；代次变化必须停止，不能混用旧结果。"""
     data, kb, calls = inputs(2), uuid4(), []

@@ -197,6 +197,7 @@ EVENT_LABELS = {
     "router.decided": "文档完整性路由决策已生成",
     "router.failed": "文档自动路由安全拒绝，未生成最终结果",
     "router.preflight_rejected": "PDF预检达到资源边界，未提交云任务或生成部分结果",
+    "mineru.empty_boundary_preserved": "已核对并保留原空页边界，不将其计为有效正文或页面覆盖",
     "router.fallback": "解析预检要求一次提交前整份云回退",
     "router.guard_passed": "解析结构覆盖检查通过",
     "router.guard_failed": "解析覆盖检查未通过",

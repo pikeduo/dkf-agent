@@ -3,7 +3,8 @@
 from pathlib import PurePosixPath
 
 from app.services.mineru.adapter import (MERGE_BOUNDARY_TYPES, MergeEvidenceError, convert_bbox,
-    layout_bbox, matched_merge_boundary, merge_evidence_error, merged_text_slices, plain_layout_spans)
+    layout_bbox, matched_merge_boundary, merge_evidence_error, merged_text_slices,
+    paragraph_spans, span_reference_text)
 from app.services.mineru.table_html import TableHTML, verify_projection
 
 
@@ -87,7 +88,7 @@ def body(parent, size, *, deleted=False):
 
 
 def extra_spans(parent, size, kind, *, deleted=False):
-    """附属文本须单Span且有来源坐标；被移走的后页子块须有删除标记。"""
+    """附属文本逐Span保留文字/行内公式及坐标；删除后页须有明确空lines标记。"""
     result = []
     for child in children(parent):
         if child["type"] != kind:
@@ -98,16 +99,21 @@ def extra_spans(parent, size, kind, *, deleted=False):
             continue
         if child.get("lines_deleted", False) is not False or layout_bbox(child, size) is None:
             raise merge_evidence_error("TABLE_EXTRAS")
-        spans = plain_layout_spans(child)
-        if (len(spans) != 1 or layout_bbox(spans[0], size) is None
-                or spans[0].get("cross_page", False) is not False):
+        spans = paragraph_spans(child)
+        boxes = [layout_bbox(span, size) for span in spans]
+        if (any(box is None for box in boxes)
+                or any(span.get("cross_page", False) is not False for span in spans)):
             raise merge_evidence_error("TABLE_EXTRAS")
-        result.append(spans[0])
+        envelope = [min(box[0] for box in boxes), min(box[1] for box in boxes),
+                    max(box[2] for box in boxes), max(box[3] for box in boxes)]
+        if any(abs(a - b) > 2 for a, b in zip(envelope, layout_bbox(child, size))):
+            raise merge_evidence_error("TABLE_EXTRAS")
+        result.append({"bbox": child["bbox"], "parts": spans})
     return result
 
 
 def restore_extras(group, evidence):
-    """按唯一源Span将已合并V1 caption/footnote切回原页，不从layout添加文字。"""
+    """按唯一源Span组把原V1附注归还原页；逐字符/公式边界核对，不从layout补字。"""
     changes = [{} for _ in group]
     for kind in ("table_caption", "table_footnote"):
         source = [(index, span) for index, (_, before, size) in enumerate(evidence)
@@ -128,15 +134,20 @@ def restore_extras(group, evidence):
             matches = []
             for position, (index, original) in enumerate(source):
                 size = evidence[index][2]
-                if (actual["content"] == original["content"]
+                if ([(s["type"], s["content"]) for s in actual["parts"]]
+                        == [(s["type"], s["content"]) for s in original["parts"]]
                         and (box := layout_bbox(actual, size)) is not None
-                        and all(abs(a - b) <= 2 for a, b in zip(box, layout_bbox(original, size)))):
+                        and all(abs(a - b) <= 2 for a, b in zip(box, layout_bbox(original, size)))
+                        and all((moved_box := layout_bbox(moved_span, size)) is not None
+                                and (source_box := layout_bbox(source_span, size)) is not None
+                                and all(abs(a - b) <= 2 for a, b in zip(moved_box, source_box))
+                                for moved_span, source_span in zip(actual["parts"], original["parts"]))):
                     matches.append(position)
             if len(matches) != 1 or matches[0] in claimed or matches[0] != len(claimed):
                 raise merge_evidence_error("TABLE_EXTRAS")
             claimed.add(matches[0])
             index, original = source[matches[0]]
-            merged_text_slices(value, [original["content"]])
+            merged_text_slices(value, [span_reference_text(span) for span in original["parts"]])
             changes[index].setdefault(kind, []).append(value)
         for change in changes:
             change.setdefault(kind, [])

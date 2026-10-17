@@ -469,6 +469,8 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 `MERGE_EVIDENCE`属于本地来源校验失败，不等于云端失败。修复原因后，普通`/retry`仅在当前Job/Batch、原件Hash、冻结版本及已归档原ZIP均有效时恢复同一Job，本片不再请求云端；归档缺失/损坏则拒绝恢复。PDF后续尚未提交的分片仍可能产生新费用，先核对全部分片预算。诊断命令见[阶段33故障排查](docs/STAGE33_EVALUATION.md#失败定位与原知识库恢复)。
 
+阶段33仅恢复原失败文档时使用`--step import --resume --retry-failed-only`；该模式不上传未尝试文件、不重建READY文档，仍保留全部200份的报告与未完成状态。确认外传及潜在后续分片费用后才加`--execute --allow-cloud`，具体命令见上述手册。普通`--retry-failed`不限制新文件调度，二者不要混淆。
+
 `DELETE`返回202，先令文档退出检索，CPU再清理自有上传副本、Block/Chunk/向量、文档解析/Hybrid/GPU目录和Job指针；活动任务409。无其他文档引用的整份缓存会清理，跨文档共享及无法确认独占的视觉缓存保留，不删除正式preset、模型、日志或全局索引。清理失败保留删除检查点供Retry，成功后详情404；文件/数据库非原子，删除前备份并仅用可丢弃文档验证。此接口无鉴权，仅可信内网使用。
 
 具体响应、恢复边界和增量入库人工验收见[文档管理与增量入库](docs/DOCUMENT_MANAGEMENT.md)。缓存固定锁运行中不可删除；历史文档不自动补处理，预置导入CLI及旧逐阶段维护接口保留原流程。新上传只推进自身文档，Dense读取当前READY数据、BM25刷新可重建快照，不修改其他文档或重建全库向量。
@@ -761,7 +763,7 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 MinerU远端done、ZIP已下载但出现EMPTY_BLOCK时，保留原结果并按[合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标)核对。当前归一化版本为`mineru-adapter-v3`，隔离旧v1/v2缓存；跨页表格仅在完整V1/layout证据成立时恢复。部署新版本由用户重启API/CPU Worker，旧冻结Job/Reindex版本不一致安全拒绝，不自动付费重解析。不要删除缓存、修改Job版本/状态或盲目Force。
 
-出现`MERGE_EVIDENCE`时，Adapter之前下载的ZIP可能尚未缓存；先从**原已完成Batch**保留结果，再按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对Hash、版本与具体子原因。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
+出现`MERGE_EVIDENCE`时，成功Parse Cache可能不存在，但当前Worker会在Adapter前独立归档原ZIP。先按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对原Batch归档、Hash、版本及具体子原因；旧任务确实缺归档时才人工确认从**原已完成Batch**取得结果，不申请新Batch。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
 
 旧v2付费Job需要用v3比较结果时，只有诊断CLI的显式`--allow-normalizer-upgrade`允许使用内存副本，报告同时保留旧/新身份。PDF新预检仅对严格证明的页边缘灰细横线免覆盖，未知绘图仍要求结果；旧冻结覆盖默认不变，另有独立`--allow-coverage-upgrade`只读比较，见[MinerU完整性故障排查](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。这些开关不是部署、缓存迁移或业务恢复授权，不自动忽略缺页或继续收费批次。
 

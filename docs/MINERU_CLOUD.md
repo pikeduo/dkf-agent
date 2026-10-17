@@ -34,11 +34,11 @@
 
 Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
-- V1仍是唯一正文来源。合并目标不必在数组中紧邻占位，但只允许跨越有独立layout证据的header/footer/page_number；其他Text、Title、Table、公式、图片及未知类型不能跳过，不使用full.md/V2补字或按文件名判断。
-- 页内类型、归一化 bbox 必须唯一对应前后父块，index 一致且无重复；空来源必须有删除标记，源段落当前只支持一个非空纯 text span。目标的所有 span 必须按原顺序与这些源 span 的文本/坐标完全对应。坐标容差仅兼容取整，不作为排序依据。
+- V1仍是唯一正文来源。合并目标不必紧邻占位；header/footer/page_number须验证独立discarded来源；原样image/chart/table须有唯一para/preproc类型/bbox/index，aside_text/page_footnote须有唯一layout来源，均不得已删除。仅跨越并保留这些原项，不从中提取或推断目标正文；独立Text、Title、公式及未知类型仍阻断，不使用full.md/V2补字或按文件名判断。
+- 页内类型、归一化bbox必须唯一对应前后父块，index一致无重复；空来源须有删除标记。源段落允许有界（每父块最多2048）text/inline_equation Span，联合外框覆盖原父块，目标全部Span按原序核对类型、原文、坐标和跨页标记。行内公式仅在比较时要求V1美元边界，返回值仍切自V1；重复或未知Span不猜归属。坐标容差仅兼容取整，不作为排序依据。
 - 逐字符核对整段 V1，允许段落间空白与 Markdown 标点转义。输出直接切取 V1 原字符串，所有切片拼接须等于原字符串；不模糊匹配、改写 OCR、重复拼入 layout 文字或丢掉额外内容。
 - 每个切片按真实原索引集合逐项写回（可非连续），保留数组长度/顺序及夹在其中的边界项，保留page_idx、bbox、类型、source、置信度和稳定Block ID。跨页只接受相邻后一页且目标span明确cross_page=true；不跨页排序、不按y排序，不拆table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
-- 每组最多64个占位与64个边界、V1正文最多1MiB、每页关联父块最多512个。边界须唯一匹配discarded父块、全页index无冲突、确在页面边缘且index在正文前/后，边界原文逐字可核对；同一边界父块不能重复使用，目标在V1中的位置也必须唯一。多Span/公式混排、非相邻跨页或未知结构不尝试恢复。证据冲突为MERGE_EVIDENCE；真空正文/表格/公式仍为EMPTY_BLOCK，不落半份Block、不发布成功缓存。
+- 每组最多64个占位与64个间隔、V1正文最多1MiB、每页父块最多512个。页眉脚仍在边缘15%且与正文矩形无实际交叠，不以另一栏标题的y或另一阅读流index误拒；窄小page_number也允许在全部正文上下且index在外。只用于校验、不据此排序。同一来源不能重复使用，目标在V1中也必须唯一。V1和唯一边界来源同时为确切空串时，保留其原空Block/位置/ID，不视为正文或页面覆盖、不会生成空Chunk；不一致仍失败。非相邻跨页、未知Span、真空正文/表格/公式仍拒绝，不落半份Block或发布成功缓存。
 - `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
 
 归一化缓存身份现为`mineru-adapter-v3`，Native版本不变。表格恢复改变正文/附注的页归属，必须与旧v1/v2 Whole/视觉/片缓存隔离；不删除旧成功结果、改写旧Job或复用旧键发布新语义。Reindex/旧冻结任务遇版本不一致返回CACHE_CONFIG_CHANGED，不自动重算/收费。部署时由用户重启各进程；旧付费Job的v2→v3比较只能显式在诊断副本执行，见下节。
@@ -49,7 +49,7 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
 普通`/retry`只对当前同Hash、已上传、Normalizer一致且归档有效的`MERGE_EVIDENCE`恢复同一Job；检查步骤优先消费原ZIP，不GET/PUT/POST本片。原ZIP缺失/损坏仍拒绝，不自动Force；分片后续从未提交的片仍走原云流程，用户须确认费用。未知POST、远端failed、坏结果不因本次兼容扩大恢复范围。重放仍须通过原Adapter/Guard/全片事务，失败不写半份Block。旧v2不自动升级。
 
-本轮仅扩大此前拒绝的表格结构，Normalizer保持v3，既有成功结构仍输出相同V1原字符：layout单元格`<eq>x</eq>`只在来源比较时对应V1的` $x$ `，完整网格/单元格仍须等价；删除附注允许多条空字符串占位，非空未知文字仍拒绝；合并链预算为200页/512个已验证边界，HTML/网格/总字节预算不变。缺行、乱序、丢失caption/footnote仍失败，不从layout补字。文本仍不拼未知多Span、不跨越未知结构猜目标。
+本轮仅兼容此前拒绝但可严格验证的结构，Normalizer保持v3，既有成功结构仍输出相同V1原字符/页归属/ID。layout单元格`<eq>x</eq>`只在来源比较时对应V1的` $x$ `，网格/单元格仍须等价；删除附注允许多条空串，已移动附注允许文字/行内公式多Span，但V1列表、来源、逐Span坐标及原序全部核对；不合并、补写丢失注释。表格链预算200页/512个已验证边界，HTML/网格/字节预算不变。缺行、乱序、丢失caption/footnote继续失败；旧v2不自动升级。新增兼容和真实ZIP结果仍须用户运行确认。
 
 新失败的固定子码/源码阶段/局部0-based页/原数组1-based位置保存在私有`parse_options._adapter_failure`，外部错误码仍为MERGE_EVIDENCE；阶段33报告附脱敏诊断。普通Whole也可使用本节只读诊断CLI，无需分片账本，默认自动读取同Batch归档；不接受Whole的版本/覆盖升级开关。
 
@@ -57,9 +57,9 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 |---|---|
 | LAYOUT_PAGE / TEXT_LEVEL / ITEM_BBOX | 页声明/正文级别/坐标关联依据不可用 |
 | PARENT_LIST / PARENT_LIMIT / PARENT_INDEX / PARENT_MATCH / PARENT_INDEX_MISMATCH | 前后父块缺失、超过每页512项、重复或不一致index、bbox关联不唯一 |
-| LINES_MISSING / LINE_SCHEMA / LINE_SPAN_COUNT / SPAN_TYPE / SPAN_TEXT | lines结构不符、单行多Span、非纯文本或空Span |
+| LINES_MISSING / LINE_SCHEMA / LINE_SPAN_COUNT / SPAN_TYPE / SPAN_TEXT | lines结构不符、重复/超量Span、未知Span类型或空正文Span |
 | GROUP_NO_TARGET / GROUP_LIMIT / PLACEHOLDER_MATCH / TARGET_TEXT / TARGET_DELETED / SOURCE_NOT_DELETED | 占位前无正文、超过64项、占位关联歧义或删除标记不成立 |
-| SOURCE_SPAN_COUNT / SOURCE_SPAN_BBOX / SOURCE_BBOX_COVERAGE / TARGET_SPAN_COUNT | 一个源段落多行Span、来源坐标缺失/覆盖不符或目标Span数量不符 |
+| SOURCE_SPAN_COUNT / SOURCE_SPAN_BBOX / SOURCE_BBOX_COVERAGE / TARGET_SPAN_COUNT | 重复来源、来源坐标缺失/联合覆盖不符或目标Span数量不符 |
 | SOURCE_PAGE / MOVED_TEXT / MOVED_CROSS_PAGE / SOURCE_CROSS_PAGE / MOVED_BBOX | 非相邻页、移动前后文字/位置不一致或跨页标记不符 |
 | TEXT_LIMIT / SOURCE_TEXT / TEXT_CHARACTER / TEXT_TRAILING | 超过1MiB、来源文本无效、逐字符不一致或有未归属尾字 |
 | BOUNDARY_LAYOUT / MATCH / INDEX / POSITION / TEXT / REUSED / LIMIT、TARGET_AMBIGUOUS | 边界来源/位置/文字无法唯一核对、重复使用、超过预算或目标正文在V1中映射不唯一（BOUNDARY子码均带完整前缀） |
@@ -98,8 +98,8 @@ MERGE终态默认仍保留失败；先用只读诊断核对原ZIP并修复原因
 
 #### 跨页表格恢复（Normalizer v3）
 
-- 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，只能跨已验证的页边界，最多16页和64个边界。
-- V1合并HTML必须与目标para的HTML完全一致；preproc仅用于证明各源表行/单元格和归属。受限标准库HTMLParser不渲染/执行，只接受table、单一可选tbody、tr、td/th和br；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。
+- 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，只能跨已验证的页边界，最多200页和512个边界，并受下述HTML预算约束。
+- V1合并HTML必须与目标para的网格/单元格投影完全等价；preproc仅证明各源表行/单元格和归属。受限HTMLParser不渲染/执行，只接受表格结构、br与受检行内eq比较；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。输出始终切取原V1 HTML，不重新序列化layout。
 - 按已证明的源行数只切取V1原始行字符串，共用V1外壳；不从layout拷正文，不补重复表头。逐行核对单元格数、td/th、原序、空白标准化后的文字、br及rowspan；切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，保持单元格邻接/覆盖关系，不改V1的colspan。例如本次第三组源4列到合并10列的映射是可验证细化，不是把单元格拆开。
 - Caption/footnote必须由preproc唯一Span、para移动结果及后页删除标记共同证明，逐字验证已有V1列表并按原来源归还；未知/重复/乱序来源拒绝，不额外生成标题或附注。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
 - 恢复按原数组索引写回，保留原page/bbox/类型；新版本/同一拟用身份下Block ID稳定，图像/原ZIP不改写。真正空table即使有caption也不能冒充表体，EMPTY_BLOCK诊断给固定子原因、1-based page/item_index及结构类型；恢复日志不等于持久化成功。

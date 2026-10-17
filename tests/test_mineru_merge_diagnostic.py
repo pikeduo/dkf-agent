@@ -17,8 +17,9 @@ from mineru_samples import result_zip
 from test_mineru_merge import merged_case
 
 
-def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context, monkeypatch):
-    """普通Whole无需分片账本；严格沿用冻结身份/原归档，成功也只生成诊断摘要。"""
+@pytest.mark.parametrize("outcome", ["pass", "adapter_fail", "guard_fail"])
+def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context, monkeypatch, outcome):
+    """Whole复用原归档；准确区分Adapter失败/Guard失败，不修改原Job或生成成功缓存。"""
     document, job, settings, _ = context
     from app.services.mineru import jobs, raw_results
     from app.parsers.routing.contracts import RouteDecision, StructuralSignals
@@ -30,14 +31,26 @@ def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context,
     job.options_hash = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
     job.submission_attempted = True
     values, layout, _ = merged_case()
+    if outcome == "adapter_fail":
+        layout["pdf_info"][0]["para_blocks"][0]["lines"][1]["spans"][0]["content"] = "无法匹配的源文字"
     archive = result_zip(values, layout=layout)
     monkeypatch.setattr(raw_results, "load_raw_result", lambda *args, **kw: (archive, {
         "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive)}))
-    monkeypatch.setattr(guard, "guard_result", lambda *args: None)
+    def guard_stub(*args):
+        """模拟独立完整性拒绝，不改变Adapter或连接真实服务。"""
+        if outcome == "guard_fail":
+            raise guard.CompletenessError("缺少必需页面")
+
+    monkeypatch.setattr(guard, "guard_result", guard_stub)
     snapshot = deepcopy(vars(job)), deepcopy(vars(document))
     report = tool.inspect_job(document, job, settings, job.batch_id, None)
-    assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED"
-    assert report["block_count"] == 2 and report["completeness_guard"] == "PASS"
+    assert report["status"] == ("ADAPTER_PASS_NOT_RECOVERED" if outcome == "pass" else "FAIL")
+    assert report["adapter_normalize"] == ("FAIL" if outcome == "adapter_fail" else "PASS")
+    assert report["completeness_guard"] == {"pass": "PASS", "adapter_fail": "NOT_EXECUTED", "guard_fail": "FAIL"}[outcome]
+    if outcome != "adapter_fail":
+        assert report["block_count"] == 2
+    else:
+        assert report["merge_diagnostic"]["reason"] == "MOVED_TEXT"
     assert report["zip_batch_provenance"] == "validated_local_receipt"
     assert (vars(job), vars(document)) == snapshot
 

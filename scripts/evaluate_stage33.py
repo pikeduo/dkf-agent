@@ -43,6 +43,8 @@ def build_parser():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--allow-cloud", action="store_true", help="确认全部200原件的使用/外传权限及所有分片费用")
     parser.add_argument("--retry-failed", action="store_true", help="显式普通Retry/重跑失败Query；不Force或重建索引")
+    parser.add_argument("--retry-failed-only", action="store_true",
+                        help="仅恢复原检查点FAILED且doc_id一致的文档，不上传尚未尝试文件；需import及resume")
     parser.add_argument("--api-base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--max-inflight", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=86400, help="导入CLI总等待秒数；不修改已有Job冻结窗口")
@@ -66,6 +68,8 @@ def main(argv=None):
             raise Stage33Error("KB_ID_REQUIRED")
         if args.execute and args.step == "import" and not args.allow_cloud:
             raise Stage33Error("ALL_FILES_CLOUD_PERMISSION_REQUIRED")
+        if args.retry_failed_only and (args.step != "import" or not args.resume):
+            raise Stage33Error("RETRY_FAILED_ONLY_REQUIRES_IMPORT_RESUME")
         # 仅读取冻结原件Hash/容器与元数据，绝不重新执行阶段32准备/提取脚本。
         data = load_dataset(DATASET)
         plan = initial_plan(data)
@@ -97,7 +101,8 @@ def main(argv=None):
                     try:
                         api.precheck(args.kb_id)
                         import_all(data, run, args.kb_id, api, max_inflight=args.max_inflight,
-                            timeout=args.timeout, poll_interval=args.poll_interval, retry_failed=args.retry_failed)
+                            timeout=args.timeout, poll_interval=args.poll_interval, retry_failed=args.retry_failed,
+                            retry_failed_only=args.retry_failed_only)
                     finally:
                         api.close()
                 elif args.step == "evaluate":
