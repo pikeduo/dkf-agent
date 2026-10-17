@@ -1,0 +1,152 @@
+# 阶段33：固定200文档与4087条QA的全量检索评测
+
+代码已实现，**未执行pytest、真实上传、数据库导入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
+
+## 复用与输入校验
+
+入口：`python scripts/evaluate_stage33.py`。默认dry-run：只读文件存在性、大小、格式容器、SHA256和冻结元数据，不渲染/解析正文、不连接数据库/API/模型、不写报告。
+
+固定输入为`data/dataset/stage32_run_01/`的两个documents CSV、两个QA JSONL及`qa_file_mapping.csv`。核对200个不同Hash、4087个唯一QA身份、双向依赖、完整原始行摘要、OHR原0-based→1-based页码、OCB原始reference_files/断言/weights/track。单份缺失/Hash/格式问题逐项报告，不把文件及其QA从范围删除；元数据身份/总量/映射错误则阻断执行。不要重新运行阶段32提取脚本。
+
+导入使用**原上传API，parse_mode=auto**，由原管理任务推进Router→Native/MinerU Whole/Hybrid→Block→Chunk→Embedding→pgvector→READY。超限云PDF复用现有连续分片器/短任务/缓存，不重写或直接调用任务主体。原file_id、SHA和官方QA映射在本run绑定实际doc_id；同名不同内容不混用。
+
+`import_knowledge_base.py`的十份/旧Office/七标签标准保持不变。本工具是独立正式评测集导入，不伪造preset标签、不写正式preset manifest、不建第二套业务索引。
+
+## 运行前置条件
+
+- 现有PostgreSQL 17/pgvector、Redis、当前数据库迁移已由用户部署；本工具不安装/迁移/启动服务。
+- 独立ACTIVE知识库，仅允许本次200种Hash，不能使用默认库或混入其他文件。评测前必须全部200份READY、Block>0、chunk_count=vector_count>0、无非法向量、模型/代次有效一致。
+- 已部署本地BGE-M3和BGE Reranker，Query编码身份须与已入库向量一致。无自动下载、CPU回退或重编码文档。
+- 有效MinerU Token/共享Redis限流；用户确认**全部200份文件**的合法使用、外传权限及所有潜在分片费用。公开下载不等于获得云端外传授权。
+- 8GB显存：导入时仅一个GPU Worker，batch建议用户在新任务建立前评估1～2；既有冻结参数不能直接改配置后期待生效。评测时停止GPU Worker及其他模型进程，避免另载一份BGE。Reranker仍保留完整原文，超模型长度明确失败，不截断表格凑通过。
+- 全量BM25/证据报告需要较多系统内存和磁盘。建议预留至少数GB报告空间及足够缓存/向量磁盘；实际大小和耗时须由真实执行测量，不能给未经测量的完成时间保证。
+
+## 正式操作命令
+
+全部命令由用户确认后手动执行。下列两个步骤覆盖**全200份、全4087题**，没有小样本阶段。
+
+### 1. 服务及目标库
+
+按README确认基础服务已Running，分别在三个PowerShell窗口启动现有入口：
+
+```powershell
+conda activate dkf-agent
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -n "cpu@%h" -Q default_queue --pool=solo --concurrency=1
+```
+
+```powershell
+conda activate dkf-agent
+python -m celery -A app.core.celery_app:celery_app worker -n "gpu@%h" -Q gpu_queue --pool=solo --concurrency=1
+```
+
+在项目根目录的新窗口创建独立测试库；不要重复创建同名库，重开窗口时从run.json恢复原ID：
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+$kb = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/knowledge-bases" -ContentType "application/json" -Body '{"name":"stage33-full-01","description":"Frozen OHR and OCB full retrieval evaluation"}'
+$kbId = $kb.kb_id
+python scripts/evaluate_stage33.py
+```
+
+预览应显示200文件/4087题及输入错误数。OHR清单中257/217/382页三份PDF，若所有文件都走云且大小只需按页拆分，则参考**203个文件任务**（OHR103+OCB100）。这不是实际提交数、绝对上限或报价：Native/完整缓存/片缓存可减少调用；实际分片字节、失败及不确定提交影响结果。费用不能仅按父Job数量或重复日志累加。
+
+### 2. 全量导入
+
+确认上述权限/资源/全部文件预算后：
+
+```powershell
+python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id $kbId --execute --allow-cloud --max-inflight 2 --timeout 604800 --poll-interval 10
+```
+
+首次写入全新`results/stage33/stage33_run_01/`，不覆盖旧run。启动上传前只读检查API、目标库、Redis、双队列Worker、Token、本地Embedding目录。`--timeout`仅是CLI总等待预算，**不会延长已有Job冻结的超时窗口**。超时退出不取消后台任务。
+
+默认每轮最多2个在途文档，其余仍在同一个200份任务清单，所有可调度文件最终都会尝试；一份失败不会被删除或冒充成功。HTTP响应丢失按同库Hash查询接管，不盲目再次上传。重复运行已READY文件沿用原doc_id、Chunk和向量，不调用Reindex/Reparse/Force。
+
+中断后继续相同run/相同KB（先确认原进程已退出）：
+
+```powershell
+$kbId = (Get-Content results/stage33/stage33_run_01/run.json -Raw -Encoding UTF8 | ConvertFrom-Json).kb_id
+python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id $kbId --execute --allow-cloud --resume --max-inflight 2 --timeout 604800
+```
+
+已FAILED不会默认重投。用户定位并修复问题后，可在上述续跑命令额外加`--retry-failed`，只调用既有普通`/retry`，每份最多一次且事先记录意图；不继承Force。提交未知、已有收费失败、损坏缓存或普通Retry仍失败须人工核对平台/安全错误，工具不会新建收费批次来“解决”。`retry_intent`已存在但未确认时不盲目再投，先核对原管理任务/API。输入/索引/模型身份变化不可混入既有评测run，可在新run复用同KB已READY文档，不重新上传。
+
+### 3. 全4087题、四策略评测
+
+先确认`import_report.csv`中200份均READY。停止GPU Worker/其他推理进程，保留PostgreSQL；评测本身不需要API、CPU Worker、Redis或MinerU。进入独立CLI进程加载本地两模型：
+
+```powershell
+python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id $kbId --execute --resume
+```
+
+每条原始官方question仅执行一次Dense和一次BM25，供四种对照复用：
+
+| 策略 | 固定预算 |
+|---|---|
+| Dense Only | 全库Top20 |
+| BM25 Only | 全库Top20 |
+| Hybrid | 原等权RRF(k=60)，两路各20→最多30候选，取前20 |
+| Hybrid + BGE Reranker | 同一Hybrid最多30候选→重排Top20，便于Recall@10/MRR@20 |
+
+业务API仍默认重排Top5，不更改生产行为。**QA的相关文件/答案/证据页只用于事后评分，不传为doc_ids过滤、Query扩展或排序参数**。使用独立库的全库范围，不突破Retriever原最多100个显式doc_ids限制。
+
+原BM25生产默认10,000 Chunk/32MiB/4百万词项不变；评测实例显式预算默认100,000 Chunk/256MiB/32百万词项，可通过`--bm25-max-chunks / --bm25-max-mb / --bm25-max-tokens`设置。它们是整库安全上限，不是前N条语料；超限必须失败，绝不截断再宣称全库。最大受控预算为20万Chunk/512MiB/6400万词项，词频索引实际RAM远大于原文大小，需人工评估。
+
+每题有原子结果检查点；再次执行同一评测续跑命令复用已完成题。检索失败题默认保留，用户显式加`--retry-failed`才重新做本地Query（不重编码文档、不调用云LLM）。输入、200份索引代次及实际模型身份变化拒绝混算；每题前后检查快照，不持有长数据库事务。
+
+## 指标口径与分母
+
+- 固定总题数始终4087（OHR3588+OCB499），逐题逐策略显示SUCCESS/FAILED/NOT_EXECUTED。未运行不是零分，不发布伪造指标；索引/模型变化或中断标记NOT_CERTIFIED。
+- QA JSONL每题一行，共4087行；QA CSV每题每策略一行，共16348行，是4087×4的执行记录，不是新增题目或评分分母。
+- **OHR正式证据指标**：真值单位为官方`(file_id, physical_page)`，页码0-based准确+1；只按返回Chunk真实`source_spans[].page`命中，不靠覆盖很宽的page_start/end猜命中。Recall@5/10为已覆盖真值单位比例，重复Chunk不重复计数；MRR@20为前20内首个真实单位命中的倒数排名。不是凭答案字符串包含判定正确。
+- **OCB无官方相关Chunk/证据页标签**：expected_assertions及weights不能转换成相关性标签，正式证据Recall/MRR为null、不可评分数499（以实际输入/校验为准），断言保留manual_pending。
+- **另列OHR/OCB文档代理指标**：按官方doc_name/reference_files对应的文件集合计算文档Recall@5/10/MRR@20，OCB多文件依赖保持整组，分母为全部依赖文件，重复Chunk只计一次文件。它仅反映是否找到任务依赖文档，**不是OCB答案证据充分、断言正确或问答准确率**。
+- 四策略分别展示总题目、成功执行、可评分总分母、成功评分、失败、未执行、不可评分、manual_pending及成功条件指标。完整执行后，失败题以0进入固定可评分总分母的保守端到端指标，另给仅成功执行的条件指标供诊断，不用后者掩盖失败。未执行题/未完成范围的正式指标保持null。
+- 总体证据指标只合并具备同口径官方证据的题目（当前主要OHR）；总体文档代理指标单列。不能把不同相关性单位混合后当作官方全量准确率。耗时含原检索/融合/重排各阶段，复用分支不重复运行但组合耗时按组成阶段累加；首次模型/索引冷启动计入记录。
+
+## 产出及查看
+
+所有报告位于`results/stage33/<run>/`，原始输入只读且受Git忽略保护：
+
+| 文件 | 用途 |
+|---|---|
+| plan.json / run.json | 全200清单、成本参考、输入Hash及KB绑定 |
+| import_checkpoint.json / import_report.json / import_report.csv | 200份逐文件状态、路线/分片Batch、Block/Chunk/向量、管理错误及恢复意图 |
+| qa_execution.jsonl / qa_execution.csv | 全4087题原字段/断言/依赖、file_id→doc_id、四路状态与评分资格 |
+| retrieval_results.jsonl / retrieval_results.csv | 所有成功检索的Top20原Chunk/Doc/File ID、页/section、原分数及来源；JSONL保留字符来源与Hash，不复制正文 |
+| metrics.json / metrics_ohr.json / metrics_ocb.json / metrics_overall.json / strategy_comparison.csv / summary.json / summary.md | OHR/OCB/整体分母、四路指标和耗时 |
+| failures_and_unscorable.json / .csv | 失败、未执行、不可评分及待人工审查清单 |
+| costs_and_timing.json / baseline.json / timing.json | 去重文件提交数、开始后新观察提交、缓存命中可观测部分及总步骤耗时 |
+| cases/ / evaluation_identity.json / evaluation_validity.json | 逐题断点、实际模型/索引身份及快照有效性 |
+
+```powershell
+Get-Content results/stage33/stage33_run_01/summary.md -Encoding UTF8
+Import-Csv results/stage33/stage33_run_01/import_report.csv | Group-Object execution_status
+Import-Csv results/stage33/stage33_run_01/strategy_comparison.csv | Format-Table dataset,strategy,executed_successfully,scorable_denominator,unscorable,recall_at_5,recall_at_10,mrr_at_20
+```
+
+本地重新汇总（不连接服务或运行模型）：
+
+```powershell
+python scripts/evaluate_stage33.py --step report --run stage33_run_01 --kb-id $kbId --execute --resume
+```
+
+费用报告不猜金额：只有Batch/Data ID去重后的文件提交可观测，超时/提交未知单列；原生缓存命中若没有持久化观测就记unknown，不从“没有新Batch”推断。无提交且done的云Job/成功片可证明缓存回放；缓存指针存在只表示存在，不是命中。真实账单仍须用户核对，历史提交与本run新观察次数分开。
+
+## 测试及后续
+
+仅编写Mock，用户手动执行；用例不访问真实冻结数据/数据库/模型/云端：
+
+```powershell
+python -m pytest tests/test_stage33_dataset.py tests/test_stage33_pipeline.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_business_logging.py -q -ra
+```
+
+覆盖固定200/4087、依赖与原字段/页码、全范围分批/断点/提交未知、重复导入、隔离与模型、去重Recall及失败分母、OCB不可评分、报告未执行null、原BM25排序兼容及显式预算拒绝截断。测试尚未运行；真实Worker/分片/缓存/超时、GPU长证据、SQL成本和正式指标待用户验收。
+
+`PASS`仅指全范围文档及四策略执行完毕，并非每题召回成功、解析语义完全正确或RAG通过。阶段34可直接读取本run的qa_execution.jsonl、检索JSONL与file_id/doc_id映射，在独立授权后做答案/断言评测；当前不实现或运行阶段34。

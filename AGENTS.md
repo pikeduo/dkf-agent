@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**32数据冻结保留；用户已确认首片Adapter v3及新覆盖Guard通过（2263 Block）。当前只验收PDF分片→MinerU→原始ZIP：补独立归档及隔离入口，定向Mock65项/日志17项通过；不扩展旧Job恢复，真实两片提交待单独授权，不进入33～36。**
+当前阶段：**33全量导入与检索评测代码已实现：固定阶段32的200份原件/4087题，资源有界调度、四策略及独立报告；测试仅编写，真实导入/收费/GPU/正式指标待用户授权执行，不进入34。阶段32冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -33,7 +33,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 8～9 | 统一 ParsedDocument 契约；TXT、MD、DOCX、文本型 PDF Native 解析及 Block 入库 |
 | 10 | MinerU Cloud；图片、扫描 PDF、表格、公式及阅读顺序已完成真实 API 人工验收 |
 | 11A | 已实现十三种格式校验、CSV/XLSX Native Parser、六种 Office 显式 MinerU 支持 |
-| 配套功能 | 多选上传/日志/PDF分片与Windows句柄/文本表格恢复保留；首片2263 Block/新Guard用户已确认；补Adapter前原ZIP归档和只取ZIP验收，真实两片云链路待验收 |
+| 配套功能 | 多选上传/日志/PDF分片与Windows句柄/文本表格恢复保留；首片2263 Block/新Guard及用户所述分片云验收基线保留；阶段33直接复用，不扩展旧Job恢复 |
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
@@ -58,7 +58,8 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 及后续 | 未执行，等待用户确认 |
+| 33 | 已实现全200份导入、全4087题登记/四路检索、断点/身份核对、OCB评分边界及JSON/CSV报告；Mock未运行，真实全量验收待用户执行 |
+| 34 及后续 | 未执行，等待用户确认 |
 
 - 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
@@ -227,6 +228,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 仅从同kb_id/ACTIVE库、可选doc_ids、READY及当前代次的document_chunks派生原TextNode；不读原件、重切片/Embedding或建立新业务表。BM25无Query向量，不要求当前BGE模型身份匹配，原Node证据及存储模型身份仍保留。
 - 使用已声明rank-bm25的BM25Plus与版本化词项规则，稳定同分UUID；只返回真实词项重叠，分数不是概率，不与Dense直接相加。中文字符/二元片段存在部分匹配边界，不宣称专业分词或语义准确率。
 - 实例内词频索引可重建，每次先查当前READY快照；内容/集合/版本变化重建，返回Node只用当前证据。失败不返回旧缓存，不写磁盘/pickle；超限报错，不静默截断全库语料。批量转换可省略逐项成功日志，但保留汇总及错误，默认Adapter行为不变。
+- 阶段33可显式传入受检CorpusLimits放大离线全量语料预算，生产默认10000 Chunk/32MiB不变；预算不改变分词/评分/隔离，超限全批失败不截断。正式评测只读固定200份独立库，QA真值不作检索doc_ids过滤；原页证据指标和OCB依赖文档代理指标分开，未执行/不可评分不伪造分数。参见[阶段33](docs/STAGE33_EVALUATION.md)。
 
 ### Hybrid Retrieval / RRF
 
@@ -319,6 +321,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 搜索/问答HTTP契约、云许可及安全错误 | [Knowledge Query API](docs/KNOWLEDGE_QUERY_API.md) |
 | 管理接口、恢复编排、删除所有权及人工验收 | [Admin文档管理](docs/DOCUMENT_MANAGEMENT.md) |
 | 阶段26云miss/费用前置/本地超时与跨语言对照 | [阶段26补充](docs/STAGE26_SUPPLEMENT.md) |
+| 全200原件/4087题导入、四策略、断点与评分分母 | [阶段33评测](docs/STAGE33_EVALUATION.md) |
 | 公式提取、表达式语法、语义来源及人工验收 | [公式语义结构化](docs/FORMULA_SEMANTICS.md) |
 | Agent状态/路由、薄Tool、费用与有限图验收 | [Knowledge Agent](docs/KNOWLEDGE_AGENT.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |

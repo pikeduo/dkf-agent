@@ -115,6 +115,7 @@ def test_mineru_raw_result_events_keep_separate_statuses_without_private_payload
     ("rag-cli", "RAG CLI"),
     ("mineru-diagnostic-cli", "MinerU Diagnostic CLI"),
     ("mineru-split-cli", "MinerU Split CLI"),
+    ("dataset-evaluation-cli", "Dataset Evaluation CLI"),
     ("evidence-cli", "Evidence CLI"),
     ("formula-cli", "Formula CLI"),
     ("formula-binding-cli", "Formula Binding CLI"),

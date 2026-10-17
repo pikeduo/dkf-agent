@@ -42,6 +42,7 @@ ROLE_LABELS = MappingProxyType({
     "preset-cli": "Preset CLI",
     "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
     "mineru-split-cli": "MinerU Split CLI",
+    "dataset-evaluation-cli": "Dataset Evaluation CLI",
     "unknown": "未知进程",
 })
 FIELDS = {
@@ -130,6 +131,8 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "dataset_evaluation.started": "开始固定全量数据导入或检索评测",
+    "dataset_evaluation.finished": "固定全量评测步骤结束，未完成项保留在报告",
     "agent.started": "开始单次Knowledge Agent工作流",
     "agent.routed": "已选择固定Knowledge Agent路由",
     "agent.step": "Knowledge Agent节点已结束",

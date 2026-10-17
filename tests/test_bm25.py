@@ -157,3 +157,27 @@ def test_readonly_sources_and_sql_error_do_not_expose_secrets():
     with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE') as error:
         tool.select_sources(Failure([]), chunk.kb_id)
     assert 'PRIVATE_PASSWORD_SQL' not in str(error.value)
+
+
+def test_explicit_corpus_limits_preserve_default_rank_and_fingerprint():
+    """实例预算不是另一种分词/打分；足够预算下同语料身份及稳定排名保持不变。"""
+    items = [(UUID(int=1), "NASA 100 USD"), (UUID(int=2), "NASA 200 USD")]
+    limits = tool.CorpusLimits(100_000, 256 * 1024**2, 32_000_000)
+    assert tool.corpus_fingerprint(items) == tool.corpus_fingerprint(items, limits=limits)
+    assert tool.LocalBM25Index(items).search("NASA 100", 20) == tool.LocalBM25Index(items, limits=limits).search("NASA 100", 20)
+
+
+def test_explicit_resource_budget_never_silently_truncates():
+    """超出显式语料预算仍整批拒绝；默认10000/32MiB上限不被全局修改。"""
+    items = [(UUID(int=1), "NASA"), (UUID(int=2), "USD")]
+    with pytest.raises(tool.BM25RetrievalError) as error:
+        tool.LocalBM25Index(items, limits=tool.CorpusLimits(1, 1024, 100))
+    assert error.value.code == "BM25_LIMIT"
+    assert tool.MAX_CORPUS_CHUNKS == 10_000 and tool.MAX_CORPUS_BYTES == 32 * 1024**2
+
+
+@pytest.mark.parametrize("value", [True, 0, -1, 200_001])
+def test_explicit_chunk_budget_is_bounded_and_not_boolean(value):
+    """拒绝无效/无界预算，不把资源参数当作正式样本前N限制。"""
+    with pytest.raises(tool.BM25RetrievalError):
+        tool.CorpusLimits(value, 1024, 100)

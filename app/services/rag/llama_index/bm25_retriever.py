@@ -17,7 +17,7 @@ from app.core.business_logging import log_event
 from app.schemas.retrieval import RetrievalResult
 from app.services.rag.bm25 import (
     DEFAULT_TOP_K, MAX_QUERY_TERMS, BM25RetrievalError, LocalBM25Index, bm25_query, bm25_scope,
-    corpus_fingerprint, select_sources, tokenize,
+    corpus_fingerprint, select_sources, tokenize, CorpusLimits, checked_limits,
 )
 from app.services.rag.llama_index.dense_retriever import readonly_session
 from app.services.rag.llama_index.node_adapter import chunk_to_node, node_to_result
@@ -28,8 +28,11 @@ class BM25Retriever(BaseRetriever):
 
     def __init__(self, kb_id: UUID | str, *,
                  doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None,
-                 top_k: int = DEFAULT_TOP_K, session_factory: Callable | None = None):
-        """仅冻结范围和会话工厂；不读库、构建索引、加载 BGE-M3 或连接外部服务。"""
+                 top_k: int = DEFAULT_TOP_K, session_factory: Callable | None = None,
+                 corpus_limits: CorpusLimits | None = None):
+        """冻结原范围及可选实例预算；默认生产上限不变，构造不读库或加载模型。"""
+        checked_limits(corpus_limits)
+        self._corpus_limits = corpus_limits
         self._kb_id, self._doc_ids = bm25_scope(kb_id, top_k, doc_ids)
         self._top_k = top_k
         if session_factory is not None and not callable(session_factory):
@@ -64,7 +67,7 @@ class BM25Retriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """每次读取 READY 快照/转换原 Node，再复用或重建词频索引；来源失败不返回旧证据。"""
+        """读取完整READY快照，按实例预算复用原词频索引；超限不返回部分语料。"""
         started, stage = perf_counter(), "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
@@ -88,19 +91,21 @@ class BM25Retriever(BaseRetriever):
                 session.execute(text("SET TRANSACTION READ ONLY"))
                 session.execute(text("SET LOCAL statement_timeout = '10s'"))
                 session.execute(text("SET LOCAL lock_timeout = '2s'"))
-                rows = select_sources(session, kb_id, doc_ids)
+                rows = select_sources(session, kb_id, doc_ids,
+                    **({"limits": self._corpus_limits} if self._corpus_limits is not None else {}))
                 stage = "node_adapter"
                 nodes = [chunk_to_node(chunk, document, include_embedding=False, log_success=False)
                          for chunk, document in rows]
             items = [(UUID(node.node_id), node.text) for node in nodes]
             stage = "index"
-            key = corpus_fingerprint(items)
+            budget_args = {"limits": self._corpus_limits} if self._corpus_limits is not None else {}
+            key = corpus_fingerprint(items, **budget_args)
             # 缓存只含词频/ID，返回 Node 永远来自本次 SQL；新元数据不会被旧缓存覆盖。
             with self._index_lock:
                 reused = (self._index is not None and self._index.fingerprint == key
                           and self._index_scope == (kb_id, doc_ids))
                 if not reused:
-                    index = LocalBM25Index(items)
+                    index = LocalBM25Index(items, **budget_args)
                     self._index, self._index_scope = index, (kb_id, doc_ids)
                 index = self._index
             log_event("bm25.index_reused" if reused else "bm25.index_built", **scope_log,

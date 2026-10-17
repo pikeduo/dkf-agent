@@ -30,6 +30,7 @@
 | preset-cli | Preset CLI |
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |
 | mineru-split-cli | MinerU Split CLI |
+| dataset-evaluation-cli | Dataset Evaluation CLI |
 | unknown / 未注册角色 | 未知进程 |
 
 API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角色；预置导入使用preset-cli；联合冒烟的检索步骤使用retrieval-acceptance。角色变化只改固定前缀中的显示名称，白名单摘要、脱敏、真实PID、每日合并、上下文和异常降级不变。更新代码后用户重启相应进程，旧日志不改写。
@@ -43,6 +44,8 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 所有写入者必须运行新代码并使用相同的本地 `LOG_DIR`；格式切换后需要重启 API 与所有 Worker，遗留进程可能继续输出 JSON。已有 JSON 历史行不改写、不删除，切换当天同一文件可能同时包含旧 JSON 和新中文文本。旧格式的整行 JSON 读取工具需调整，人工搜索仍可使用事件码或资源 UUID。网络共享盘、多主机锁行为不在保证范围内。旧容量/备份配置废弃，当前无单日容量上限或自动历史清理。旧 PID 文件、已有日期文件均不自动合并/删除，运维应在对应进程停止后自行归档。目录/写盘/锁失败降级终端并安全提示，不改变已提交业务结果；不保证终端与文件双重故障时仍可记录。
 
 ## 主要事件
+
+阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。
 
 | 事件 | 含义 |
 |---|---|

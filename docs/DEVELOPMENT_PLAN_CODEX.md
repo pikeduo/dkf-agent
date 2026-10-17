@@ -5,7 +5,7 @@
 > 使用对象：Codex / 开发人员  
 > 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段32已冻结OHR/OCB各100原件与完整官方QA；新增超限云PDF连续分片代码/Mock，未执行分片/云调用/测试。** 此前未完成的业务验收保留，不进入33～36。\
+> 当前进度以最新代码与 AGENTS 为准：**阶段32已冻结OHR/OCB各100原件/4087题；阶段33全量导入与四策略检索评测代码已实现，Mock仅编写、真实执行待授权。** 此前未完成的业务验收保留，不进入34～36。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
@@ -3468,6 +3468,10 @@ retrieved_chunks
 ---
 
 # 39. 阶段 33：Retrieval 评测
+
+当前正式实现及操作见[阶段33全量评测](STAGE33_EVALUATION.md)。固定读取stage32_run_01的200文件、OHR3588+OCB499=4087题，不抽样/缩减；通过原上传API/管理编排入库，可有界分批与断点续跑。全200 READY及同模型/索引身份才运行全题Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker，保留完整来源。模型/云/数据库真实执行与测试未由Codex执行，等待用户授权；不开发阶段34。
+
+正式指标为Recall@5、Recall@10、MRR@20，显式区分总题数、成功执行、可评分总分母、成功评分、失败、未执行、不可评分及人工待审。OHR使用官方0-based→物理1-based页的来源单位；OCB无相关Chunk/页标注时正式证据指标为null，reference_files仅作另列文档代理指标，不把expected_assertions拼成答案或相关性标签。失败不从全量分母删除；尚未执行/快照无效不发布正式分数。原先小题量建议不限制本阶段全量范围。
 
 指标：
 
