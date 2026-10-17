@@ -186,6 +186,40 @@ def check(c):
     return jobs.check_step(c.session, c.job.job_id, c.provider, c.settings)
 
 
+@pytest.mark.parametrize("second_archived", [False, True])
+def test_local_replay_never_submits_missing_next_piece_and_keeps_existing_batches(context, second_archived):
+    """已有ZIP可全片离线重放；缺下一片时停止而非POST，任何阶段都不写部分Block。"""
+    from app.services.mineru.raw_results import obtain_raw_result
+    c = context
+    assert submit(c)[0] == "check"
+    manifest = split.checked_manifest(c.document, c.job)
+    if second_archived:
+        part = manifest.parts[1]
+        part.batch_id, part.submission_attempted, part.upload_complete = "already-completed-batch", True, True
+        part.state = "running"
+        workflow.save_manifest(c.job, manifest, c.settings)
+    for part in manifest.parts:
+        if part.batch_id:
+            obtain_raw_result(c.provider, "not-accessed-by-stub", c.settings,
+                doc_id=c.document.doc_id, job_id=c.job.job_id, ordinal=part.ordinal,
+                batch_id=part.batch_id, data_id=part.data_id, file_hash=part.file_hash)
+    c.job.parse_options = c.job.parse_options | {"_local_replay_only": True}
+    counts = len(c.provider.posts), len(c.provider.puts), len(c.provider.gets), c.provider.downloads
+    assert jobs.check_step(c.session, c.job.job_id, None, c.settings) == ("check", 0)
+    assert c.session.blocks == ["OLD_BLOCK"] and c.document.status == "PARSING"
+    if second_archived:
+        assert c.job.batch_id == "already-completed-batch" and c.job.upload_complete
+        assert jobs.check_step(c.session, c.job.job_id, None, c.settings) == ("done", 257)
+        assert [b.page for b in c.session.blocks] == list(range(1, 258))
+    else:
+        for step in (jobs.submit_step, jobs.check_step):
+            with pytest.raises(MinerUError) as error:
+                step(c.session, c.job.job_id, c.provider, c.settings)
+            assert error.value.code == "LOCAL_RESULT_REQUIRED"
+        assert c.session.blocks == ["OLD_BLOCK"] and c.document.status != "READY"
+    assert counts == (len(c.provider.posts), len(c.provider.puts), len(c.provider.gets), c.provider.downloads)
+
+
 def test_all_parts_complete_before_atomic_original_document_blocks(context):
     """未完成片不得触发 CHUNKING/READY；最后才一次替换257页，仍只有原 doc_id。"""
     c = context

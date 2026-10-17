@@ -15,6 +15,16 @@ conda activate dkf-agent
 python -m pytest tests/test_mineru_stage33_text_compat.py tests/test_mineru_stage33_regressions.py tests/test_mineru_table_merge.py tests/test_mineru_merge.py tests/test_mineru_merge_boundaries.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_recovery.py tests/test_mineru_pdf_split_jobs.py tests/test_document_management.py tests/test_stage33_pipeline.py tests/test_business_logging.py -q -ra
 ```
 
+本地重放补充用例：`python -m pytest tests/test_mineru_local_replay.py -q -ra`。覆盖空Token/禁止构造Provider、所有已知Adapter错误、缺失/损坏归档、迟到submit、同ZIP多次失败后成功，以及下一片缺结果不得提交。均由用户执行，Codex未运行。跨页断词兼容只保留V1原字符，不通过补字放宽来源校验。
+
+当前382页文档第二片的离线检查（不访问MinerU、不写业务库/成功缓存；报告使用新文件名）：
+
+```powershell
+python scripts/mineru_merge_diagnostic.py --job-id 5d59aa4a-64b4-42bd-a359-8e61b2fd5af8 --batch-id 762280d9-3ff4-4f8a-b291-a4b3da2ad5bc --output "results/stage33_part2_local_$(Get-Date -Format yyyyMMdd_HHmmss).json"
+```
+
+该分片首个已定位条件为TEXT_CHARACTER：layout在跨页接缝保留英文断词连字符，而V1已省略并续词。兼容修复及真实ZIP通过状态待用户运行确认，不预先宣称本片或全部失败项已通过。此命令自动找本地原ZIP，不需要`--allow-cloud`、下载链接或新Batch。
+
 对每份已有原ZIP做只读离线验证。Whole支持从归档回执自动定位；此命令仅GET数据库只读快照、本地转换/Guard和写新报告，不恢复任务、不调用MinerU：
 
 ```powershell
@@ -60,7 +70,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/documents/$
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/admin/documents/$docId/status"
 ```
 
-原云片归档有效时只本地重放；**分片后续尚未提交的片及未上传的新文档仍可能收费**。不因ZIP/Adapter通过直接置READY。缺归档不自动重新POST；原Batch云下载若需要联网，另行确认权限，不能用Force代替。
+本地Adapter/Guard错误的Retry现已强制离线：后续片也只能复用已有本地结果，缺片报LOCAL_RESULT_REQUIRED并停止，不自动上传/查询/下载。普通单文档`/retry`无须云授权参数，也不应为修Adapter新增云费用。全部Adapter/Guard通过后才继续Chunk/Embedding/Index，不因ZIP存在直接置READY。其他尚未完成的云任务及新文档导入仍有独立费用边界。
 
 若本轮只要恢复原失败项，不要执行一般的全量续传命令。用户确认Mock/离线报告及费用、更新并重启API/CPU Worker后，沿用原run和知识库执行：
 
@@ -68,7 +78,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/admin/documents/$docId/status"
 python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --execute --resume --retry-failed-only --allow-cloud --max-inflight 2 --timeout 604800 --poll-interval 10
 ```
 
-此模式固定启动时checkpoint中FAILED的范围，对照数据库同Hash、同doc_id，只通过原`/retry`恢复；绝不调用上传接口，不处理那166份未尝试文件，不改READY文档或阶段32数据。所有200条和4087题依然保留在报告，故恢复批次结束仍可能显示INCOMPLETE/退出码1，不代表这批恢复全部失败，请查看逐文档状态。其他已有在途任务照常由Worker推进，且占用并发额度。无checkpoint/身份变更停止；旧`retry_intent=true`不清除、不盲重投，需人工核对上次请求。每次运行每份最多请求一次；超时不取消后台任务。PREFLIGHT_LIMIT未解决可能再次失败；本模式不是跳过预检。失败分片的后续首次提交仍可能收费，不能将“只恢复失败”理解为零费用。
+此模式固定启动时checkpoint中FAILED的范围，对照数据库同Hash、同doc_id，只通过原`/retry`恢复；绝不调用上传接口，不处理那166份未尝试文件，不改READY文档或阶段32数据。所有200条和4087题依然保留在报告，故恢复批次结束仍可能显示INCOMPLETE/退出码1，不代表这批恢复全部失败，请查看逐文档状态。其他已有在途任务照常由Worker推进，且占用并发额度。无checkpoint/身份变更停止；旧`retry_intent=true`不清除、不盲重投，需人工核对上次请求。每次运行每份最多请求一次；超时不取消后台任务。PREFLIGHT_LIMIT未解决可能再次失败；本模式不是跳过预检。本CLI同时覆盖尚未完成的云任务，因此保留--allow-cloud门槛；**只修Adapter请先用上面的离线诊断和单文档Retry，不需要这个云许可参数**。Adapter失败重放已被强制限制为本地，不会据此提交下一片。
 
 修复剩余阻塞、确认全部潜在费用后，沿用原run/原知识库恢复全范围调度（READY只读取接管，不重导入/重建）：
 

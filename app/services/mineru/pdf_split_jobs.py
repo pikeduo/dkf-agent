@@ -183,12 +183,21 @@ def complete_piece(session, document, job, settings, parsed, archive):
 
 
 def advance_piece(session, document, job, settings, manifest, *, cache_hit):
-    """仅推进父 Job 的分片游标，不持久化 Block、不调 Chunk；最后一片才原子合并。"""
+    """仅推进分片游标；本地重放只投递本地检查，不自动转成下一片的收费提交。"""
     completed = sum(p.state == "done" for p in manifest.parts)
     part = current_part(manifest)
     if part is None:
         return finalize_split(session, document, job, settings, manifest)
-    activate_part(job, part)
+    # 后续片可能早已有Batch/原ZIP，不能清空它的收费身份后再尝试提交。
+    if job.parse_options.get("_local_replay_only") is True:
+        job.data_id, job.batch_id = part.data_id, part.batch_id
+        job.submission_attempted, job.upload_complete = part.submission_attempted, part.upload_complete
+        job.submitted_at = datetime.fromisoformat(part.submitted_at) if part.submitted_at else None
+        job.submission_started_at = datetime.fromisoformat(part.submission_started_at) if part.submission_started_at else None
+        job.state, job.upload_url, job.upload_expires_at = "pending", None, None
+        job.error_code = job.error_message = None
+    else:
+        activate_part(job, part)
     save_manifest(job, manifest, settings)
     config = getattr(document, "management_config", None)
     if config and config.get("state") == "running" and config.get("stage") == "cloud" and config.get("stage_task_id") == str(job.job_id):
@@ -198,7 +207,7 @@ def advance_piece(session, document, job, settings, manifest, *, cache_hit):
     session.commit()
     log_event("mineru.split_piece_done", doc_id=document.doc_id, job_id=job.job_id,
               accepted_count=completed, file_count=len(manifest.parts), parse_cache_hit=cache_hit)
-    return "submit", 0
+    return ("check" if job.parse_options.get("_local_replay_only") is True else "submit"), 0
 
 
 def finalize_split(session, document, job, settings, manifest):

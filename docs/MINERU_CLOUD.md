@@ -36,7 +36,7 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
 - V1仍是唯一正文来源。合并目标不必紧邻占位；header/footer/page_number须验证独立discarded来源；原样image/chart/table须有唯一para/preproc类型/bbox/index，aside_text/page_footnote须有唯一layout来源，均不得已删除。仅跨越并保留这些原项，不从中提取或推断目标正文；独立Text、Title、公式及未知类型仍阻断，不使用full.md/V2补字或按文件名判断。
 - 页内类型、归一化bbox必须唯一对应前后父块，index一致无重复；空来源须有删除标记。源段落允许有界（每父块最多2048）text/inline_equation Span，联合外框覆盖原父块，目标全部Span按原序核对类型、原文、坐标和跨页标记。行内公式仅在比较时要求V1美元边界，返回值仍切自V1；重复或未知Span不猜归属。坐标容差仅兼容取整，不作为排序依据。
-- 逐字符核对整段 V1，允许段落间空白与 Markdown 标点转义。输出直接切取 V1 原字符串，所有切片拼接须等于原字符串；不模糊匹配、改写 OCR、重复拼入 layout 文字或丢掉额外内容。
+- 逐字符核对整段V1，允许段落间空白、Markdown转义；仅两个已严格匹配的正文父块位于相邻页、Span的cross_page/原文/坐标全通过时，兼容V1省略layout末尾英文断词`-`并直接续接ASCII字母。数字、减号、非边界连字符及其他文字变化不适用。输出仍切取V1，所有切片拼接等于原字符串，不从layout补回连字符或改写OCR。
 - 每个切片按真实原索引集合逐项写回（可非连续），保留数组长度/顺序及夹在其中的边界项，保留page_idx、bbox、类型、source、置信度和稳定Block ID。跨页只接受相邻后一页且目标span明确cross_page=true；不跨页排序、不按y排序，不拆table/formula。多栏来源也必须由上述证据证明，不猜栏顺序。
 - 每组最多64个占位与64个间隔、V1正文最多1MiB、每页父块最多512个。页眉脚仍在边缘15%且与正文矩形无实际交叠，不以另一栏标题的y或另一阅读流index误拒；窄小page_number也允许在全部正文上下且index在外。只用于校验、不据此排序。同一来源不能重复使用，目标在V1中也必须唯一。V1和唯一边界来源同时为确切空串时，保留其原空Block/位置/ID，不视为正文或页面覆盖、不会生成空Chunk；不一致仍失败。非相邻跨页、未知Span、真空正文/表格/公式仍拒绝，不落半份Block或发布成功缓存。
 - `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
@@ -47,9 +47,13 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
 当前调用链是`jobs.check_step → obtain_raw_result → 独立原ZIP/回执 → normalize → 文本/表格恢复 → complete_piece → 成功缓存`。Adapter失败或SQL回滚不删除独立归档；`parse_cache_present=false`只表示没有成功缓存，不代表原ZIP丢失。原件位于`PARSED_DIR/{doc_id}/mineru_raw/{job_id}/part-{序号}-{batch_id}.zip`及同名JSON，核对Batch/Data/Hash/字节数和全部成员CRC后才能重放。历史旧Worker可能未保存原ZIP，不能仅凭下载日志假定归档存在。
 
-普通`/retry`只对当前同Hash、已上传、Normalizer一致且归档有效的`MERGE_EVIDENCE`恢复同一Job；检查步骤优先消费原ZIP，不GET/PUT/POST本片。原ZIP缺失/损坏仍拒绝，不自动Force；分片后续从未提交的片仍走原云流程，用户须确认费用。未知POST、远端failed、坏结果不因本次兼容扩大恢复范围。重放仍须通过原Adapter/Guard/全片事务，失败不写半份Block。旧v2不自动升级。
+**云结果获取与本地适配解耦：** `check_step`取得/读取归档后，交给不接收Provider的`adapt_raw_result`做Adapter、Guard及本地发布；Worker只在真正需要HTTP时才创建云客户端。原ZIP及来源回执不依赖Normalizer版本，修Adapter不重新取得云结果，成功Parse Cache仍按Normalizer版本隔离。
+
+普通`/retry`对同Hash/代次、已上传、Normalizer一致且归档有效的本地错误（MERGE_EVIDENCE、EMPTY_BLOCK、CONTENT_TYPE、CONTENT_LIST、BBOX、PAGE、GEOMETRY、NO_TEXT、COMPLETENESS）恢复同一Job，强制`_local_replay_only=true`。没有Provider可调用，不需要Token，不GET/PUT/POST或下载。迟到submit消息也转入本地重放；分片成功只调度下一次本地检查，保留下一片已有Batch。后续没有完整本地结果则LOCAL_RESULT_REQUIRED停止，不自动追加收费批次；所有片成功前不写半份Block。原ZIP缺失/损坏不当成云端cache miss。未知POST、远端failed、坏ZIP不自动复活；旧v2不静默升级，也不为版本变化重新POST。
 
 本轮仅兼容此前拒绝但可严格验证的结构，Normalizer保持v3，既有成功结构仍输出相同V1原字符/页归属/ID。layout单元格`<eq>x</eq>`只在来源比较时对应V1的` $x$ `，网格/单元格仍须等价；删除附注允许多条空串，已移动附注允许文字/行内公式多Span，但V1列表、来源、逐Span坐标及原序全部核对；不合并、补写丢失注释。表格链预算200页/512个已验证边界，HTML/网格/字节预算不变。缺行、乱序、丢失caption/footnote继续失败；旧v2不自动升级。新增兼容和真实ZIP结果仍须用户运行确认。
+
+两份CONTENT_TYPE失败ZIP只读字段核对均出现`ref_text`（分别29项、2项），字段为`text/page_idx/bbox/type`；现按普通text Block保留V1原文、原页/bbox及稳定位置ID，不猜参考答案/引用或丢弃条目。真正空正文、坏坐标/页码及其他未知类型仍报错。此为类型兼容修复，不代表这两份ZIP完整Adapter/Guard已通过；用户需运行离线诊断确认后续分支。
 
 新失败的固定子码/源码阶段/局部0-based页/原数组1-based位置保存在私有`parse_options._adapter_failure`，外部错误码仍为MERGE_EVIDENCE；阶段33报告附脱敏诊断。普通Whole也可使用本节只读诊断CLI，无需分片账本，默认自动读取同Batch归档；不接受Whole的版本/覆盖升级开关。
 
@@ -83,14 +87,7 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 
 预期：失败时`FAIL/MERGE_EVIDENCE`和固定子原因、局部0-based页/原页、原数组位置；缺文件/身份异常是BLOCKED；通过时只返回`ADAPTER_PASS_NOT_RECOVERED`。已有ZIP被有界读取并计算SHA256；完整性Guard使用**真实分片geometry和原冻结页摘要**，不是拿ZIP声明尺寸冒充原件验证。报告不保存Block正文/坐标。诊断既不向云发送请求，也不写数据库/成功缓存，不推进第二片。每次换新的output文件名。
 
-**待单独授权的显式恢复方案（目前无FAILED-MERGE ZIP回放接口，不可执行SQL改状态代替）：**
-
-1. 备份原Job、分片和ZIP，平台人工确认Batch/Data ID及下载来源；ZIP通常没有可验证的Batch签名，不能仅凭ZIP文件名或本地Hash证明云身份。
-2. 取得真实失败子原因并补通用证据兼容及回归；若Normalizer语义变化，设计明确的旧付费Job兼容审计，不能伪造旧缓存版本或为升级重新POST。
-3. 新显式恢复入口须固定doc/job/代次/片号/Batch/Data ID/原Hash/片Hash/ZIP Hash/解析参数及版本；默认dry-run，事务行锁下重核对，过期代次/来源不一致拒绝。仅Adapter+局部Guard成功后复用原片缓存发布和检查点，不跳过Parse Job或伪造READY。
-4. 恢复与投递下一片必须分开授权：本次第二片尚无Batch，现有`complete_piece → advance_piece`会返回`submit`；不得直接调用它并自动投递。恢复原第一片**不应再次收费**，但第二片首次提交仍可能收费，需用户另行确认。只有全部片成功才原事务整体入Block并继续Chunk/Embedding/Index。
-
-MERGE终态默认仍保留失败；先用只读诊断核对原ZIP并修复原因，通过后才显式`/retry`同一Job。未保存ZIP、版本/身份不符时继续拒绝，不用`/process`或Force绕过，不删除旧Job/缓存或新增批次。
+**本地恢复：** 修复原因并通过只读诊断后，使用现有`/retry`重放同一Job，不另建恢复框架、不执行SQL改状态。Whole和分片诊断均可省略`--zip`自动读原归档；指定另一ZIP时必须与已有回执Hash一致。尚无归档时只报告ZIP_REQUIRED，不联网。诊断不修改Job/缓存；显式Retry才通过原事务继续处理。没有归档的历史任务需另行取得原已完成Batch结果，不得重新解析。原ZIP通常没有可验证的Batch签名，已有下载来源回执与原件身份检查仍保留。
 
 此前诊断回归140 passed、日志相关44 passed，历史三份ZIP转换通过；只读身份报告`results/mineru_merge_dceb1360_verified_03.json`保留不改写。本次取得`data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip`后，确认TARGET_TEXT是把夹在目标与占位之间的header当成目标。修复后真实`restore_merged_text`恢复1处，仅原0-based索引864/866变化，865页眉和其余2290项不变；两段124+229字符无损还原原353字符，重复恢复一致。
 

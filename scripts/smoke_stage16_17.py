@@ -455,14 +455,14 @@ def safe_code(message):
 
 
 def safe_job_code(code):
-    """校验 Job/分片安全代码，不拼接冒号；未知值不透传，也不加载Provider/模型。"""
-    from app.services.mineru.errors import PDF_SPLIT_ERROR_CODES
+    """校验Job/分片/本地重放固定代码；未知值不透传，不加载Provider或模型。"""
+    from app.services.mineru.errors import PDF_SPLIT_ERROR_CODES, LOCAL_ADAPTER_ERROR_CODES
     if code is None or (isinstance(code, str) and not code.strip()):
         return None
     if not isinstance(code, str):
         return "UNKNOWN_ERROR_CODE"
     value = code.strip()
-    if value in MINERU_ERROR_CODES | PDF_SPLIT_ERROR_CODES or re.fullmatch(r"HTTP_[1-5][0-9]{2}", value):
+    if value in MINERU_ERROR_CODES | PDF_SPLIT_ERROR_CODES | LOCAL_ADAPTER_ERROR_CODES or re.fullmatch(r"HTTP_[1-5][0-9]{2}", value):
         return value
     # 复用供应商的纯错误映射，不导入 Provider/Parser，不发请求或加载配置/模型。
     from app.services.mineru.errors import api_error

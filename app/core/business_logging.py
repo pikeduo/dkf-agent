@@ -179,6 +179,7 @@ EVENT_LABELS = {
     "mineru.raw_result_saved": "MinerU 原始 ZIP 已校验归档，尚不代表业务解析成功",
     "mineru.raw_result_reused": "复用同批次原始 ZIP，未重新下载或提交",
     "mineru.raw_result_rejected": "原始 ZIP 校验或归档失败，未覆盖既有结果或追加批次",
+    "mineru.local_replay_started": "从本地原始 ZIP 开始转换，未请求 MinerU 云端",
     "mineru.adapter_failed": "原始 ZIP 已保留，Adapter 转换失败",
     "mineru.adapter_validated": "MinerU 解析结果结构校验通过",
     "mineru.merge_restored": "MinerU 合并正文已按证据恢复原页与位置，尚未落库",

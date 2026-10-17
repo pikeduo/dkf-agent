@@ -374,7 +374,7 @@ def prepare_split_step(session, document, job, settings):
 def submit_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """先核对整份/当前片版本，提交意图及 Batch 后 PUT；恢复不重复收费 POST。"""
+    """先核对版本与本地重放许可；离线恢复即使收到旧submit消息也不能提交云端。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -383,6 +383,8 @@ def submit_step(
     if not locked:
         return "skipped", 0
     document, job = locked
+    if job.parse_options.get("_local_replay_only") is True:
+        return check_step(session, job_id, None, settings)
     check_normalizer_recipe(job)
     if "_pdf_split_request" in job.parse_options:
         locked, completed = prepare_split_step(session, document, job, settings)
@@ -486,7 +488,7 @@ def result_failure(payload: dict) -> MinerUError:
 def check_step(
     session: Session, job_id: UUID, provider, settings: Settings
 ) -> tuple[str, int]:
-    """每次仅查询当前片；先独立保全 ZIP，再校验全片并原子写块，拒绝部分成功。"""
+    """原ZIP优先；离线重放缺结果立即停止，只有正常云任务才能查询或下载。"""
 
     restored = restore_cached_result(session, job_id, settings)
     if restored is not None:
@@ -502,6 +504,8 @@ def check_step(
             return completed
         document, job = locked
     if not job.upload_complete or not job.batch_id:
+        if job.parse_options.get("_local_replay_only") is True:
+            raise MinerUError("LOCAL_RESULT_REQUIRED", "本地重放缺少已完成分片的原始结果，未访问云端或提交后续分片")
         check_deadline(job, settings)
         return "submit", 0
     # 已下载并保全的付费结果优先本地读取；不依赖可能过期的供应商下载链接。
@@ -518,11 +522,13 @@ def check_step(
         _, raw_hash = bundle_file(document, job.parse_options["_hybrid"])
     saved_raw = load_raw_result(settings, doc_id=document.doc_id, job_id=job_id,
         ordinal=ordinal, batch_id=job.batch_id, data_id=job.data_id, file_hash=raw_hash)
+    if saved_raw is None and job.parse_options.get("_local_replay_only") is True:
+        raise MinerUError("LOCAL_RESULT_REQUIRED", "本地原始结果缺失，未查询、下载或重新提交MinerU任务")
     result = ({"state": "done", "trace_id": getattr(job, "trace_id", None)} if saved_raw is not None else
               provider.query(job.batch_id, job.data_id))
     job.state, job.trace_id = result["state"], result["trace_id"]
     log_event(
-        "mineru.remote_state",
+        "mineru.local_replay_started" if saved_raw is not None else "mineru.remote_state",
         doc_id=document.doc_id,
         job_id=job_id,
         batch_id=job.batch_id,
@@ -544,7 +550,19 @@ def check_step(
         return "check", settings.mineru_poll_interval_seconds
     source = local_file(document, job, settings)
     validate_local_file(source)
-    ordinal = 1
+    archive, raw_result = saved_raw if saved_raw is not None else obtain_raw_result(provider, result.get("full_zip_url"), settings,
+        doc_id=document.doc_id, job_id=job_id, ordinal=ordinal, batch_id=job.batch_id,
+        data_id=job.data_id, file_hash=source.file_hash)
+    return adapt_raw_result(session, document, job, settings, archive, raw_result, source)
+
+
+def adapt_raw_result(session, document, job, settings, archive, raw_result, source):
+    """只把已归档原ZIP转换、校验并发布本地结果；不接收Provider，不执行任何云HTTP。
+
+    原始归档与Normalizer版本独立；转换失败仍由原失败事务记录，原ZIP不删除。
+    分片成功后复用既有游标/全片事务；离线标记贯穿后续任务，缺片不转云。
+    """
+    job_id, ordinal = job.job_id, 1
     if "_pdf_split" in job.parse_options:
         # SQL 提交失败时沿用同片 Batch；片结果的 ID 不依赖临时文件名或 Celery 消息。
         from app.services.mineru.pdf_split import checked_manifest, piece_recipe
@@ -555,9 +573,6 @@ def check_step(
         adapter_identity = key_for(piece_recipe(job, part))
     else:
         adapter_identity = job.file_hash + ":" + job.options_hash
-    archive, raw_result = saved_raw if saved_raw is not None else obtain_raw_result(provider, result.get("full_zip_url"), settings,
-        doc_id=document.doc_id, job_id=job_id, ordinal=ordinal, batch_id=job.batch_id,
-        data_id=job.data_id, file_hash=source.file_hash)
     if "_pdf_split" in job.parse_options:
         part.raw_result = raw_result
         save_manifest(job, manifest, settings)

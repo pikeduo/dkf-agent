@@ -374,7 +374,7 @@ class EmptyBlockError(MinerUError):
         """安全保存结构类型/数组序号/页码，保留原有EMPTY_BLOCK外部错误码。"""
         super().__init__("EMPTY_BLOCK", "MinerU 返回的正文、表格或公式没有可用文本")
         allowed = {"text", "title", "image_text", "header", "footer", "page_number",
-                   "aside_text", "page_footnote", "table", "list", "code", "equation", "formula"}
+                   "aside_text", "page_footnote", "ref_text", "table", "list", "code", "equation", "formula"}
         self.diagnostic = {"reason": "TABLE_NO_BODY" if missing_table_body else "STRUCTURE_NO_TEXT",
             "stage": "adapter.normalize", "structure_type": kind if kind in allowed else "unknown",
             "page": page, "item_index": position}
@@ -491,11 +491,11 @@ def span_reference_text(span: dict) -> str:
     return "$" + span["content"] + "$" if span["type"] == "inline_equation" else span["content"]
 
 
-def merged_text_slices(text: str, originals: list[str]) -> list[str]:
-    """逐字符核对完整 V1 正文，返回其原始切片；只兼容空白分隔和 Markdown 字符转义。
+def merged_text_slices(text: str, originals: list[str], *, dehyphenate=frozenset()) -> list[str]:
+    """核对完整V1并返回原始切片；允许转义、空白及已证明跨页边界的断词连字符省略。
 
-    不用 layout 生成新正文，不去重、不模糊匹配；所有字符须被原序消费。分隔空白
-    留在前一切片，切片拼接必须与 V1 原字符串完全相同，拒绝遗漏或额外文字。
+    dehyphenate只接收调用方完成来源/相邻页/cross_page校验的Span边界；仅当V1
+    实际直接续接ASCII字母时忽略layout的末尾断词符。不增删V1任何字符，不模糊匹配。
     """
 
     if len(text) > 1024**2:
@@ -504,14 +504,22 @@ def merged_text_slices(text: str, originals: list[str]) -> list[str]:
         raise merge_evidence_error("SOURCE_TEXT")
     escapable = frozenset("\\`*_{}[]()#+-.!$<>|")
     cursor, cuts = 0, [0]
-    for original in originals:
+    for index, original in enumerate(originals):
         while cursor < len(text) and text[cursor].isspace():
             cursor += 1
-        for char in original.strip():
+        reference = original.strip()
+        for position, char in enumerate(reference):
             if cursor < len(text) and text[cursor] == char:
                 cursor += 1
             elif (char in escapable and text[cursor:cursor + 2] == "\\" + char):
                 cursor += 2
+            elif (index in dehyphenate and position == len(reference) - 1 and char == "-"
+                    and len(reference) >= 2 and reference[-2].isascii() and reference[-2].isalpha()
+                    and index + 1 < len(originals) and originals[index + 1].strip()
+                    and originals[index + 1].strip()[0].isascii() and originals[index + 1].strip()[0].isalpha()
+                    and text[cursor:cursor + 1] == originals[index + 1].strip()[0]):
+                # 仅V1已经去掉的边界断词符；保留原V1字符，下一Span仍须完整逐字核对。
+                continue
             else:
                 raise merge_evidence_error("TEXT_CHARACTER")
         while cursor < len(text) and text[cursor].isspace():
@@ -675,7 +683,8 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
 
     支持原序文字/行内公式Span，最多64个占位与64个经核对的原样间隔。必须有
     lines_deleted=true、空后处理lines、完整前处理来源及逐Span目标顺序证据；
-    跨页要求 cross_page=true 且只跨相邻后一页。歧义安全失败，不跳过真空正文。
+    跨页要求cross_page=true且相邻后一页；仅该已核对边界允许V1省略英文断词符。
+    歧义安全失败，不跳过真空正文，不从layout补回V1没有的字符。
     """
 
     if not pages:
@@ -800,7 +809,13 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             if moved_box is None or any(abs(a - b) > 2 for a, b in zip(moved_box, original_box)):
                 raise merge_evidence_error("MOVED_BBOX", **location)
         try:
-            span_parts = merged_text_slices(target["text"], [span_reference_text(s) for s in source_spans])
+            # 只在两个不同原父块的相邻物理页接缝启用；同页/行内公式/普通减号不适用。
+            dehyphenate = frozenset(i for i in range(len(source_spans) - 1)
+                if span_sources[i][0] != span_sources[i + 1][0]
+                and span_sources[i + 1][1]["page_idx"] == span_sources[i][1]["page_idx"] + 1
+                and source_spans[i]["type"] == source_spans[i + 1]["type"] == "text")
+            span_parts = merged_text_slices(target["text"], [span_reference_text(s) for s in source_spans],
+                                            dehyphenate=dehyphenate)
             parts, cursor = [], 0
             for amount in span_counts:
                 parts.append("".join(span_parts[cursor:cursor + amount]))
@@ -829,7 +844,7 @@ class MinerUResultAdapter:
         geometry: dict[int, tuple[float, float]] | None,
         identity: str,
     ) -> ParsedDocument:
-        """统一 V4 Block；PDF/图片核对合并来源，Office 保持原逻辑页和空坐标规则。"""
+        """统一V4 Block（含原生ref_text正文）；PDF核对来源，Office保留逻辑页/空坐标。"""
 
         if file_type not in MINERU_TYPES:
             raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
@@ -886,6 +901,8 @@ class MinerUResultAdapter:
                 "page_number",
                 "aside_text",
                 "page_footnote",
+                # 云V1参考文本本就使用text/page_idx/bbox，不应因类型名而整份拒绝。
+                "ref_text",
             }:
                 content = joined_text(item.get("text"))
                 level = item.get("text_level", 0)

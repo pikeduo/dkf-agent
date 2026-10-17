@@ -467,7 +467,7 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 新文档级`POST /reindex`保留原件，复用成功Parse Cache后自动重建Chunk→Embedding→Index→READY，无MinerU请求；`POST /retry`恢复已有失败阶段/同一活动云批次。`POST /reparse?force=true`才允许绕过缓存，可能再次外传/收费。202只表示已接收，用详情/status及management_task_id查询，不盲目重复收费请求。旧知识库嵌套接口保留逐阶段兼容语义。
 
-`MERGE_EVIDENCE`属于本地来源校验失败，不等于云端失败。修复原因后，普通`/retry`仅在当前Job/Batch、原件Hash、冻结版本及已归档原ZIP均有效时恢复同一Job，本片不再请求云端；归档缺失/损坏则拒绝恢复。PDF后续尚未提交的分片仍可能产生新费用，先核对全部分片预算。诊断命令见[阶段33故障排查](docs/STAGE33_EVALUATION.md#失败定位与原知识库恢复)。
+`MERGE_EVIDENCE / EMPTY_BLOCK / CONTENT_TYPE / COMPLETENESS`等本地适配失败不等于MinerU云端失败。修复Adapter后，普通`/retry`复用同Job/Batch的已归档原ZIP，**强制本地重放，不需要有效MinerU Token，不查询、上传或下载云结果**；分片后续缺ZIP也明确停止，绝不自动转成收费任务。归档/来源Hash损坏仍拒绝，不以Force代替修Adapter；全部适配及完整性通过才继续正常入库。Whole/分片只读诊断均自动读取原归档，无需重新下载，见[阶段33故障排查](docs/STAGE33_EVALUATION.md#失败定位与原知识库恢复)。
 
 阶段33仅恢复原失败文档时使用`--step import --resume --retry-failed-only`；该模式不上传未尝试文件、不重建READY文档，仍保留全部200份的报告与未完成状态。确认外传及潜在后续分片费用后才加`--execute --allow-cloud`，具体命令见上述手册。普通`--retry-failed`不限制新文件调度，二者不要混淆。
 

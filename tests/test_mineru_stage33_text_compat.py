@@ -18,6 +18,114 @@ def layout_pages(layout):
     return {page["page_idx"]: page for page in layout["pdf_info"]}
 
 
+def test_reference_text_is_a_regular_text_block_with_unchanged_v1_provenance():
+    """真实V1的ref_text保留原字/页/bbox及位置ID，不从layout拼接或编造引文。"""
+    values, layout, geometry = merged_case(originals=("原有正文",))
+    value = {"type": "ref_text", "text": "参考文本 [1]：原样保留。", "page_idx": 0,
+             "bbox": [80, 500, 420, 580]}
+    values.append(value)
+    original = deepcopy(values), deepcopy(layout)
+    doc_id = uuid4()
+    parsed = normalize_case(values, layout, geometry, doc_id=doc_id)
+    assert len(parsed.blocks) == 2
+    reference = parsed.blocks[1]
+    assert reference.text == value["text"] and reference.page == 1 and reference.block_type == "text"
+    assert reference.bbox == [48., 400., 252., 464.] and reference.source == "mineru_cloud"
+    assert reference.block_id == uuid5(doc_id, "mineru-v1:frozen-input:2:0:text")
+    assert normalize_case(values, layout, geometry, doc_id=doc_id) == parsed
+    assert (values, layout) == original
+
+
+@pytest.mark.parametrize("damage,code", [("empty", "EMPTY_BLOCK"), ("page", "PAGE"),
+    ("bbox", "BBOX"), ("unknown_type", "CONTENT_TYPE")])
+def test_reference_text_still_requires_real_text_page_and_geometry(damage, code):
+    """支持ref_text不放宽真正空正文、错误页码、坏坐标或未知类型。"""
+    values, layout, geometry = merged_case(originals=("原有正文",))
+    value = {"type": "ref_text", "text": "参考原文", "page_idx": 0, "bbox": [80, 500, 420, 580]}
+    if damage == "empty":
+        value["text"] = ""
+    elif damage == "page":
+        value["page_idx"] = 10
+    elif damage == "bbox":
+        value["bbox"] = [80, 500, 420]
+    else:
+        value["type"] = "unknown_reference_type"
+    values.append(value)
+    with pytest.raises(MinerUError) as error:
+        normalize_case(values, layout, geometry)
+    assert error.value.code == code
+
+
+@pytest.mark.parametrize("retained", [False, True])
+def test_verified_cross_page_dehyphenation_preserves_exact_v1_and_source_identity(retained):
+    """已证明跨页的英文断词符可由V1省略或保留，所有原字符/页/bbox/ID稳定且不补字。"""
+    values, layout, geometry = merged_case(cross_page=True,
+        originals=("Reporting inter-", "national results"))
+    values[0]["text"] = "Reporting inter-national results" if retained else "Reporting international results"
+    original = deepcopy(values), deepcopy(layout)
+    doc_id = uuid4()
+    parsed = normalize_case(values, layout, geometry, doc_id=doc_id)
+    assert "".join(b.text for b in parsed.blocks) == values[0]["text"]
+    assert parsed.blocks[0].text == ("Reporting inter-" if retained else "Reporting inter")
+    assert parsed.blocks[1].text == "national results"
+    assert [b.page for b in parsed.blocks] == [1, 2]
+    assert parsed.blocks[1].bbox == [72., 96., 378., 192.]
+    assert parsed.blocks[1].block_id == uuid5(doc_id, "mineru-v1:frozen-input:2:1:text")
+    assert normalize_case(values, layout, geometry, doc_id=doc_id) == parsed
+    assert (values, layout) == original
+
+
+@pytest.mark.parametrize("left,right,v1", [
+    ("value 12-", "34", "value 1234"),
+    ("delta x-", "5", "delta x5"),
+    ("word inter-", "national", "word inter national"),
+    ("word inter-", "national", "word interXnational"),
+    ("word inter-", "national", "word international EXTRA"),
+    ("word in-ter", "national", "word international"),
+    ("word inter−", "national", "word international"),
+])
+def test_dehyphenation_does_not_hide_numbers_changes_or_unmatched_v1(left, right, v1):
+    """只兼容英文跨页断词，数字/算符/中间连字符/空格/额外正文仍须拒绝。"""
+    values, layout, geometry = merged_case(cross_page=True, originals=(left, right))
+    values[0]["text"] = v1
+    with pytest.raises(MinerUError) as error:
+        normalize_case(values, layout, geometry)
+    assert error.value.code == "MERGE_EVIDENCE"
+    assert error.value.diagnostic["reason"] in {"TEXT_CHARACTER", "TEXT_TRAILING"}
+
+
+@pytest.mark.parametrize("damage,reason", [
+    ("same_page", "TEXT_CHARACTER"), ("cross_page", "MOVED_CROSS_PAGE"),
+    ("bbox", "MOVED_BBOX"), ("moved_text", "MOVED_TEXT"), ("source_page", "SOURCE_PAGE"),
+])
+def test_dehyphenation_requires_all_original_source_checks(damage, reason):
+    """逐项验证原来源子码；bbox故障只改目标Span，不污染共享坐标的占位父块。"""
+    values, layout, geometry = merged_case(cross_page=damage != "same_page",
+        originals=("Reporting inter-", "national results"))
+    values[0]["text"] = "Reporting international results"
+    moved = layout["pdf_info"][0]["para_blocks"][0]["lines"][1]["spans"][0]
+    if damage == "cross_page":
+        moved["cross_page"] = False
+    elif damage == "bbox":
+        original_bbox = list(moved["bbox"])
+        # 夹具的原Span与占位父块共享raw_box；替换列表，避免同时破坏占位定位。
+        moved["bbox"] = [original_bbox[0] + 30, *original_bbox[1:]]
+        page = layout["pdf_info"][1]
+        assert page["para_blocks"][0]["bbox"] == original_bbox
+        assert page["preproc_blocks"][0]["bbox"] == original_bbox
+        assert page["preproc_blocks"][0]["lines"][0]["spans"][0]["bbox"] == original_bbox
+    elif damage == "moved_text":
+        moved["content"] = "different results"
+    elif damage == "source_page":
+        values[1]["page_idx"] = 2
+        layout["pdf_info"][1]["page_idx"] = 2
+        geometry[2] = geometry.pop(1)
+    with pytest.raises(MinerUError) as error:
+        normalize_case(values, layout, geometry)
+    assert error.value.code == "MERGE_EVIDENCE"
+    assert error.value.diagnostic["reason"] == reason
+
+
 def test_verified_empty_header_is_preserved_with_original_id_and_no_fabricated_text():
     """V1/layout同时确认为空的页眉保留空块，不删除项或改变正文来源。"""
     values, layout, geometry = boundary_case()

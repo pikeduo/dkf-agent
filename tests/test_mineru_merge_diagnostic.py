@@ -132,6 +132,30 @@ def test_validated_zip_is_not_a_recovery_or_batch_provenance_proof(context, tmp_
     assert vars(job) == snapshot
 
 
+@pytest.mark.parametrize("conflict", [False, True])
+def test_split_diagnostic_reads_local_receipt_without_zip_argument(context, monkeypatch, tmp_path, conflict):
+    """分片也自动读取已有归档；显式另一ZIP不匹配时拒绝，始终不请求云端或修改Job。"""
+    document, job, settings, _ = context
+    from app.services.mineru import raw_results
+    values, layout, _ = merged_case()
+    archive = result_zip(values, layout=layout)
+    monkeypatch.setattr(raw_results, "load_raw_result", lambda *args, **kwargs: (archive, {
+        "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive)}))
+    snapshot = deepcopy(vars(job)), deepcopy(vars(document))
+    if conflict:
+        wrong = tmp_path / "unrelated.zip"
+        wrong.write_bytes(b"not-the-original-zip")
+        with pytest.raises(MinerUError) as error:
+            tool.inspect_job(document, job, settings, "original-batch", wrong)
+        assert error.value.code == "DIAGNOSTIC_IDENTITY"
+    else:
+        report = tool.inspect_job(document, job, settings, "original-batch", None)
+        assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED" and report["block_count"] == 2
+        assert report["zip_batch_provenance"] == "validated_local_receipt"
+        assert not report["cloud_submitted"] and not report["database_modified"] and not report["cache_published"]
+    assert (vars(job), vars(document)) == snapshot
+
+
 @pytest.mark.parametrize("change,code", [("original", "PDF_SPLIT_CHANGED"), ("piece", "PDF_SPLIT_CHANGED"),
     ("batch", "DIAGNOSTIC_IDENTITY"), ("generation", "DIAGNOSTIC_IDENTITY"),
     ("normalizer", "CACHE_CONFIG_CHANGED"), ("part_identity", "PDF_SPLIT_CHECKPOINT"),

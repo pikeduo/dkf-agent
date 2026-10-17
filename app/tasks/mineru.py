@@ -24,6 +24,41 @@ from app.tasks.documents import DocumentProcessingError, processing_session
 logger = logging.getLogger(__name__)
 
 
+class DeferredCloudProvider:
+    """只有真正的云操作才构造客户端；本地ZIP重放不需要Token、Redis或网络客户端。"""
+
+    def __init__(self, settings):
+        """只保存本地配置，不校验云凭据或初始化HTTP/限流资源。"""
+        self.settings, self.instance = settings, None
+
+    def client(self):
+        """首次云操作才实例化唯一Provider，保留原有TLS、限流与费用保护。"""
+        if self.instance is None:
+            self.instance = MinerUCloudProvider(self.settings)
+        return self.instance
+
+    def request_upload_urls(self, files, options):
+        """仅正常云提交路径委托原Provider申请批次。"""
+        return self.client().request_upload_urls(files, options)
+
+    def upload(self, url, source):
+        """仅正常云提交路径委托原Provider上传。"""
+        return self.client().upload(url, source)
+
+    def query(self, batch_id, data_id):
+        """本地结果确实不存在且允许云操作时才查询原批次。"""
+        return self.client().query(batch_id, data_id)
+
+    def download_result(self, url):
+        """只在云结果获取阶段下载，不参与Adapter处理。"""
+        return self.client().download_result(url)
+
+    def close(self):
+        """未初始化的本地重放不触碰云资源；已初始化则按原逻辑释放。"""
+        if self.instance is not None:
+            self.instance.close()
+
+
 def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
     """向 CPU 队列投递一个短步骤；只传本地任务标识，禁止 Token 或签名 URL 入消息。"""
 
@@ -51,7 +86,7 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
 
 
 def execute_step(task, job_id: str, step: str) -> dict:
-    """执行单片短步骤；摘要按实际不同分片 Batch 计数，永久失败不继续后续分片。"""
+    """执行短步骤；客户端延迟创建，本地重放在入口和服务层都禁止访问云端。"""
 
     try:
         identifier = UUID(job_id)
@@ -67,8 +102,9 @@ def execute_step(task, job_id: str, step: str) -> dict:
             if restored is not None:
                 action, value = restored
             else:
-                # 完整本地结果命中无需 Token、限流或任何 HTTP 客户端。
-                provider = MinerUCloudProvider(settings)
+                job = session.get(DocumentParseJob, identifier)
+                # 本地重放没有Provider可调用；正常检查也先读ZIP，真正缺结果才初始化客户端。
+                provider = None if job is not None and job.parse_options.get("_local_replay_only") is True else DeferredCloudProvider(settings)
                 action, value = (submit_step if step == "submit" else check_step)(
                     session, identifier, provider, settings
                 )

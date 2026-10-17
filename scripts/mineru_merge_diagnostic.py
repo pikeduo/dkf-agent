@@ -99,7 +99,7 @@ def compare_pdf_coverage(document, job, settings, manifest):
 
 def inspect_job(document, job, settings, batch_id: str, archive_path: Path | None,
                 *, allow_normalizer_upgrade=False, allow_coverage_upgrade=False) -> dict:
-    """验证原文档/分片/Batch/冻结版本；只返回脱敏摘要，成功也不写缓存、SQL或投递任务。
+    """验证原件/分片/Batch/版本并优先读本地归档；成功也不写缓存、SQL或投递任务。
 
     ZIP本身通常不包含可验证的Batch签名；覆盖升级也只比较内存副本，不是导入或恢复授权。
     后续恢复必须另行确认下载来源并通过正常事务/Guard，禁止据此直接改SQL状态。
@@ -163,13 +163,22 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         "status": "BLOCKED", "error_code": "ZIP_REQUIRED",
         "zip_batch_provenance": "manual_confirmation_required",
         "database_modified": False, "cache_published": False, "cloud_submitted": False}
-    if archive_path is None:
+    from app.services.mineru.raw_results import load_raw_result
+    saved = load_raw_result(settings, doc_id=document.doc_id, job_id=job.job_id, ordinal=part.ordinal,
+        batch_id=part.batch_id, data_id=part.data_id, file_hash=part.file_hash)
+    if saved is not None:
+        archive, record = saved
+        if archive_path is not None and file_hash(regular_path(archive_path)) != record["sha256"]:
+            raise MinerUError("DIAGNOSTIC_IDENTITY", "指定ZIP与原Batch归档Hash不一致")
+        report["zip_batch_provenance"] = "validated_local_receipt"
+    elif archive_path is None:
         return report
-    archive_path = regular_path(archive_path)
-    if not 0 < archive_path.stat().st_size <= 512 * 1024**2:
-        raise MinerUError("ZIP_LIMIT", "诊断ZIP超过安全大小限制")
-    with archive_path.open("rb") as stream:
-        archive = stream.read(512 * 1024**2 + 1)
+    else:
+        archive_path = regular_path(archive_path)
+        if not 0 < archive_path.stat().st_size <= 512 * 1024**2:
+            raise MinerUError("ZIP_LIMIT", "诊断ZIP超过安全大小限制")
+        with archive_path.open("rb") as stream:
+            archive = stream.read(512 * 1024**2 + 1)
     if len(archive) > 512 * 1024**2:
         raise MinerUError("ZIP_LIMIT", "诊断ZIP读取过程中超过安全大小限制")
     report.update(zip_sha256=hashlib.sha256(archive).hexdigest(), zip_size_bytes=len(archive))

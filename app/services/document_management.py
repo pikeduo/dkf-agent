@@ -16,6 +16,7 @@ from app.services.indexing import prepare_index, publish_index
 from app.services.chunk.splitter import ChunkError
 from app.services.embedding.service import EmbeddingError
 from app.services.indexing import IndexingError
+from app.services.mineru.errors import LOCAL_ADAPTER_ERROR_CODES
 
 ERRORS = {
     "MANAGEMENT_BUSY": "文档仍有活动任务，请先查询状态；未覆盖现有代次",
@@ -104,7 +105,7 @@ def active_job(session, document):
 
 
 def retry_cloud_job(session, document, settings):
-    """显式Retry续看原Batch；Adapter拒绝仅在原ZIP完整可核对时本地重放，不新建Job。"""
+    """显式Retry恢复原Job；本地适配失败强制离线重放，缺ZIP不能转云或新建Job。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
@@ -114,9 +115,9 @@ def retry_cloud_job(session, document, settings):
             DocumentParseJob.doc_id == document.doc_id,
             DocumentParseJob.task_id == document.processing_task_id,
             DocumentParseJob.state == "failed", DocumentParseJob.is_active.is_(False),
-            # 普通任务仍只接受 JOB_TIMEOUT；分片传输错误在下方按白名单严格核对。
+            # 本地适配错误不受某个具体子码限制，但必须有同Batch的可校验原ZIP。
             or_(DocumentParseJob.error_code == "JOB_TIMEOUT",
-                DocumentParseJob.error_code == "MERGE_EVIDENCE",
+                DocumentParseJob.error_code.in_(sorted(LOCAL_ADAPTER_ERROR_CODES)),
                 DocumentParseJob.parse_options.has_key("_pdf_split")),
             ).with_for_update())
         if not isinstance(job, DocumentParseJob):
@@ -124,7 +125,7 @@ def retry_cloud_job(session, document, settings):
         try:
             split_resume = resumable_split(document, job)
             local_replay = False
-            if job.error_code == "MERGE_EVIDENCE":
+            if job.error_code in LOCAL_ADAPTER_ERROR_CODES or job.parse_options.get("_local_replay_only") is True:
                 from app.services.mineru.jobs import check_normalizer_recipe, local_file
                 from app.services.mineru.provider import validate_local_file
                 from app.services.mineru.raw_results import load_raw_result
@@ -147,6 +148,8 @@ def retry_cloud_job(session, document, settings):
                 local_replay = load_raw_result(settings, doc_id=document.doc_id, job_id=job.job_id,
                     ordinal=ordinal, batch_id=job.batch_id, data_id=job.data_id,
                     file_hash=source.file_hash) is not None
+                if not local_replay:
+                    raise MinerUError("LOCAL_RESULT_REQUIRED", "本地原ZIP缺失，未恢复为云任务")
             permitted = job.error_code == "JOB_TIMEOUT" or split_resume or local_replay
         except MinerUError:
             raise ManagementError("MANAGEMENT_CHECKPOINT") from None
@@ -156,7 +159,9 @@ def retry_cloud_job(session, document, settings):
                 or not (job.batch_id and job.upload_complete or split_resume)
                 or job.provider != "mineru_cloud"):
             raise ManagementError("MANAGEMENT_CHECKPOINT")
-        # 续看原Batch，或恢复从未提交的分片；不创建Job、不更换片身份、不重发已提交片。
+        # 明确绑定本次恢复为纯本地；后续所有分片和迟到submit消息都继承禁止云访问的边界。
+        if local_replay:
+            job.parse_options = job.parse_options | {"_local_replay_only": True}
         try:
             renew_local_wait(job, settings)
         except MinerUError:
