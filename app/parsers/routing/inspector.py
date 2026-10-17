@@ -9,6 +9,7 @@ import pymupdf
 from lxml import etree
 
 from app.core.config import Settings
+from app.core.business_logging import log_event
 from app.core.file_formats import FileFormatError, validate_file_content
 from app.parsers.common import ParserError
 from app.parsers.routing.contracts import PDF_COVERAGE_VERSION, Inspection, PageSignals, StructuralSignals
@@ -291,6 +292,9 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
         if document.needs_pass or document.is_repaired or not document.page_count:
             raise ParserError("PDF 已加密、损坏或没有可读页面")
         if document.page_count > settings.router_pdf_max_pages:
+            log_event("router.preflight_rejected", stage="preflight.pdf", step="PDF_PAGE_LIMIT",
+                error_code="PREFLIGHT_LIMIT", page_count=document.page_count,
+                item_count=settings.router_pdf_max_pages)
             return Inspection(
                 signals=StructuralSignals(page_count=document.page_count),
                 risks=("PREFLIGHT_LIMIT",),
@@ -314,6 +318,10 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                 len(lines) > settings.router_pdf_max_lines_per_page
                 or len(images) + len(drawings) > 5000
             ):
+                log_event("router.preflight_rejected", stage="preflight.pdf",
+                    step="PDF_LINE_LIMIT" if len(lines) > settings.router_pdf_max_lines_per_page else "PDF_OBJECT_LIMIT",
+                    error_code="PREFLIGHT_LIMIT", page=page.number + 1,
+                    item_count=len(lines), image_count=len(images), drawing_count=len(drawings))
                 return Inspection(
                     signals=StructuralSignals(page_count=document.page_count),
                     risks=("PREFLIGHT_LIMIT",),

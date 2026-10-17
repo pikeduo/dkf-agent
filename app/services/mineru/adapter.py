@@ -388,6 +388,14 @@ def merge_evidence_error(reason: str, **counts) -> MergeEvidenceError:
     return MergeEvidenceError(reason, **counts)
 
 
+def safe_merge_diagnostic(value: object) -> dict:
+    """重建可持久化/导出的固定诊断白名单，拒绝外部文字、路径与坐标字段。"""
+    if not isinstance(value, dict) or value.get("reason") not in MERGE_REASONS:
+        return {}
+    error = MergeEvidenceError(value["reason"], **{k: v for k, v in value.items() if k != "reason"})
+    return dict(error.diagnostic)
+
+
 def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict, list]:
     """按同页类型/坐标唯一关联前后父块，索引须一致；坐标仅用于关联、不用于排序。"""
 

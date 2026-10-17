@@ -1,4 +1,4 @@
-"""已有分片 Batch 的只读离线诊断：仅查询检查点/核对 Hash/转换已有 ZIP，不恢复或提交任务。"""
+"""已有Whole/分片Batch只读离线诊断：核对Hash并转换原ZIP，不恢复或提交任务。"""
 
 import argparse
 import hashlib
@@ -109,6 +109,10 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
     from app.services.mineru.pdf_split import checked_manifest, part_path, piece_recipe
     from app.services.mineru.pdf_split_jobs import current_part, validate_piece
 
+    if "_pdf_split" not in job.parse_options:
+        if allow_normalizer_upgrade or allow_coverage_upgrade:
+            raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole诊断不自动改变冻结Normalizer或覆盖规则")
+        return inspect_whole_job(document, job, settings, batch_id, archive_path)
     manifest = checked_manifest(document, job)
     part = current_part(manifest)
     if (job.provider != "mineru_cloud" or document.file_type != "pdf"
@@ -234,6 +238,68 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
     report.update(status="ADAPTER_PASS_NOT_RECOVERED", error_code=None, block_count=len(parsed.blocks),
                   unexplained_empty_text_or_tables=0,
                   original_pages=sorted({part.page_start + block.page - 1 for block in parsed.blocks}))
+    return report
+
+
+def inspect_whole_job(document, job, settings, batch_id, archive_path):
+    """核对当前Whole的已归档原ZIP及冻结身份；本地转换/Guard通过也不写库或缓存。"""
+    from app.parsers.routing.contracts import RouteDecision
+    from app.parsers.routing.guard import CompletenessError, guard_result
+    from app.services.document_processing import source_path
+    from app.services.mineru.jobs import check_normalizer_recipe
+    from app.services.mineru.raw_results import load_raw_result
+    if (job.provider != "mineru_cloud" or document.file_type != "pdf"
+            or document.processing_task_id != job.task_id or document.file_hash != job.file_hash
+            or batch_id != job.batch_id or not job.upload_complete or not job.submission_attempted
+            or "_hybrid" in job.parse_options or "_pdf_split_request" in job.parse_options):
+        raise MinerUError("DIAGNOSTIC_IDENTITY", "当前Whole文档/批次身份无法核对，未转换")
+    check_normalizer_recipe(job)
+    frozen = job.parse_options.get("_cache_recipe", {})
+    if (frozen.get("normalizer_version") != NORMALIZER_VERSION
+            or frozen.get("file_hash") != document.file_hash or frozen.get("file_type") != "pdf"
+            or frozen.get("provider") != job.provider):
+        raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole冻结解析身份无法核对")
+    names = ("model_version", "language", "is_ocr", "enable_table", "enable_formula")
+    options = {name: job.parse_options.get(name) for name in names}
+    if (any(name not in frozen or frozen[name] != options[name] for name in names)
+            or options["model_version"] != job.model_version
+            or hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest() != job.options_hash):
+        raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole模型或参数Hash不匹配")
+    path = regular_path(source_path(document))
+    if file_hash(path) != document.file_hash:
+        raise MinerUError("FILE_HASH", "原件Hash不符，未转换原ZIP")
+    saved = load_raw_result(settings, doc_id=document.doc_id, job_id=job.job_id, ordinal=1,
+        batch_id=job.batch_id, data_id=job.data_id, file_hash=document.file_hash)
+    if saved is None:
+        raise MinerUError("ZIP_REQUIRED", "原Batch归档不存在，未下载或重新提交")
+    archive, record = saved
+    if archive_path is not None and file_hash(regular_path(archive_path)) != record["sha256"]:
+        raise MinerUError("DIAGNOSTIC_IDENTITY", "指定ZIP与原Batch归档Hash不一致")
+    report = {"doc_id": str(document.doc_id), "job_id": str(job.job_id), "batch_id": batch_id,
+        "data_id": job.data_id, "status": "FAIL", "job_state": job.state,
+        "original_sha256": document.file_hash, "zip_sha256": record["sha256"],
+        "zip_size_bytes": record["size_bytes"], "normalizer_version": NORMALIZER_VERSION,
+        "source_hashes_verified": True, "zip_batch_provenance": "validated_local_receipt",
+        "adapter_normalize": "NOT_EXECUTED", "completeness_guard": "NOT_EXECUTED"}
+    try:
+        parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
+            file_name=document.file_name, file_type="pdf", geometry=page_geometry(path, "pdf"),
+            identity=job.file_hash + ":" + job.options_hash)
+        report.update(adapter_normalize="PASS", block_count=len(parsed.blocks))
+        decision = RouteDecision.model_validate(job.parse_options.get("_route_decision")
+                                               or job.parse_options["_cache_guard"])
+        guard_result(parsed, decision)
+        if file_hash(path) != document.file_hash:
+            raise MinerUError("FILE_HASH", "转换期间原件Hash变化，未接受结果")
+        report.update(status="ADAPTER_PASS_NOT_RECOVERED", completeness_guard="PASS", error_code=None)
+    except (MinerUError, CompletenessError) as error:
+        report["error_code"] = getattr(error, "code", "COMPLETENESS")
+        if isinstance(error, MergeEvidenceError):
+            report["merge_diagnostic"] = dict(error.diagnostic)
+        elif isinstance(error, EmptyBlockError):
+            report["empty_diagnostic"] = dict(error.diagnostic)
+        elif isinstance(error, CompletenessError):
+            report["completeness_guard"] = "FAIL"
     return report
 
 

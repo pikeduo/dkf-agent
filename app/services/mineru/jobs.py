@@ -21,10 +21,10 @@ from app.services.document_processing import (
     source_path,
     transition_document,
 )
-from app.services.mineru.adapter import MinerUResultAdapter, page_geometry
+from app.services.mineru.adapter import MinerUResultAdapter, page_geometry, safe_merge_diagnostic
 from app.services.mineru.errors import MinerUError, api_error
 from app.services.mineru.provider import LocalFile, validate_local_file
-from app.services.mineru.raw_results import obtain_raw_result
+from app.services.mineru.raw_results import obtain_raw_result, load_raw_result
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
 from app.parsers.hybrid import BundleManifest
 from app.services.xlsx_primary import prepare_primary, complete_primary
@@ -242,6 +242,7 @@ def finish_job(session, document, job, parsed) -> None:
     job.state, job.is_active = "done", False
     job.finished_at = datetime.now(UTC)
     job.error_code = job.error_message = None
+    job.parse_options = {k: v for k, v in job.parse_options.items() if k != "_adapter_failure"}
 
 
 def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[str, int] | None:
@@ -503,7 +504,22 @@ def check_step(
     if not job.upload_complete or not job.batch_id:
         check_deadline(job, settings)
         return "submit", 0
-    result = provider.query(job.batch_id, job.data_id)
+    # 已下载并保全的付费结果优先本地读取；不依赖可能过期的供应商下载链接。
+    # 这里只定位原Batch，真正的原件/分片Hash仍由下方local_file验证。
+    ordinal, raw_hash = 1, job.file_hash
+    if "_pdf_split" in job.parse_options:
+        from app.services.mineru.pdf_split import checked_manifest
+        from app.services.mineru.pdf_split_jobs import current_part
+        raw_part = current_part(checked_manifest(document, job))
+        if raw_part is None:
+            raise MinerUError("PDF_SPLIT_CHECKPOINT", "PDF 当前分片缺失，未请求云端")
+        ordinal, raw_hash = raw_part.ordinal, raw_part.file_hash
+    elif "_hybrid" in job.parse_options:
+        _, raw_hash = bundle_file(document, job.parse_options["_hybrid"])
+    saved_raw = load_raw_result(settings, doc_id=document.doc_id, job_id=job_id,
+        ordinal=ordinal, batch_id=job.batch_id, data_id=job.data_id, file_hash=raw_hash)
+    result = ({"state": "done", "trace_id": getattr(job, "trace_id", None)} if saved_raw is not None else
+              provider.query(job.batch_id, job.data_id))
     job.state, job.trace_id = result["state"], result["trace_id"]
     log_event(
         "mineru.remote_state",
@@ -539,7 +555,7 @@ def check_step(
         adapter_identity = key_for(piece_recipe(job, part))
     else:
         adapter_identity = job.file_hash + ":" + job.options_hash
-    archive, raw_result = obtain_raw_result(provider, result.get("full_zip_url"), settings,
+    archive, raw_result = saved_raw if saved_raw is not None else obtain_raw_result(provider, result.get("full_zip_url"), settings,
         doc_id=document.doc_id, job_id=job_id, ordinal=ordinal, batch_id=job.batch_id,
         data_id=job.data_id, file_hash=source.file_hash)
     if "_pdf_split" in job.parse_options:
@@ -702,6 +718,14 @@ def record_error(
                 ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
             job.parse_options = job.parse_options | {"_hybrid_result": ledger}
     job.error_code, job.error_message = error.code, str(error)
+    diagnostic = safe_merge_diagnostic(getattr(error, "diagnostic", None))
+    if diagnostic:
+        # 外层业务事务已回滚；在原有独立失败事务里保存子原因，不把异常正文写入JSONB。
+        job.parse_options = job.parse_options | {"_adapter_failure": {
+            "error_code": error.code, "diagnostic": diagnostic,
+            "job_id": str(job.job_id), "batch_id": job.batch_id, "data_id": job.data_id}}
+    else:
+        job.parse_options = {k: v for k, v in job.parse_options.items() if k != "_adapter_failure"}
     from app.services.mineru.pdf_split_jobs import sync_current
     try:
         sync_current(document, job, settings, error_code=error.code)

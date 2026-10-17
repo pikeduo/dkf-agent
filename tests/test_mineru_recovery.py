@@ -65,6 +65,7 @@ def context(monkeypatch):
     session = SessionStub(job)
     monkeypatch.setattr(jobs, "lock_job", lambda *args: (document, job) if job.is_active else None)
     monkeypatch.setattr(jobs, "restore_cached_result", lambda *args: None)
+    monkeypatch.setattr(jobs, "load_raw_result", lambda *args, **kwargs: None)
     monkeypatch.setattr(management, "active_job", lambda *args: job if job.is_active else None)
     return settings, document, job, session
 

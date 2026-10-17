@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import hashlib
+import re
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -28,6 +29,16 @@ TRANSITIONS = {
 
 class DocumentSourceError(Exception):
     """原件缺失或为空等不可通过自动重试修复的业务错误。"""
+
+
+def router_failure_codes(message: object) -> list[str]:
+    """只提取已有安全Router前缀中的注册原因，不返回错误正文或任意异常字符串。"""
+    from app.parsers.routing.contracts import REASON_CODES
+    if not isinstance(message, str) or len(message) > 4096:
+        return []
+    matched = re.match(r"^ROUTER_FAILED\[([A-Z_,]+)\]：", message)
+    codes = matched[1].split(",") if matched else []
+    return codes if codes and len(codes) == len(set(codes)) and all(c in REASON_CODES for c in codes) else []
 
 
 def transition_document(

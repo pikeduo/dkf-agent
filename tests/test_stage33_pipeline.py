@@ -230,6 +230,22 @@ def test_reports_register_all_4087_without_execution_or_fake_metrics(tmp_path):
     assert sum(1 for _ in (tmp_path / "qa_execution.jsonl").open(encoding="utf-8")) == 4087
 
 
+def test_report_preserves_adapter_subreason_without_changing_full_scope(tmp_path):
+    """全量报告包含固定子原因且保留全部200文件/4087题，不因失败删除评测输入。"""
+    data = inputs()
+    data["questions"] = [question("ohr" if i < 3588 else "ocb") | {"qa_id": f"mock-{i}"}
+                         for i in range(4087)]
+    doc = data["documents"][0]
+    detail = {"reason": "TABLE_BODY", "stage": "adapter.restore_merged_tables", "page_idx": 2, "item_index": 9}
+    common.write_json(tmp_path / "import_checkpoint.json", {doc["file_id"]: {
+        "execution_status": "FAILED", "error_code": "MERGE_EVIDENCE", "adapter_diagnostic": detail}})
+    result = reports.generate(data, tmp_path)
+    rows = common.read_json(tmp_path / "import_report.json")["documents"]
+    assert len(rows) == result["fixed_document_count"] == 200
+    assert result["fixed_qa_count"] == 4087 and rows[0]["adapter_diagnostic"] == detail
+    assert "adapter_diagnostic" in (tmp_path / "import_report.csv").read_text(encoding="utf-8").splitlines()[0]
+
+
 def test_formal_cli_has_no_first_n_or_sample_switch():
     """范围不能被count/limit参数缩小，max-inflight只是资源控制。"""
     parser = cli.build_parser()

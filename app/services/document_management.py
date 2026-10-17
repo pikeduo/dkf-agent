@@ -84,7 +84,8 @@ def safe_cause_code(code):
     """根因仅接受既有服务白名单，不把任意异常字符串加入日志或API。"""
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.indexing import ERRORS as index_errors
-    return code if isinstance(code, str) and code in (CHUNK_CODES | embedding_errors.keys() | index_errors.keys()) else None
+    from app.parsers.routing.contracts import REASON_CODES
+    return code if isinstance(code, str) and code in (CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES) else None
 
 
 def exception_cause(exc):
@@ -103,7 +104,7 @@ def active_job(session, document):
 
 
 def retry_cloud_job(session, document, settings):
-    """显式Retry恢复原超时 Batch 或分片传输故障；保留成功片，不新建收费身份。"""
+    """显式Retry续看原Batch；Adapter拒绝仅在原ZIP完整可核对时本地重放，不新建Job。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
@@ -115,13 +116,38 @@ def retry_cloud_job(session, document, settings):
             DocumentParseJob.state == "failed", DocumentParseJob.is_active.is_(False),
             # 普通任务仍只接受 JOB_TIMEOUT；分片传输错误在下方按白名单严格核对。
             or_(DocumentParseJob.error_code == "JOB_TIMEOUT",
+                DocumentParseJob.error_code == "MERGE_EVIDENCE",
                 DocumentParseJob.parse_options.has_key("_pdf_split")),
             ).with_for_update())
         if not isinstance(job, DocumentParseJob):
             return None
         try:
             split_resume = resumable_split(document, job)
-            permitted = job.error_code == "JOB_TIMEOUT" or split_resume
+            local_replay = False
+            if job.error_code == "MERGE_EVIDENCE":
+                from app.services.mineru.jobs import check_normalizer_recipe, local_file
+                from app.services.mineru.provider import validate_local_file
+                from app.services.mineru.raw_results import load_raw_result
+                if (job.task_id != document.processing_task_id or job.file_hash != document.file_hash
+                        or job.provider != "mineru_cloud" or not job.batch_id
+                        or not job.upload_complete or not job.submission_attempted
+                        or not isinstance(job.parse_options.get("_cache_recipe"), dict)):
+                    raise MinerUError("RAW_RESULT_IDENTITY", "原付费结果或冻结身份不完整，未恢复")
+                check_normalizer_recipe(job)
+                source = local_file(document, job, settings)
+                validate_local_file(source)
+                ordinal = 1
+                if "_pdf_split" in job.parse_options:
+                    from app.services.mineru.pdf_split import checked_manifest
+                    from app.services.mineru.pdf_split_jobs import current_part
+                    part = current_part(checked_manifest(document, job))
+                    if part is None:
+                        raise MinerUError("PDF_SPLIT_CHECKPOINT", "缺少当前分片，未恢复")
+                    ordinal = part.ordinal
+                local_replay = load_raw_result(settings, doc_id=document.doc_id, job_id=job.job_id,
+                    ordinal=ordinal, batch_id=job.batch_id, data_id=job.data_id,
+                    file_hash=source.file_hash) is not None
+            permitted = job.error_code == "JOB_TIMEOUT" or split_resume or local_replay
         except MinerUError:
             raise ManagementError("MANAGEMENT_CHECKPOINT") from None
         if (job.doc_id != document.doc_id or job.task_id != document.processing_task_id
@@ -397,13 +423,17 @@ def dispatch_action(session, doc_id: UUID, action: dict) -> bool:
 
 
 def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None) -> None:
-    """独立事务记录编排失败，不回退已READY文档、不覆盖新管理或解析代次。"""
+    """独立记录编排失败并保留已验证的底层Router原因，不改原文档错误或新代次。"""
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update(nowait=True))
     if document is None or document.management_task_id != task_id:
         return
     config = config_for(document)
     if config["state"] != "running":
         return
+    if code == "MANAGEMENT_STAGE_FAILED" and cause_code is None:
+        from app.services.document_processing import router_failure_codes
+        causes = router_failure_codes(document.error_message)
+        cause_code = causes[0] if causes else None
     config.update(state="failed", error_code=ManagementError(code).code, cause_code=safe_cause_code(cause_code))
     document.management_config = config
     if config["operation"] == "delete":

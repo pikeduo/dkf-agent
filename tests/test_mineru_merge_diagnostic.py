@@ -17,6 +17,31 @@ from mineru_samples import result_zip
 from test_mineru_merge import merged_case
 
 
+def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context, monkeypatch):
+    """普通Whole无需分片账本；严格沿用冻结身份/原归档，成功也只生成诊断摘要。"""
+    document, job, settings, _ = context
+    from app.services.mineru import jobs, raw_results
+    from app.parsers.routing.contracts import RouteDecision, StructuralSignals
+    from app.parsers.routing import guard
+    options = jobs.parse_options(settings)
+    job.parse_options = options | {"_cache_recipe": recipe(document, settings, "mineru_whole"),
+        "_cache_guard": RouteDecision(parse_mode="mineru", file_type="pdf", route_strategy="mineru_whole",
+            reason_codes=("EXPLICIT_MINERU",), signals=StructuralSignals(page_count=2)).model_dump(mode="json")}
+    job.options_hash = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
+    job.submission_attempted = True
+    values, layout, _ = merged_case()
+    archive = result_zip(values, layout=layout)
+    monkeypatch.setattr(raw_results, "load_raw_result", lambda *args, **kw: (archive, {
+        "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive)}))
+    monkeypatch.setattr(guard, "guard_result", lambda *args: None)
+    snapshot = deepcopy(vars(job)), deepcopy(vars(document))
+    report = tool.inspect_job(document, job, settings, job.batch_id, None)
+    assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED"
+    assert report["block_count"] == 2 and report["completeness_guard"] == "PASS"
+    assert report["zip_batch_provenance"] == "validated_local_receipt"
+    assert (vars(job), vars(document)) == snapshot
+
+
 @pytest.fixture
 def context(tmp_path, monkeypatch):
     """构造有Hash的字节哨兵与真实字段账本，geometry/Guard仅由Stub替代且不声称原件通过。"""

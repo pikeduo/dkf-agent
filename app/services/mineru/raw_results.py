@@ -52,9 +52,8 @@ def result_paths(cache, doc_id, job_id, ordinal, batch_id):
     return path, path.with_suffix(".json")
 
 
-def obtain_raw_result(provider, url, settings, *, doc_id, job_id, ordinal, batch_id, data_id,
-                      file_hash):
-    """同 Batch 复用经校验的 ZIP；先保存精确字节及来源摘要，绝不覆盖冲突原件或重发 POST。"""
+def load_raw_result(settings, *, doc_id, job_id, ordinal, batch_id, data_id, file_hash):
+    """只读核对同批次原始ZIP/回执；缺失返回None，单边/损坏/身份不符明确拒绝。"""
     cache, limit = ParseCache(settings), settings.mineru_result_max_mb * 1024**2
     identity = {"doc_id": str(doc_id), "job_id": str(job_id), "ordinal": ordinal,
                 "batch_id": safe_identifier(batch_id), "data_id": safe_identifier(data_id),
@@ -76,6 +75,25 @@ def obtain_raw_result(provider, url, settings, *, doc_id, job_id, ordinal, batch
                 log_event("mineru.raw_result_reused", doc_id=doc_id, job_id=job_id,
                           batch_id=batch_id, file_index=ordinal, size_bytes=len(archive))
                 return archive, record
+        return None
+    except MinerUError:
+        raise
+    except (CacheError, OSError, ValueError, TypeError, AttributeError):
+        raise MinerUError("RAW_RESULT_IO", "MinerU 原始结果无法安全读取，未下载或覆盖") from None
+
+
+def obtain_raw_result(provider, url, settings, *, doc_id, job_id, ordinal, batch_id, data_id,
+                      file_hash):
+    """同Batch优先读取已校验归档；首次下载后保全原字节，不发布成功缓存。"""
+    cache, limit = ParseCache(settings), settings.mineru_result_max_mb * 1024**2
+    identity = {"doc_id": str(doc_id), "job_id": str(job_id), "ordinal": ordinal,
+                "batch_id": safe_identifier(batch_id), "data_id": safe_identifier(data_id),
+                "source_file_hash": file_hash}
+    try:
+        saved = load_raw_result(settings, doc_id=doc_id, job_id=job_id, ordinal=ordinal,
+            batch_id=batch_id, data_id=data_id, file_hash=file_hash)
+        if saved is not None:
+            return saved
         # 网络不占用文件锁；发布时再次检查，避免并发覆盖。
         archive = provider.download_result(url)
         log_event("mineru.result_downloaded", doc_id=doc_id, job_id=job_id,

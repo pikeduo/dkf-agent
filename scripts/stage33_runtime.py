@@ -34,6 +34,8 @@ def read_snapshot(kb_id, *, detailed=True):
     from app.db.session import get_engine
     from app.models import Document, DocumentBlock, DocumentChunk, DocumentParseJob, KnowledgeBase
     from app.services.document_management import public_management
+    from app.services.document_processing import router_failure_codes
+    from app.services.mineru.adapter import safe_merge_diagnostic
     from scripts.smoke_stage16_17 import safe_job_code
 
     kb_id = UUID(str(kb_id))
@@ -65,8 +67,11 @@ def read_snapshot(kb_id, *, detailed=True):
                 parts = options.get("_pdf_split", {}).get("parts")
                 units = parts if parts else [{"batch_id": job.batch_id, "data_id": job.data_id,
                     "submission_attempted": job.submission_attempted}]
+                failure = options.get("_adapter_failure")
+                failure = failure if isinstance(failure, dict) and job.error_code == "MERGE_EVIDENCE" else {}
                 summary = {"job_id": str(job.job_id), "task_id": str(job.task_id), "state": job.state,
                     "error_code": safe_job_code(job.error_code),
+                    "adapter_diagnostic": safe_merge_diagnostic(failure.get("diagnostic")),
                     "route": (options.get("_route_decision") or options.get("_cache_guard") or {}).get("route_strategy"),
                     "units": [{"ordinal": p.get("ordinal"), "page_start": p.get("page_start"),
                         "page_end": p.get("page_end"), "batch_id": p.get("batch_id"),
@@ -84,13 +89,17 @@ def read_snapshot(kb_id, *, detailed=True):
                 management = public_management(doc)
                 current = [j for j in by_doc.get(doc.doc_id, []) if j["task_id"] == str(doc.processing_task_id)]
                 error = next((j["error_code"] for j in current if j["error_code"]), None)
+                parser_causes = router_failure_codes(doc.error_message)
                 route, present = cache_route(doc) if detailed else (None, None)
                 result[doc.file_hash] = {"doc_id": str(doc.doc_id), "kb_id": str(doc.kb_id),
                     "file_hash": doc.file_hash, "file_type": doc.file_type, "file_name": doc.file_name,
                     "status": doc.status, "block_count": block_counts.get(doc.doc_id, 0),
                     "chunk_count": chunks, "vector_count": vectors, "invalid_vector_count": bad,
                     "management": management.model_dump(mode="json") if management else None,
-                    "error_code": error or (management.cause_code or management.error_code if management else None),
+                    "error_code": error or (parser_causes[0] if parser_causes else None)
+                        or (management.cause_code or management.error_code if management else None),
+                    "parser_reason_codes": parser_causes,
+                    "adapter_diagnostic": next((j["adapter_diagnostic"] for j in current if j["adapter_diagnostic"]), {}),
                     "parse_jobs": by_doc.get(doc.doc_id, []),
                     "route_strategy": route or next((j["route"] for j in current if j["route"]), None),
                     "parse_cache_present": present,

@@ -45,7 +45,13 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
 #### MERGE_EVIDENCE只读诊断与原Batch复用
 
-调用链是`jobs.check_step → download_result(内存) → normalize → 文本/表格恢复 → complete_piece → 片缓存`。因此**Adapter失败前下载的ZIP不会由这条链路落盘**，不能因result_downloaded日志而假定已有缓存。文本仍不拼未知多Span或猜跨页；新表格逻辑必须证明完整来源，不能跳空项或按y重排。Normalizer v3不自动复活旧失败Job或覆盖旧缓存。
+当前调用链是`jobs.check_step → obtain_raw_result → 独立原ZIP/回执 → normalize → 文本/表格恢复 → complete_piece → 成功缓存`。Adapter失败或SQL回滚不删除独立归档；`parse_cache_present=false`只表示没有成功缓存，不代表原ZIP丢失。原件位于`PARSED_DIR/{doc_id}/mineru_raw/{job_id}/part-{序号}-{batch_id}.zip`及同名JSON，核对Batch/Data/Hash/字节数和全部成员CRC后才能重放。历史旧Worker可能未保存原ZIP，不能仅凭下载日志假定归档存在。
+
+普通`/retry`只对当前同Hash、已上传、Normalizer一致且归档有效的`MERGE_EVIDENCE`恢复同一Job；检查步骤优先消费原ZIP，不GET/PUT/POST本片。原ZIP缺失/损坏仍拒绝，不自动Force；分片后续从未提交的片仍走原云流程，用户须确认费用。未知POST、远端failed、坏结果不因本次兼容扩大恢复范围。重放仍须通过原Adapter/Guard/全片事务，失败不写半份Block。旧v2不自动升级。
+
+本轮仅扩大此前拒绝的表格结构，Normalizer保持v3，既有成功结构仍输出相同V1原字符：layout单元格`<eq>x</eq>`只在来源比较时对应V1的` $x$ `，完整网格/单元格仍须等价；删除附注允许多条空字符串占位，非空未知文字仍拒绝；合并链预算为200页/512个已验证边界，HTML/网格/总字节预算不变。缺行、乱序、丢失caption/footnote仍失败，不从layout补字。文本仍不拼未知多Span、不跨越未知结构猜目标。
+
+新失败的固定子码/源码阶段/局部0-based页/原数组1-based位置保存在私有`parse_options._adapter_failure`，外部错误码仍为MERGE_EVIDENCE；阶段33报告附脱敏诊断。普通Whole也可使用本节只读诊断CLI，无需分片账本，默认自动读取同Batch归档；不接受Whole的版本/覆盖升级开关。
 
 | 内部子码示例 | 拒绝条件 |
 |---|---|
@@ -84,7 +90,7 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 3. 新显式恢复入口须固定doc/job/代次/片号/Batch/Data ID/原Hash/片Hash/ZIP Hash/解析参数及版本；默认dry-run，事务行锁下重核对，过期代次/来源不一致拒绝。仅Adapter+局部Guard成功后复用原片缓存发布和检查点，不跳过Parse Job或伪造READY。
 4. 恢复与投递下一片必须分开授权：本次第二片尚无Batch，现有`complete_piece → advance_piece`会返回`submit`；不得直接调用它并自动投递。恢复原第一片**不应再次收费**，但第二片首次提交仍可能收费，需用户另行确认。只有全部片成功才原事务整体入Block并继续Chunk/Embedding/Index。
 
-MERGE终态不属于已有JOB_TIMEOUT/传输错误Retry白名单，当前不建议`/retry`、`/process`或Force。先保留失败状态与账本，提供ZIP，禁止删除Job/缓存或盲目新增批次。
+MERGE终态默认仍保留失败；先用只读诊断核对原ZIP并修复原因，通过后才显式`/retry`同一Job。未保存ZIP、版本/身份不符时继续拒绝，不用`/process`或Force绕过，不删除旧Job/缓存或新增批次。
 
 此前诊断回归140 passed、日志相关44 passed，历史三份ZIP转换通过；只读身份报告`results/mineru_merge_dceb1360_verified_03.json`保留不改写。本次取得`data/dataset/mineru_debug/part-0001_f3234a37-7cf3-4a47-8e9e-edc408d22fe1.zip`后，确认TARGET_TEXT是把夹在目标与占位之间的header当成目标。修复后真实`restore_merged_text`恢复1处，仅原0-based索引864/866变化，865页眉和其余2290项不变；两段124+229字符无损还原原353字符，重复恢复一致。
 

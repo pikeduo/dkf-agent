@@ -1,6 +1,68 @@
 # 阶段33：固定200文档与4087条QA的全量检索评测
 
-代码已实现，**未执行pytest、真实上传、数据库导入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
+代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
+
+## 失败定位与原知识库恢复
+
+先停止导入CLI继续调度（Ctrl+C不撤销已在Worker执行的任务），保留run/知识库/原ZIP。用户更新代码后按README重启API/CPU Worker；不清Redis/缓存、不删除FAILED文档、不Force。先执行纯Mock：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_stage33_regressions.py tests/test_mineru_table_merge.py tests/test_mineru_merge.py tests/test_mineru_merge_boundaries.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_recovery.py tests/test_mineru_pdf_split_jobs.py tests/test_document_management.py tests/test_stage33_pipeline.py tests/test_business_logging.py -q -ra
+```
+
+对每份已有原ZIP做只读离线验证。Whole支持从归档回执自动定位；此命令仅GET数据库只读快照、本地转换/Guard和写新报告，不恢复任务、不调用MinerU：
+
+```powershell
+python scripts/mineru_merge_diagnostic.py --job-id 46929a5f-b866-4c90-9ea6-8df70d0e4289 --batch-id 59d163c7-815f-46aa-83a3-7f527e23a98b --output results/stage33_adapter_check_01.json
+Get-Content -Encoding UTF8 results/stage33_adapter_check_01.json
+```
+
+报告已存在则换新文件名，绝不覆盖。批量诊断当前检查点的合并失败（保留所有200条输入）：
+
+```powershell
+$audit = "results/stage33_adapter_check_$(Get-Date -Format yyyyMMdd_HHmmss)"
+$checkpoint = Get-Content -Encoding UTF8 results/stage33/stage33_run_01/import_checkpoint.json -Raw | ConvertFrom-Json
+foreach ($item in $checkpoint.PSObject.Properties.Value) {
+    if ($item.error_code -ne "MERGE_EVIDENCE") { continue }
+    foreach ($job in $item.parse_jobs | Where-Object error_code -eq "MERGE_EVIDENCE") {
+        $unit = $job.units | Where-Object batch_id | Select-Object -Last 1
+        if (-not $unit) { Write-Warning "缺少原Batch：$($item.doc_id)"; continue }
+        $zip = @(Get-ChildItem "data/parsed/$($item.doc_id)/mineru_raw/$($job.job_id)" -File -Filter "part-*-$($unit.batch_id).zip" -ErrorAction SilentlyContinue)
+        if ($zip.Count -ne 1) { Write-Warning "缺少唯一原ZIP：$($item.doc_id)"; continue }
+        python scripts/mineru_merge_diagnostic.py --job-id $job.job_id --batch-id $unit.batch_id --zip $zip[0].FullName --output "$audit/$($item.doc_id).json"
+    }
+}
+```
+
+PARSED_DIR非默认data/parsed时，按配置替换查找根；不复制/改名归档。预期只有`ADAPTER_PASS_NOT_RECOVERED`且Guard=PASS才能考虑恢复；FAIL/BLOCKED仍保留原失败。新拒绝按`_adapter_failure`记录固定子码/源码阶段/局部0-based页/数组1-based位置，stage33 JSON/CSV增加adapter_diagnostic及parser_reason_codes。旧Job没有细诊断时读旧日志或运行上述只读命令，不批量改数据库。
+
+`MANAGEMENT_STAGE_FAILED`原始原因需读Document及Worker日志，不能当作根因。已核对的da426abd-541e-45c0-a2b2-7cba49bc9d1a在创建云Job前被PREFLIGHT_LIMIT拒绝；旧日志未保留具体页/预算种类。用户可重新只读预检冻结原件以取得新诊断，不上传：
+
+```powershell
+$item = $checkpoint.PSObject.Properties.Value | Where-Object doc_id -eq "da426abd-541e-45c0-a2b2-7cba49bc9d1a"
+python -c "import sys; from pathlib import Path; from app.core.config import get_settings; from app.core.business_logging import configure_logging; from app.parsers.routing.inspector import inspect_pdf; s=get_settings(); configure_logging(s,role='mineru-diagnostic-cli'); r=inspect_pdf(Path(sys.argv[1]),s); print('risks=',r.risks,'uncertain=',r.uncertain)" $item.file_path
+```
+
+新事件router.preflight_rejected只记PDF_PAGE_LIMIT/PDF_LINE_LIMIT/PDF_OBJECT_LIMIT及页/计数。不要为了这份文件直接提高预算或删掉绘图检查。
+
+先由用户检查全部离线报告，**当前仍有非相邻目标、混合Span、缺失附注/行等未解决结构，不能直接认为所有失败已修复**。仅对诊断通过的同BatchJob显式Retry，例如替换为报告中的doc_id：
+
+```powershell
+$docId = "填写离线报告通过的doc_id"
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/admin/documents/$docId/retry"
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/admin/documents/$docId/status"
+```
+
+原云片归档有效时只本地重放；**分片后续尚未提交的片及未上传的新文档仍可能收费**。不因ZIP/Adapter通过直接置READY。缺归档不自动重新POST；原Batch云下载若需要联网，另行确认权限，不能用Force代替。
+
+修复剩余阻塞、确认全部潜在费用后，沿用原run/原知识库恢复全范围调度（READY只读取接管，不重导入/重建）：
+
+```powershell
+python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --execute --resume --allow-cloud --max-inflight 2 --timeout 604800 --poll-interval 10
+```
+
+上式不自动重试FAILED；通过的失败项已用单文档Retry恢复后由原checkpoint接管。`--retry-failed`只在用户审核所有失败原因/费用后另加；已有retry_intent的未知提交不能靠删除检查点重试。全部200份READY后才运行下述4087题四策略评测，不把部分成功作为全量完成。
 
 ## 复用与输入校验
 

@@ -43,7 +43,9 @@ def generate(data, run, *, fatal_code=None):
         documents.append(row)
         if row["execution_status"] != "READY":
             failures.append({"kind": "document", "dataset": doc["dataset"], "identity": doc["file_id"],
-                "status": row["execution_status"], "error_code": row.get("error_code")})
+                "status": row["execution_status"], "error_code": row.get("error_code"),
+                "adapter_diagnostic": row.get("adapter_diagnostic", {}),
+                "parser_reason_codes": row.get("parser_reason_codes", [])})
     validity = read_json(run / "evaluation_validity.json") if (run / "evaluation_validity.json").exists() else {}
     config = read_json(run / "evaluation_identity.json") if (run / "evaluation_identity.json").exists() else None
     executions, hits_buffer = [], TemporaryFile(dir=run)
@@ -119,7 +121,7 @@ def generate(data, run, *, fatal_code=None):
         report["metrics_status"] = "VALID_EXECUTION_RECORDS"
     write_json(run / "import_report.json", {"documents": documents})
     write_csv(run / "import_report.csv", documents, ["dataset", "file_id", "file_path", "file_type", "sha256",
-        "doc_id", "execution_status", "status", "error_code", "route_strategy", "block_count", "chunk_count", "vector_count",
+        "doc_id", "execution_status", "status", "error_code", "adapter_diagnostic", "parser_reason_codes", "route_strategy", "block_count", "chunk_count", "vector_count",
         "invalid_vector_count", "management", "parse_jobs", "index_identity"])
     atomic_write(run / "qa_execution.jsonl", b"".join(encoded(r) + b"\n" for r in executions))
     write_csv(run / "qa_execution.csv", metric_rows, ["dataset", "qa_id", "strategy", "source_file_ids", "doc_ids", "status",
@@ -130,7 +132,7 @@ def generate(data, run, *, fatal_code=None):
     hits_buffer.close()
     hit_csv.close()
     write_json(run / "failures_and_unscorable.json", failures)
-    write_csv(run / "failures_and_unscorable.csv", failures, ["kind", "dataset", "identity", "strategy", "status", "error_code"])
+    write_csv(run / "failures_and_unscorable.csv", failures, ["kind", "dataset", "identity", "strategy", "status", "error_code", "adapter_diagnostic", "parser_reason_codes"])
     write_json(run / "metrics.json", metrics)
     for name in ("ohr", "ocb", "overall"):
         write_json(run / f"metrics_{name}.json", metrics[name])

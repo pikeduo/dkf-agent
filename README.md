@@ -467,6 +467,8 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 新文档级`POST /reindex`保留原件，复用成功Parse Cache后自动重建Chunk→Embedding→Index→READY，无MinerU请求；`POST /retry`恢复已有失败阶段/同一活动云批次。`POST /reparse?force=true`才允许绕过缓存，可能再次外传/收费。202只表示已接收，用详情/status及management_task_id查询，不盲目重复收费请求。旧知识库嵌套接口保留逐阶段兼容语义。
 
+`MERGE_EVIDENCE`属于本地来源校验失败，不等于云端失败。修复原因后，普通`/retry`仅在当前Job/Batch、原件Hash、冻结版本及已归档原ZIP均有效时恢复同一Job，本片不再请求云端；归档缺失/损坏则拒绝恢复。PDF后续尚未提交的分片仍可能产生新费用，先核对全部分片预算。诊断命令见[阶段33故障排查](docs/STAGE33_EVALUATION.md#失败定位与原知识库恢复)。
+
 `DELETE`返回202，先令文档退出检索，CPU再清理自有上传副本、Block/Chunk/向量、文档解析/Hybrid/GPU目录和Job指针；活动任务409。无其他文档引用的整份缓存会清理，跨文档共享及无法确认独占的视觉缓存保留，不删除正式preset、模型、日志或全局索引。清理失败保留删除检查点供Retry，成功后详情404；文件/数据库非原子，删除前备份并仅用可丢弃文档验证。此接口无鉴权，仅可信内网使用。
 
 具体响应、恢复边界和增量入库人工验收见[文档管理与增量入库](docs/DOCUMENT_MANAGEMENT.md)。缓存固定锁运行中不可删除；历史文档不自动补处理，预置导入CLI及旧逐阶段维护接口保留原流程。新上传只推进自身文档，Dense读取当前READY数据、BM25刷新可重建快照，不修改其他文档或重建全库向量。

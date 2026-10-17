@@ -28,6 +28,19 @@ class SessionStub:
         self.flushes += 1
 
 
+def test_stage_failed_keeps_underlying_router_reason(context):
+    """编排失败保留底层注册原因；不改写原始文档错误或将其当成功。"""
+    document, session, settings = context
+    tool.prepare_management(session, document, settings, "reindex")
+    task_id = document.management_task_id
+    document.status = "FAILED"
+    document.error_message = "ROUTER_FAILED[PREFLIGHT_LIMIT]：原始安全说明"
+    tool.mark_failed(session, document.doc_id, task_id, "MANAGEMENT_STAGE_FAILED")
+    assert document.management_config["error_code"] == "MANAGEMENT_STAGE_FAILED"
+    assert document.management_config["cause_code"] == "PREFLIGHT_LIMIT"
+    assert document.error_message == "ROUTER_FAILED[PREFLIGHT_LIMIT]：原始安全说明"
+
+
 @pytest.fixture
 def context(monkeypatch, tmp_path):
     """提供未加载模型的独立配置和完整空检查点，并禁止实际云活动查询。"""

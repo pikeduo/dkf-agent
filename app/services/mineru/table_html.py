@@ -7,7 +7,7 @@ from app.services.mineru.adapter import merge_evidence_error
 
 
 class TableHTML(HTMLParser):
-    """仅接受table/(单一tbody)/tr/td/th/br；复杂未知语义宁可拒绝。"""
+    """仅接受表格网格及已验证的br/eq序列化；不推断或计算公式。"""
 
     def __init__(self, text: str):
         """有界解析原HTML并记录每行原字符区间、单元格内容与跨度。"""
@@ -59,6 +59,9 @@ class TableHTML(HTMLParser):
             self.cell["parts"].append(" ")
             self.cell["breaks"] += 1
             return
+        elif tag == "eq" and self.cell is not None and self.stack[-1] in {"td", "th"} and not attrs:
+            # layout 的 <eq>x</eq> 在 V1 中为 ` $x$ `；仅作为来源比较，不输出layout文字。
+            self.cell["parts"].append(" $")
         else:
             raise merge_evidence_error("TABLE_HTML")
         self.stack.append(tag)
@@ -74,7 +77,9 @@ class TableHTML(HTMLParser):
         if not self.stack or self.stack[-1] != tag:
             raise merge_evidence_error("TABLE_HTML")
         self.stack.pop()
-        if tag in {"td", "th"}:
+        if tag == "eq":
+            self.cell["parts"].append("$ ")
+        elif tag in {"td", "th"}:
             self.cell["text"] = " ".join(unescape("".join(self.cell.pop("parts"))).split())
             self.rows[-1]["cells"].append(self.cell)
             self.cell = None

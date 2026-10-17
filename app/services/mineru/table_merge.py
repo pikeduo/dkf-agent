@@ -119,7 +119,9 @@ def restore_extras(group, evidence):
         if (not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values)
                 or len(values) != len(source) or len(moved) != len(source)):
             raise merge_evidence_error("TABLE_EXTRAS")
-        if any(value.get(kind, []) not in ([], [""]) for value in group[1:]):
+        # V1为每条已删除附注保留一个空串；多个空串不是正文，也不能忽略非空附注。
+        if any(not isinstance(value.get(kind, []), list)
+               or any(part != "" for part in value.get(kind, [])) for value in group[1:]):
             raise merge_evidence_error("TABLE_EXTRAS")
         claimed = set()
         for value, actual in zip(values, moved):
@@ -172,7 +174,8 @@ def verify_images(group, originals, target, members):
 def restore_merged_tables(items, pages, *, archive_members=None):
     """恢复连续物理页的已证实合并表格；只以V1原行/附属文本构造非连续原项。
 
-    每组最多16页/64个已验证边界。所有组先在内存完成核对，异常不返回部分结果。
+    每组最多200页/512个已验证边界；仍受HTML/网格/总字节预算约束。
+    所有组先在内存完成核对，异常不返回部分结果。
     不处理跨分片的远端表格，也不把真正空表格或缺来源当成成功。
     """
     restored, summaries, consumed = list(items), [], set()
@@ -205,7 +208,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
             while start >= 0 and items[start].get("type") in MERGE_BOUNDARY_TYPES:
                 gaps.append(start)
                 start -= 1
-                if len(gaps) > 64:
+                if len(gaps) > 512:
                     raise merge_evidence_error("TABLE_LIMIT")
             if start < 0 or items[start].get("type") != "table" or not items[start].get("table_body"):
                 raise merge_evidence_error("TABLE_BODY")
@@ -219,7 +222,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
                     break
                 indices.append(boundary)
                 gaps.extend(range(cursor, boundary))
-                if len(indices) > 16 or len(gaps) > 64:
+                if len(indices) > 200 or len(gaps) > 512:
                     raise merge_evidence_error("TABLE_LIMIT")
                 cursor = boundary + 1
             group = [items[i] for i in indices]
@@ -244,12 +247,13 @@ def restore_merged_tables(items, pages, *, archive_members=None):
                 b = next(b for b in children(before) if b["type"] == "table_body")
                 if any(abs(x - y) > 2 for x, y in zip(layout_bbox(a, size), layout_bbox(b, size))):
                     raise merge_evidence_error("TABLE_MATCH")
-            if target["html"] != group[0]["table_body"]:
-                raise merge_evidence_error("TABLE_BODY")
             verify_images(group, originals, target, archive_members)
             if sum(len(span["html"]) for span in [target, *originals]) > 8 * 1024**2:
                 raise merge_evidence_error("TABLE_LIMIT")
             merged = TableHTML(group[0]["table_body"])
+            # 先证明V1与para整个表格的网格/单元格/公式一致，再切V1原字符行。
+            # 不再要求两种官方序列化的HTML逐字相同；未知标签或文字差异仍失败。
+            verify_projection(TableHTML(target["html"]), merged)
             sources = [TableHTML(span["html"]) for span in originals]
             if sum(len(value.rows) for value in sources) != len(merged.rows):
                 raise merge_evidence_error("TABLE_ROWS")
