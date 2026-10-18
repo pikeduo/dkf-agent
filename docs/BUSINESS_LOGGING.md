@@ -15,6 +15,7 @@
 | role | 显示名称 |
 |---|---|
 | api | API |
+| contest-api | 竞赛问数 API |
 | worker | Worker |
 | dense-cli | Dense CLI |
 | bm25-cli | BM25 CLI |
@@ -34,6 +35,8 @@
 | unknown / 未注册角色 | 未知进程 |
 
 API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角色；预置导入使用preset-cli；联合冒烟的检索步骤使用retrieval-acceptance。角色变化只改固定前缀中的显示名称，白名单摘要、脱敏、真实PID、每日合并、上下文和异常降级不变。更新代码后用户重启相应进程，旧日志不改写。
+
+竞赛服务使用`contest-api`及独立`CONTEST_LOG_*`，目录须与知识服务相同，复用现有每日文件/锁。`contest.step`只记录request_id、agent_run_id、UUID trace_id、固定步骤/状态/错误码、实测耗时和模型请求尝试数；`contest.http`只记录请求ID、路由模板与HTTP状态。trace_id仅接受UUID，既有脱敏规则不变。独立HTTP入口生成X-Request-ID并在结束时恢复上下文；SQL、原问题、Prompt、确认值及结果不进入业务日志或内存安全Trace。启动使用`--no-access-log`，避免默认访问日志记录查询串；SQLGlot原文诊断关闭，httpx/httpcore调试不启用。对应隔离用例见`contest_backend/tests/test_api_llm_trace.py`，尚未执行。
 
 所有进程按事件发生时的本机日期写入同一 `knowledge-service-YYYY-MM-DD.log`，跨日切换目标文件，不重命名/覆盖旧文件，重启不会再增加 PID 文件。时间与文件日期使用同一本机时区。HTTP 使用路由模板，不写用户原始路径、查询串、请求头或正文。响应通常含服务生成的 `X-Request-ID`，不信任客户端提供的同名头；框架兜底未处理异常的 500 响应可能没有该头。Celery 投递头携带请求编号，连续的短任务和重试可关联；旧消息和命令行直接提交的任务没有 HTTP 请求编号。进程崩溃、队列确认丢失、磁盘故障等情况下不能保证每个事件都记录，这是排障信息，不是强一致审计或恢复机制。
 

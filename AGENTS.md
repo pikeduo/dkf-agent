@@ -20,13 +20,13 @@
 
 DKF-Agent（数知融问智能体）保留独立的`knowledge-service`；用户已授权在`feat/contest-integration`分支按方案B开展双FastAPI服务+Vue3同源代理竞赛整合。`app/`继续负责原知识库，后续`contest_backend/`负责NL2SQL/Schema Linking/意图与澄清，`frontend/`负责真实API交互；不复制知识库实现、不修改或合并到main。
 
-- 本次仅完成竞赛阶段1：从`9522356`选择性移植必要Office/长表修复，冻结统一请求/响应和四Tool接口；不整体cherry-pick、不引入补丁ZIP/数据/模型。后续实现与验收见[竞赛整合](docs/CONTEST_INTEGRATION.md)和[冻结契约](docs/CONTEST_API_CONTRACT.md)。统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent。阶段结束汇报并停止，测试/部署禁令保持不变。
+- 竞赛阶段2已编写独立问数FastAPI、唯一授权目录、SQL全树/表列/真实外键核验、意图/澄清及安全Trace；公共DTO/Tool协议未变，sqlglot仅声明未安装，隔离测试仅编写未执行。阶段1静态检查完成，Office人工回归与真实GPU Reindex仍待验收。`main/f4b092e`仅只读审阅，旧Office缓存升级/分组恢复不是SQL前置修复，本轮不移植。细节见[竞赛后端](docs/CONTEST_BACKEND.md)。本轮止于阶段2，Vue3待用户确认；统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent，测试/部署禁令保持不变。
 
 - 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.9）；历史计划仅供参考，不重新实现已有阶段。
 
 ### 当前开发进度
 
-当前阶段：**竞赛整合阶段1代码/契约已完成，待人工验收：已选择性移植Office预检兼容、v4长表/Native TSV切片及安全诊断，v1～v3冻结；契约与四Tool协议无运行入口，新增回归未执行。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原验收记录，本轮未查业务数据或重跑恢复。全200/4087未验收，不进入知识阶段34，冻结数据不改。**
+当前阶段：**竞赛阶段2代码已实现，待用户隔离测试与真实PG/模型验收；单进程会话/预算、显式云许可、受限SQL及Trace已接入独立领域API，未启动服务或测试。阶段1人工回归及GPU Reindex仍待验收；Office预检和v4长表/TSV修复保留，v1～v3冻结。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原记录；全200/4087未验收，不进入知识阶段34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -62,7 +62,7 @@ DKF-Agent（数知融问智能体）保留独立的`knowledge-service`；用户�
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
 | 33 | 保留v4.1质量分层及既有验收记录；竞赛分支补Office官方模板/customXml预检兼容、v4 TSV/长表切片和安全终止原因日志，仅写回归，需用户单文档缓存Reindex验证，无新MinerU提交，全200/4087完整验收未完成 |
 | 34 及后续 | 未执行，等待用户确认 |
-| 竞赛整合1 | 必要修复与contest-agent-v1/四Tool契约及设计已编写；未接入第二服务/前端/统一入口，测试未运行，阶段2及后续未开始 |
+| 竞赛阶段1/2 | 阶段1修复/契约静态检查完成，人工回归/GPU待验收；阶段2独立问数后端已编写，测试/真实查询/费用/语义待用户验收，Vue3与统一Agent运行时未实施 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
@@ -311,6 +311,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 |---|---|
 | 路线、阶段验收、最终协议 | [开发计划](docs/DEVELOPMENT_PLAN_CODEX.md) |
 | 双服务竞赛整合、选择性移植与统一Tool边界 | [竞赛整合](docs/CONTEST_INTEGRATION.md)、[冻结契约](docs/CONTEST_API_CONTRACT.md) |
+| 竞赛问数服务、只读SQL/会话/费用与人工验收 | [竞赛后端](docs/CONTEST_BACKEND.md) |
 | Parser、页码/坐标、持久化与回归 | [Parser 契约](docs/PARSER_CONTRACT.md) |
 | 云接口、限流、检查点、顺序与真实验收 | [MinerU Cloud](docs/MINERU_CLOUD.md) |
 | 预检、决策、Guard、XLSX 对照 | [Parser Router](docs/PARSER_ROUTER.md) |

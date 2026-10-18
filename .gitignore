@@ -14,6 +14,8 @@ __pycache__/
 data/uploads/
 data/parsed/
 data/embeddings/
+# 竞赛真实目录及连接配置由用户本地准备；仅提交空目录模板和工程代码。
+/data/contest/
 # 真实预置素材/人工清单不入仓库，仅提交目录占位。
 /data/knowledge_base/preset/*
 !/data/knowledge_base/preset/.gitkeep
@@ -51,6 +53,7 @@ docs/*
 !docs/STAGE33_EVALUATION.md
 !docs/CONTEST_INTEGRATION.md
 !docs/CONTEST_API_CONTRACT.md
+!docs/CONTEST_BACKEND.md
 !docs/FORMULA_SEMANTICS.md
 !docs/KNOWLEDGE_AGENT.md
 !docs/PRESET_IMPORT.md

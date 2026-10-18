@@ -27,6 +27,7 @@ CONTEXT: ContextVar[dict | None] = ContextVar("business_log_context", default=No
 # 独立进程角色与固定显示名称集中维护；未注册/非字符串输入不透传到日志。
 ROLE_LABELS = MappingProxyType({
     "api": "API",
+    "contest-api": "竞赛问数 API",
     "worker": "Worker",
     "dense-cli": "Dense CLI",
     "bm25-cli": "BM25 CLI",
@@ -48,6 +49,7 @@ ROLE_LABELS = MappingProxyType({
 FIELDS = {
     "agent_run_id", "selected_route", "tool_name", "tool_duration_ms", "step_count", "final_status",
     "request_id",
+    "trace_id",
     "task_id",
     "doc_id",
     "chunk_id",
@@ -123,7 +125,7 @@ FIELDS = {
     "visual_cache_hit_count",
     "operation",
 }
-LOCAL_IDS = {"request_id", "task_id", "doc_id", "chunk_id", "block_id", "kb_id", "job_id", "agent_run_id"}
+LOCAL_IDS = {"request_id", "trace_id", "task_id", "doc_id", "chunk_id", "block_id", "kb_id", "job_id", "agent_run_id"}
 # Agent只允许固定路由/工具/终态，不允许任意字符串借新增观测字段进入日志。
 AGENT_LOG_ENUMS = {
     "selected_route": {"knowledge_search", "knowledge_query", "formula_request"},
@@ -137,6 +139,8 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "contest.step": "竞赛问数步骤已完成",
+    "contest.http": "竞赛问数接口已响应",
     "mineru.exception_frame": "MinerU内部异常调用位置（不含异常原文或局部变量）",
     "dataset_evaluation.started": "开始固定全量数据导入或检索评测",
     "dataset_evaluation.finished": "固定全量评测步骤结束，未完成项保留在报告",
@@ -354,6 +358,7 @@ EVENT_LABELS = {
 }
 # 显式固定字段顺序；关联编号保留原名，其他摘要使用中文标签。
 FIELD_LABELS = {
+    "trace_id": "trace_id",
     "agent_run_id": "agent_run_id",
     "selected_route": "selected_route",
     "tool_name": "tool_name",

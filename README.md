@@ -4,7 +4,35 @@
 
 **新上传 → 自动解析 → Chunk → 本地 Embedding → pgvector → READY → 自动参与同库查询。** 每份文档独立增量处理，不重建整个知识库；READY表示所有Chunk向量已入库，不代表内容质量或问答准确。提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
-竞赛整合目前仅完成必要知识库修复与接口契约，`contest_backend`、Vue3及统一Agent HTTP尚未接入；当前仍按下文启动原知识库服务。进度与边界见[竞赛整合说明](docs/CONTEST_INTEGRATION.md)。
+竞赛问数后端`contest_backend`已实现独立FastAPI、Schema Linking、多轮澄清、受限PostgreSQL查询与安全Trace，运行验收待用户执行。原知识库服务继续按下文启动；Vue3、同源代理及统一Agent HTTP尚未接入。边界见[竞赛整合说明](docs/CONTEST_INTEGRATION.md)。
+
+### 独立竞赛问数服务
+
+在项目根目录和已有`dkf-agent`环境中，由用户手动安装已声明的小依赖、配置并启动：
+
+```powershell
+conda activate dkf-agent
+python -m pip install 'sqlglot>=26.33,<27'
+if (-not (Test-Path contest_backend/.env)) { Copy-Item contest_backend/.env.example contest_backend/.env }
+# 先填写专用配置和真实注册表，再单独启动问数服务。
+python -m uvicorn contest_backend.main:app --host 127.0.0.1 --port 8001 --workers 1 --no-access-log
+```
+
+配置仅读取[竞赛环境模板](contest_backend/.env.example)对应的本地`contest_backend/.env`及`CONTEST_`变量。入口令牌`CONTEST_API_TOKEN`为空时业务API关闭；`CONTEST_DATABASE_URLS`为专用只读DSN的JSON映射，禁止使用原知识库可写账号。`CONTEST_REGISTRY_PATH`默认`data/contest/registry.json`，路径相对项目根，填写真实授权Schema/表/列/外键；[空目录模板](contest_backend/registry.example.json)不预置演示数据。模型配置使用独立`CONTEST_LLM_*`，只接受可信HTTPS提供方，不继承知识LLM的Key/Fallback。两服务日志目录指向同一本地`logs`，角色为`contest-api`，仍按天合并。
+
+| 8001路径 | 用途 |
+|---|---|
+| `GET /health` | 仅存活，不核验数据库或模型 |
+| `GET /api/catalog` | 真实授权目录及关系依据 |
+| `POST /api/sessions` | 固定SQL范围并发放会话私钥 |
+| `POST /api/sessions/{session_id}/consents` | 明确接受外传、费用与调用预算后发放有限许可 |
+| `POST /api/query` | 冻结AgentRequest/AgentResponse；仅SQL领域，歧义先澄清 |
+| `POST /api/sessions/{session_id}/reset` | 修改问题/条件前清空旧确认与许可 |
+| `GET /api/traces/{trace_id}?session_id=...` | 会话专属安全步骤摘要 |
+
+除health外需`Authorization: Bearer <入口令牌>`，会话操作还需`X-Session-Token`，不能仅凭UUID授权。单入口令牌授权全部注册源，限本机单可信操作员；状态/预算仅存单进程内存，重启失效，必须`workers=1`。不提供Swagger或统一`/api/agent/query`；未来`/api/contest/*`代理尚未配置。
+
+默认零云许可不请求模型；授权须确认**本任务原问题、选定结构及确认条件可外传给配置提供方并接受费用**，MinerU/知识问答许可不通用。无传输重试或Fallback，SQL最多一次单独许可的技术修复。查询只读、全树及表列/真实外键校验、超时与最多500行限制；最终SQL和结果仅在授权响应展示，日志/Trace无原文。权限配置、完整请求流程、错误码和资源边界见[竞赛后端说明](docs/CONTEST_BACKEND.md)。
 
 ## 1. 环境与配置
 

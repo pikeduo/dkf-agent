@@ -12,6 +12,8 @@ dependencies:
       - sqlalchemy
       - alembic
       - psycopg[binary]
+      # 竞赛问数全树SQL/表列授权校验；用户已确认，仅声明，不自动安装。
+      - sqlglot>=26.33,<27
       - pgvector
       - celery[redis]
       - redis
