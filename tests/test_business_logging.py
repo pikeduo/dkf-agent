@@ -769,20 +769,25 @@ def test_embedding_summary_and_task_context_do_not_log_vectors_or_text(events):
     assert "SECRET" not in events.getvalue() and "向量结果与文档状态已提交" in events.getvalue()
 
 
-def test_index_logs_restore_context_and_only_include_safe_summary(events):
-    """入库日志关联文档/任务并保持中文摘要，不泄漏向量、正文、模型指纹或私有路径。"""
+@pytest.mark.parametrize("state", ["READY", "PARTIAL_READY"])
+def test_index_logs_restore_context_and_only_include_safe_summary(events, state):
+    """两种索引终态均关联文档/任务并保持安全摘要，不将部分完成误称为完整 READY。"""
 
     doc_id, task_id = str(uuid4()), str(uuid4())
     task = SimpleNamespace(name="app.tasks.indexing.index_document", request=SimpleNamespace(headers={}))
     task_logs.begin_task_log(task=task, task_id=task_id, args=[doc_id])
-    logs.log_event("index.persisted", state="READY", chunk_count=5, dimension=1024,
+    logs.log_event("index.persisted", state=state, chunk_count=5, dimension=1024,
                    vector=[1.0], text="SECRET_BODY", output_dir="SECRET_PATH", model_fingerprint="SECRET_HASH")
     task_logs.end_task_log(task=task, state="SUCCESS", retval={"vector": [1.0]})
     assert logs.CONTEXT.get() is None
     assert all(record["doc_id"] == doc_id and record["task_id"] == task_id for record in records(events))
     result = next(record for record in records(events) if record["event"] == "index.persisted")
-    assert result["state"] == "READY" and result["chunk_count"] == 5 and result["dimension"] == 1024
-    assert "SECRET" not in events.getvalue() and "READY 状态已事务提交" in events.getvalue()
+    assert result["state"] == state and result["chunk_count"] == 5 and result["dimension"] == 1024
+    assert {"vector", "text", "output_dir", "model_fingerprint"}.isdisjoint(result)
+    rendered = events.getvalue()
+    assert "SECRET" not in rendered
+    assert "全部可靠 Chunk 向量与索引终态已事务提交" in rendered
+    assert "READY 状态已事务提交" not in rendered
 
 
 def test_rag_adapter_events_are_chinese_and_do_not_log_evidence_or_vectors(events):
