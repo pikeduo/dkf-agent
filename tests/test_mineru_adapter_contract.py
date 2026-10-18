@@ -291,7 +291,7 @@ def test_continued_table_keeps_full_source_pages_cells_and_deterministic_ids():
 
 @pytest.mark.parametrize("damage", ["value", "deleted", "page", "cross_rowspan"])
 def test_continued_table_does_not_bypass_original_source_checks(damage):
-    """续接仍需原值、删除标记、连续页和非跨行单元格，失败不返回半份结果。"""
+    """续接核对原值/页码/跨度；无删除标记不猜恢复，由完整Adapter拒绝空表。"""
     items, pages = continued_table_case()
     if damage == "value":
         source = pages[1]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]
@@ -305,8 +305,22 @@ def test_continued_table_does_not_bypass_original_source_checks(damage):
     else:
         set_merged(items, pages, items[0]["table_body"].replace("<td>A", '<td rowspan="2">A'))
     snapshot = deepcopy(items), deepcopy(pages)
-    with pytest.raises(MinerUError):
-        restore_merged_tables(items, pages)
+    if damage == "deleted":
+        # 恢复函数只处理有删除证据的占位；不恢复不代表完整解析可接受空表。
+        restored, summaries = restore_merged_tables(items, pages)
+        assert restored == items
+        assert summaries == []
+        with pytest.raises(MinerUError) as error:
+            normalize(items, pages)
+        assert error.value.code == "EMPTY_BLOCK"
+        assert error.value.diagnostic == {
+            "reason": "TABLE_NO_BODY", "stage": "adapter.normalize",
+            "structure_type": "table", "page": 2, "item_index": 3,
+        }
+    else:
+        with pytest.raises(MinerUError) as error:
+            restore_merged_tables(items, pages)
+        assert error.value.code == "MERGE_EVIDENCE"
     assert (items, pages) == snapshot
 
 
