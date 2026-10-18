@@ -714,6 +714,58 @@ def test_nonfinite_numbers_are_omitted_without_losing_event(events):
     assert "duration_ms" not in record and "delay_seconds" not in record
 
 
+@pytest.mark.parametrize("field", ["drawing_count", "line_count", "object_count", "limit_count"])
+@pytest.mark.parametrize("value", ["SECRET_BODY", -1, True, 1.5, 2**63, float("nan")])
+def test_preflight_counts_reject_non_integer_or_sensitive_values(events, field, value):
+    """预检计数字段拒绝正文和无效数值，同时保留安全错误事件。"""
+    logs.log_event("router.preflight_rejected", error_code="PREFLIGHT_LIMIT", **{field: value})
+    [record] = records(events)
+    assert record["error_code"] == "PREFLIGHT_LIMIT" and field not in record
+    assert "SECRET" not in events.getvalue()
+
+
+@pytest.mark.parametrize("budget", ["pages", "lines", "objects", "mixed_objects"])
+def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, budget):
+    """用纯 Mock 核对真实预检到日志链路，明确拒绝页、总对象数和限制，不读取 PDF。"""
+    from unittest.mock import MagicMock
+
+    from app.parsers.routing import inspector
+    from app.parsers.routing.router import decide_route
+
+    document, page = MagicMock(), MagicMock()
+    document.__enter__.return_value = document
+    document.needs_pass, document.is_repaired = False, False
+    document.page_count = 1001 if budget == "pages" else 20
+    document.__iter__.return_value = [page]
+    page.number, page.rect.width, page.rect.height = 13, 600, 800
+    line_count = 2001 if budget == "lines" else 118
+    image_count = 100 if budget == "mixed_objects" else 0
+    drawing_count = 4901 if budget == "mixed_objects" else 5001 if budget == "objects" else 0
+    page.get_image_info.return_value = [{}] * image_count
+    page.get_drawings.return_value = [{}] * drawing_count
+    page.annots.return_value = []
+    page.get_text.return_value = {"blocks": [{"type": 0, "lines": [{}] * line_count}]}
+    monkeypatch.setattr(inspector.pymupdf, "open", MagicMock(return_value=document))
+
+    inspected = inspector.inspect_pdf(Path("SECRET_PRIVATE.pdf"), Settings(
+        _env_file=None, router_pdf_max_pages=1000, router_pdf_max_lines_per_page=2000))
+    decision = decide_route("pdf", "auto", inspected)
+    assert decision.route_strategy == "failed" and decision.reason_codes == ("PREFLIGHT_LIMIT",)
+    [record] = records(events)
+    assert record["event"] == "router.preflight_rejected"
+    if budget == "pages":
+        assert record["step"] == "PDF_PAGE_LIMIT"
+        assert record["page_count"] == 1001 and record["limit_count"] == 1000
+    else:
+        assert record["step"] == ("PDF_LINE_LIMIT" if budget == "lines" else "PDF_OBJECT_LIMIT")
+        assert record["page"] == 14 and record["line_count"] == line_count
+        assert record["image_count"] == image_count and record["drawing_count"] == drawing_count
+        assert record["object_count"] == image_count + drawing_count
+        assert record["limit_count"] == (2000 if budget == "lines" else 5000)
+        assert "绘图数=" in events.getvalue() and "限制数量=" in events.getvalue()
+    assert "SECRET" not in events.getvalue()
+
+
 def test_existing_json_history_is_preserved_in_same_daily_file(events, tmp_path):
     """切换格式只追加新摘要，不覆盖已有 JSON 历史，也不新建格式专属文件。"""
 

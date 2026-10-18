@@ -285,7 +285,7 @@ def has_columns(lines: list[tuple], width: float) -> bool:
 
 
 def inspect_pdf(path: Path, settings: Settings) -> Inspection:
-    """逐页预检并冻结覆盖 v2；仅严格白名单装饰页免覆盖，未知绘图保守要求结果。"""
+    """逐页冻结覆盖 v2；超预算记录实际计数和阈值，未知绘图仍保守要求覆盖。"""
 
     pages, risks = [], []
     with pymupdf.open(path) as document:
@@ -294,7 +294,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
         if document.page_count > settings.router_pdf_max_pages:
             log_event("router.preflight_rejected", stage="preflight.pdf", step="PDF_PAGE_LIMIT",
                 error_code="PREFLIGHT_LIMIT", page_count=document.page_count,
-                item_count=settings.router_pdf_max_pages)
+                item_count=settings.router_pdf_max_pages, limit_count=settings.router_pdf_max_pages)
             return Inspection(
                 signals=StructuralSignals(page_count=document.page_count),
                 risks=("PREFLIGHT_LIMIT",),
@@ -321,7 +321,10 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                 log_event("router.preflight_rejected", stage="preflight.pdf",
                     step="PDF_LINE_LIMIT" if len(lines) > settings.router_pdf_max_lines_per_page else "PDF_OBJECT_LIMIT",
                     error_code="PREFLIGHT_LIMIT", page=page.number + 1,
-                    item_count=len(lines), image_count=len(images), drawing_count=len(drawings))
+                    item_count=len(lines), line_count=len(lines), image_count=len(images),
+                    drawing_count=len(drawings), object_count=len(images) + len(drawings),
+                    limit_count=(settings.router_pdf_max_lines_per_page
+                                 if len(lines) > settings.router_pdf_max_lines_per_page else 5000))
                 return Inspection(
                     signals=StructuralSignals(page_count=document.page_count),
                     risks=("PREFLIGHT_LIMIT",),

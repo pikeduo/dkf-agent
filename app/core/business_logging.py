@@ -106,6 +106,10 @@ FIELDS = {
     "page_count",
     "sheet_count",
     "image_count",
+    "drawing_count",
+    "line_count",
+    "object_count",
+    "limit_count",
     "chart_count",
     "source_document_count",
     "hybrid_visual_candidate_count",
@@ -409,6 +413,10 @@ FIELD_LABELS = {
     "page_count": "物理页数",
     "sheet_count": "Sheet数",
     "image_count": "图片数",
+    "drawing_count": "绘图数",
+    "line_count": "文本行数",
+    "object_count": "图像及绘图数",
+    "limit_count": "限制数量",
     "chart_count": "图表数",
     "source_document_count": "源文档数",
     "hybrid_visual_candidate_count": "视觉候选数",
@@ -469,11 +477,16 @@ def shared_file_lock(directory: Path):
 
 
 def safe_fields(fields: dict) -> dict:
-    """只保留已批准的标量；本地标识必须为 UUID，不序列化任意对象或敏感字段。"""
+    """保留白名单标量；预检计数仅接受有界非负整数，标识仅接受 UUID。"""
 
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        # 资源计数不能夹带正文、布尔值或任意对象，零计数也必须保留。
+        if key in {"drawing_count", "line_count", "object_count", "limit_count"} and (
+            type(value) is not int or not 0 <= value <= 2**31 - 1
+        ):
             continue
         if key == "source_line" and (type(value) is not int or not 1 <= value <= 1024**2):
             continue

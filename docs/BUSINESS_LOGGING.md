@@ -77,6 +77,7 @@ MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹�
 | `mineru.empty_block` | 未解释的空正文/表格；step固定为TABLE_NO_BODY或STRUCTURE_NO_TEXT，page/item_index均为1-based，structure_type固定枚举，不记录HTML/图片路径/正文 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
+| `router.preflight_rejected` | PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT；记录物理总页数或触发页、文本行数、图片数、绘图数、图像及绘图总数和限制数量。新增计数只接受有界非负整数，不输出路径或内容；拒绝规则不变 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |
 | `router.cloud_submitted` | 已确认源文件 batch，云文件提交数=1；重复日志需按 job_id/batch_id 去重 |
 | `router.cloud_dispatch_failed / finished` | 云交接确认失败/路由任务结束，不等于最终解析完成 |
