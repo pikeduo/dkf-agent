@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -22,7 +23,7 @@ from app.services.document_processing import (
     transition_document,
 )
 from app.services.mineru.adapter import MinerUResultAdapter, page_geometry, safe_merge_diagnostic
-from app.services.mineru.errors import MinerUError, api_error
+from app.services.mineru.errors import MinerUError, api_error, internal_failure
 from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.mineru.raw_results import obtain_raw_result, load_raw_result
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
@@ -192,7 +193,7 @@ def create_job(
         if cached is not None and hybrid_context is None:
             guard_cached(cached, guard_decision)
     except CacheError as exc:
-        raise MinerUError(exc.code, str(exc)) from None
+        raise internal_failure(exc, exc.code, str(exc)) from None
     if cached is None:
         claim_miss(session, document, cache_recipe, visual_keys, force_reparse=force_reparse)
     options = options | {"_cache_key": cache_key, "_cache_recipe": cache_recipe,
@@ -242,7 +243,8 @@ def finish_job(session, document, job, parsed) -> None:
     job.state, job.is_active = "done", False
     job.finished_at = datetime.now(UTC)
     job.error_code = job.error_message = None
-    job.parse_options = {k: v for k, v in job.parse_options.items() if k != "_adapter_failure"}
+    job.parse_options = {k: v for k, v in job.parse_options.items()
+                         if k not in {"_adapter_failure", "_runtime_failure"}}
 
 
 def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[str, int] | None:
@@ -281,7 +283,7 @@ def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[st
                   block_count=len(parsed.blocks), parse_cache_hit=True, status="CHUNKING")
         return "done", len(parsed.blocks)
     except CacheError as exc:
-        raise MinerUError(exc.code, str(exc)) from None
+        raise internal_failure(exc, exc.code, str(exc)) from None
 
 
 def lock_job(
@@ -717,13 +719,13 @@ def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -
         cache.save_document(document, job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"], parsed,
                             artifacts, job_id=job.job_id)
     except CacheError as exc:
-        raise MinerUError(exc.code, str(exc)) from None
+        raise internal_failure(exc, exc.code, str(exc)) from None
 
 
 def record_error(
     session: Session, job_id: UUID, error: MinerUError, settings: Settings
 ) -> bool:
-    """独立事务保存安全错误及派生账本；分片失败保留成功片，旧代次不能覆盖新结果。"""
+    """独立事务保存固定错误及无正文调用栈；保留原ZIP和成功片，不覆盖旧代次。"""
 
     locked = lock_job(session, job_id)
     if not locked:
@@ -757,6 +759,9 @@ def record_error(
                 ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
             job.parse_options = job.parse_options | {"_hybrid_result": ledger}
     job.error_code, job.error_message = error.code, str(error)
+    internal = getattr(error, "internal_diagnostic", None)
+    if internal:
+        job.parse_options = job.parse_options | {"_runtime_failure": internal}
     diagnostic = safe_merge_diagnostic(getattr(error, "diagnostic", None))
     if diagnostic:
         # 外层业务事务已回滚；在原有独立失败事务里保存子原因，不把异常正文写入JSONB。

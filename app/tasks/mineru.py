@@ -13,7 +13,7 @@ from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.models import DocumentParseJob
-from app.services.mineru.errors import MinerUError
+from app.services.mineru.errors import MinerUError, internal_failure
 from app.services.mineru.jobs import check_step, record_error, submit_step, restore_cached_result
 from app.services.mineru.provider import MinerUCloudProvider
 from app.services.parse_cache import CacheError
@@ -86,7 +86,7 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
 
 
 def execute_step(task, job_id: str, step: str) -> dict:
-    """执行短步骤；客户端延迟创建，本地重放在入口和服务层都禁止访问云端。"""
+    """执行短步骤并保留脱敏异常栈；本地重放不访问云端，异常不被UNKNOWN抹去。"""
 
     try:
         identifier = UUID(job_id)
@@ -146,18 +146,24 @@ def execute_step(task, job_id: str, step: str) -> dict:
     except MinerUError as exc:
         error = exc
     except CacheError as exc:
-        error = MinerUError(exc.code, str(exc))
-    except (OperationalError, OSError):
-        error = MinerUError(
+        error = internal_failure(exc, exc.code, str(exc))
+    except (OperationalError, OSError) as exc:
+        error = internal_failure(exc,
             "DATABASE", "MinerU 数据库或文件访问暂时不可用", retryable=True
         )
-    except SQLAlchemyError:
-        error = MinerUError("DATABASE_SCHEMA", "MinerU 数据落库失败，请检查迁移与约束")
-    except Exception:  # noqa: BLE001
-        error = MinerUError("UNKNOWN", "MinerU 处理异常，请检查 Worker 配置与结果结构")
+    except SQLAlchemyError as exc:
+        error = internal_failure(exc, "DATABASE_SCHEMA", "MinerU 数据落库失败，请检查迁移与约束")
+    except Exception as exc:  # noqa: BLE001
+        error = internal_failure(exc, "LOCAL_PIPELINE_ERROR",
+            "LOCAL_PIPELINE_ERROR：MinerU 本地处理异常，请按内部错误类型和源码位置定位")
     finally:
         if provider is not None:
             provider.close()
+    internal = getattr(error, "internal_diagnostic", None)
+    if internal:
+        for frame in internal["frames"]:
+            log_event("mineru.exception_frame", level=logging.ERROR, job_id=identifier, step=step,
+                      error_code=error.code, error_type=internal["error_type"], **frame)
     try:
         with processing_session() as session:
             retry = record_error(session, identifier, error, settings)
@@ -204,6 +210,8 @@ def execute_step(task, job_id: str, step: str) -> dict:
         job_id=identifier,
         step=step,
         error_code=error.code,
+        error_type=internal["error_type"] if internal else None,
+        **(internal["frames"][-1] if internal and internal["frames"] else {}),
         duration_ms=round((perf_counter() - started) * 1000, 2),
     )
     raise DocumentProcessingError(str(error)) from None

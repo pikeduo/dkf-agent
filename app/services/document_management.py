@@ -86,7 +86,8 @@ def safe_cause_code(code):
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.indexing import ERRORS as index_errors
     from app.parsers.routing.contracts import REASON_CODES
-    return code if isinstance(code, str) and code in (CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES) else None
+    return code if isinstance(code, str) and code in (
+        CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES | LOCAL_ADAPTER_ERROR_CODES) else None
 
 
 def exception_cause(exc):
@@ -105,12 +106,15 @@ def active_job(session, document):
 
 
 def retry_cloud_job(session, document, settings, *, allow_new_split_parts=False):
-    """原ZIP默认离线恢复；管理员可另行授权冻结PDF清单中从未提交的剩余片费用。"""
+    """恢复原ZIP及旧UNKNOWN离线检查点；新片费用仍须管理员单独授权。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
     job = active_job(session, document)
     if job is None and document.status == "FAILED":
+        # 旧Worker把本地编程异常写成UNKNOWN；仅显式离线检查点可进入原ZIP核验，不泛化云重试。
+        legacy_local = ((DocumentParseJob.error_code == "UNKNOWN") &
+                        DocumentParseJob.parse_options["_local_replay_only"].as_boolean().is_(True))
         previous_parse_task = document.processing_task_id
         rebind_local = False
         job = session.scalar(select(DocumentParseJob).where(
@@ -120,6 +124,7 @@ def retry_cloud_job(session, document, settings, *, allow_new_split_parts=False)
             # 本地适配错误不受某个具体子码限制，但必须有同Batch的可校验原ZIP。
             or_(DocumentParseJob.error_code == "JOB_TIMEOUT",
                 DocumentParseJob.error_code.in_(sorted(LOCAL_ADAPTER_ERROR_CODES)),
+                legacy_local,
                 DocumentParseJob.parse_options.has_key("_pdf_split")),
             ).with_for_update())
         if not isinstance(job, DocumentParseJob):
@@ -130,7 +135,8 @@ def retry_cloud_job(session, document, settings, *, allow_new_split_parts=False)
                 DocumentParseJob.provider == "mineru_cloud", DocumentParseJob.state == "failed",
                 DocumentParseJob.is_active.is_(False), DocumentParseJob.upload_complete.is_(True),
                 DocumentParseJob.batch_id.is_not(None),
-                DocumentParseJob.error_code.in_(sorted(LOCAL_ADAPTER_ERROR_CODES))).with_for_update()))
+                or_(DocumentParseJob.error_code.in_(sorted(LOCAL_ADAPTER_ERROR_CODES)),
+                    legacy_local)).with_for_update()))
             if not candidates:
                 return None
             if len(candidates) != 1:
@@ -470,7 +476,7 @@ def dispatch_action(session, doc_id: UUID, action: dict) -> bool:
 
 
 def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None) -> None:
-    """独立记录编排失败并保留已验证的底层Router原因，不改原文档错误或新代次。"""
+    """独立记录编排失败及白名单底层原因，不改原文档错误或新代次。"""
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update(nowait=True))
     if document is None or document.management_task_id != task_id:
         return
@@ -480,7 +486,9 @@ def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None
     if code == "MANAGEMENT_STAGE_FAILED" and cause_code is None:
         from app.services.document_processing import router_failure_codes
         causes = router_failure_codes(document.error_message)
-        cause_code = causes[0] if causes else None
+        # 本地运行错误的固定前缀可透传原因；绝不回显异常原文或未知字符串。
+        local = (document.error_message or "").split("：", 1)[0]
+        cause_code = causes[0] if causes else safe_cause_code(local)
     config.update(state="failed", error_code=ManagementError(code).code, cause_code=safe_cause_code(cause_code))
     document.management_config = config
     if config["operation"] == "delete":

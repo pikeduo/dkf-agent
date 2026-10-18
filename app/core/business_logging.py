@@ -88,6 +88,7 @@ FIELDS = {
     "delay_seconds",
     "error_code",
     "error_type",
+    "source_file", "source_function", "source_line",
     "queue",
     "task_name",
     "step",
@@ -131,6 +132,7 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "mineru.exception_frame": "MinerU内部异常调用位置（不含异常原文或局部变量）",
     "dataset_evaluation.started": "开始固定全量数据导入或检索评测",
     "dataset_evaluation.finished": "固定全量评测步骤结束，未完成项保留在报告",
     "agent.started": "开始单次Knowledge Agent工作流",
@@ -397,6 +399,7 @@ FIELD_LABELS = {
     "duration_ms": "耗时_ms",
     "error_code": "错误码",
     "error_type": "错误类型",
+    "source_file": "源码文件", "source_function": "源码函数", "source_line": "源码行号",
     "decision_version": "路由版本",
     "parse_mode": "解析模式",
     "route_strategy": "路由策略",
@@ -471,6 +474,14 @@ def safe_fields(fields: dict) -> dict:
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        if key == "source_line" and (type(value) is not int or not 1 <= value <= 1024**2):
+            continue
+        if key == "source_file" and (not isinstance(value, str)
+                or not re.fullmatch(r"(?:app|scripts)/[A-Za-z0-9_/]+\.py", value)):
+            continue
+        if key == "source_function" and (not isinstance(value, str)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}|<module>|<lambda>|<listcomp>", value)):
             continue
         if key in {"page", "item_index"} and (type(value) is not int or not 1 <= value <= 1024**2):
             continue

@@ -1,5 +1,8 @@
 """仅传递安全中文说明，不携带 Token、响应原文、签名 URL 或原始 HTTP 异常。"""
 
+import re
+from pathlib import Path
+
 PDF_SPLIT_ERROR_CODES = frozenset({"PDF_SPLIT_CHECKPOINT", "PDF_SPLIT_PATH", "PDF_SPLIT_LIMIT",
     "PDF_SPLIT_CHANGED", "PDF_SPLIT_INVALID", "PDF_SPLIT_GEOMETRY", "PDF_SPLIT_SINGLE_PAGE",
     "PDF_SPLIT_IO", "PDF_SPLIT_WRITE", "PDF_SPLIT_RESULT", "PDF_SPLIT_INCOMPLETE", "PDF_SPLIT_PAGE", "PDF_SPLIT_MISSING"})
@@ -7,7 +10,8 @@ PDF_SPLIT_ERROR_CODES = frozenset({"PDF_SPLIT_CHECKPOINT", "PDF_SPLIT_PATH", "PD
 # 这些错误发生在原ZIP取得之后；普通Retry只能重放本地原件，不能据此再次访问云端。
 LOCAL_ADAPTER_ERROR_CODES = frozenset({"MERGE_EVIDENCE", "EMPTY_BLOCK", "CONTENT_TYPE",
     "CONTENT_LIST", "BBOX", "PAGE", "GEOMETRY", "NO_TEXT", "COMPLETENESS",
-    "LOCAL_RESULT_REQUIRED", "CONTENT_LIMIT", "CACHE_REPARSE_REQUIRED", "CACHE_CONFIG_CHANGED", "CACHE_INVALID"})
+    "LOCAL_RESULT_REQUIRED", "CONTENT_LIMIT", "CACHE_REPARSE_REQUIRED", "CACHE_CONFIG_CHANGED", "CACHE_INVALID",
+    "LOCAL_PIPELINE_ERROR"})
 
 
 class MinerUError(Exception):
@@ -27,6 +31,28 @@ class MinerUError(Exception):
         self.code = code
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+def internal_failure(exc, code, message, *, retryable=False):
+    """保留异常类型和项目调用栈，不保存异常消息、局部变量、源码正文或第三方敏感堆栈。"""
+    from app.core.config import PROJECT_ROOT
+    error = MinerUError(code, message, retryable=retryable)
+    kind = type(exc).__name__
+    kind = kind if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", kind) else "Exception"
+    frames, current = [], exc.__traceback__
+    while current is not None:
+        frame = current.tb_frame
+        try:
+            relative = Path(frame.f_code.co_filename).resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+        except (OSError, ValueError):
+            relative = ""
+        function = frame.f_code.co_name
+        if (re.fullmatch(r"(?:app|scripts)/[A-Za-z0-9_/]+\.py", relative)
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}|<module>|<lambda>|<listcomp>", function)):
+            frames.append({"source_file": relative, "source_function": function, "source_line": current.tb_lineno})
+        current = current.tb_next
+    error.internal_diagnostic = {"error_type": kind, "frames": frames[-16:]}
+    return error
 
 
 RETRY_CODES = {

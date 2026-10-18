@@ -770,6 +770,8 @@ MinerU当前归一化版本为`mineru-adapter-v4`：先从同ZIP逐页原始结�
 
 出现`MERGE_EVIDENCE`时，成功Parse Cache可能不存在，但当前Worker会在Adapter前独立归档原ZIP。先按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对原Batch归档、Hash、版本及具体子原因；旧任务确实缺归档时才人工确认从**原已完成Batch**取得结果，不申请新Batch。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
 
+Adapter校验通过后若本地缓存/落库仍异常，检查`mineru.exception_frame`中的异常类型及相对源码位置；`LOCAL_PIPELINE_ERROR`不等于云端解析失败。修复后确认队列空闲再重启CPU Worker，普通Retry仍先验证并复用原ZIP，不能用Force重解析排查本地异常。
+
 旧v3失败Job的显式`/retry`在核对原件/分片Hash及原Batch ZIP回执后，仅新增v4本地转换配方，原云参数/Batch/旧缓存不改；强制离线、不需要Token或云访问许可。历史Retry误换本地代次时，只接受同Hash且唯一可验证的已付费Job，歧义仍拒绝。缺原ZIP或后续分片结果时停止，不自动下载/补交。只读诊断和用户手动恢复命令见上述文档；`--allow-normalizer-upgrade`仅用于离线比较，不能替代恢复请求。不要Force、清缓存或改SQL状态。
 
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。

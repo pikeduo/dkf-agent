@@ -39,6 +39,8 @@ API和Celery Worker入口保持原role；四类检索/重排CLI使用各自角�
 
 不输出任意请求/响应对象、异常堆栈、数据库连接串、Token、签名 URL、文档正文或上游错误原文。业务 Logger 独立于第三方 Logger，配置 DEBUG 也不会启用 httpx 请求详情。现有 Uvicorn/Celery 自带终端输出仍由各框架管理，不宣称它们经过此白名单格式器清洗；请勿自行开启带敏感信息的第三方调试日志。
 
+MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹成UNKNOWN；`mineru.exception_frame`仅记录真实异常类型及项目相对源码文件、函数、行号。按顺序的脱敏调用栈同时保存在原Job私有`_runtime_failure`中，不含异常消息、源码内容、局部变量、绝对路径或第三方堆栈；成功完成后清除此历史错误。管理任务保留白名单`cause_code`，公共接口仍不输出内部调用栈。
+
 文件名、资源 ID 也可能属于敏感业务元信息，需要限制日志目录访问。每日文件只追加不按大小轮转，不使用普通多进程 RotatingFileHandler。标准库 OS 锁保护整行中文文本写入：Windows 使用 [msvcrt.locking](https://docs.python.org/3.11/library/msvcrt.html#msvcrt.locking)，Unix 使用 [fcntl.flock](https://docs.python.org/3.11/library/fcntl.html#fcntl.flock)，线程内仍由 Handler 的锁串行化；锁等待最多 1 秒。固定辅助文件 `.knowledge-service.lock` 不含正文，不随 PID 或日期增加；不能在运行中删除/替换。每条记录独立打开并最终关闭锁描述符与数据文件，prefork 子进程仍重建处理器，避免继承活跃句柄。进程退出由 OS 释放锁，不依赖 PID 清理；自动测试验证正常并发完整行，但磁盘写入中断、电源故障仍可能丢失/留下不完整记录。
 
 所有写入者必须运行新代码并使用相同的本地 `LOG_DIR`；格式切换后需要重启 API 与所有 Worker，遗留进程可能继续输出 JSON。已有 JSON 历史行不改写、不删除，切换当天同一文件可能同时包含旧 JSON 和新中文文本。旧格式的整行 JSON 读取工具需调整，人工搜索仍可使用事件码或资源 UUID。网络共享盘、多主机锁行为不在保证范围内。旧容量/备份配置废弃，当前无单日容量上限或自动历史清理。旧 PID 文件、已有日期文件均不自动合并/删除，运维应在对应进程停止后自行归档。目录/写盘/锁失败降级终端并安全提示，不改变已提交业务结果；不保证终端与文件双重故障时仍可记录。
