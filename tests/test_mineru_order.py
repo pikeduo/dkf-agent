@@ -1,4 +1,4 @@
-"""验证仅凭官方 layout 索引恢复页边界项，不以 bbox 排序重建复杂阅读顺序。"""
+"""独立严格增强器的页边界顺序回归；公共v4基础提取另测，不按bbox重排。"""
 
 from copy import deepcopy
 from io import BytesIO
@@ -63,7 +63,7 @@ def layout_for(items, indices=None):
 def normalize(items, layout=None, *, doc_id=None, archive=None):
     """只在内存运行 Adapter，不调用网络、Celery 或真实数据库。"""
 
-    return MinerUResultAdapter().normalize(
+    return MinerUResultAdapter().normalize_strict(
         result_zip(items, layout=layout) if archive is None else archive,
         doc_id=uuid4() if doc_id is None else doc_id,
         file_name="验收.pdf",

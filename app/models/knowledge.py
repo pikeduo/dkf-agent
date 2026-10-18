@@ -87,7 +87,7 @@ class Document(Timestamps, Base):
         ),
         CheckConstraint(
             "status IN ('UPLOADED', 'PARSING', 'OCR_PROCESSING', 'CHUNKING', "
-            "'EMBEDDING', 'INDEXING', 'READY', 'FAILED')",
+            "'EMBEDDING', 'INDEXING', 'READY', 'PARTIAL_READY', 'FAILED')",
             name="status",
         ),
         Index("ix_documents_kb_id_status", "kb_id", "status"),
@@ -108,6 +108,8 @@ class Document(Timestamps, Base):
         String(32), default="UPLOADED", server_default="UPLOADED"
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+    # 云解析的内容/结构/证据覆盖摘要；与任务错误独立，不把部分索引冒充完整READY。
+    parse_quality: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # 每次重新投递分配新标识，旧消息不能覆盖新一轮处理的状态。
     processing_task_id: Mapped[UUID | None] = mapped_column(unique=True)
     # 切片使用独立代次与冻结参数，不能改变解析缓存/云回调的 processing_task_id。
@@ -154,6 +156,8 @@ class DocumentBlock(Base):
     bbox: Mapped[list[float] | None] = mapped_column(JSONB)
     source: Mapped[str] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float)
+    # 同ZIP来源指针及摘要，不存私有路径/URL，未确认坐标仍为NULL。
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
 
 
 class DocumentChunk(Base):

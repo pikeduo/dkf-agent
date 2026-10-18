@@ -111,6 +111,8 @@ def retry_cloud_job(session, document, settings):
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
     job = active_job(session, document)
     if job is None and document.status == "FAILED":
+        previous_parse_task = document.processing_task_id
+        rebind_local = False
         job = session.scalar(select(DocumentParseJob).where(
             DocumentParseJob.doc_id == document.doc_id,
             DocumentParseJob.task_id == document.processing_task_id,
@@ -121,7 +123,19 @@ def retry_cloud_job(session, document, settings):
                 DocumentParseJob.parse_options.has_key("_pdf_split")),
             ).with_for_update())
         if not isinstance(job, DocumentParseJob):
-            return None
+            # 旧的普通Retry可能只新建了本地解析代次，随后被收费历史拦截。
+            # 只有同文档/同Hash且唯一的已上传失败Job才可检查原ZIP，不创建替代云任务。
+            candidates = list(session.scalars(select(DocumentParseJob).where(
+                DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.file_hash == document.file_hash,
+                DocumentParseJob.provider == "mineru_cloud", DocumentParseJob.state == "failed",
+                DocumentParseJob.is_active.is_(False), DocumentParseJob.upload_complete.is_(True),
+                DocumentParseJob.batch_id.is_not(None),
+                DocumentParseJob.error_code.in_(sorted(LOCAL_ADAPTER_ERROR_CODES))).with_for_update()))
+            if not candidates:
+                return None
+            if len(candidates) != 1:
+                raise ManagementError("MANAGEMENT_CHECKPOINT")
+            job, rebind_local = candidates[0], True
         try:
             split_resume = resumable_split(document, job)
             local_replay = False
@@ -129,12 +143,11 @@ def retry_cloud_job(session, document, settings):
                 from app.services.mineru.jobs import check_normalizer_recipe, local_file
                 from app.services.mineru.provider import validate_local_file
                 from app.services.mineru.raw_results import load_raw_result
-                if (job.task_id != document.processing_task_id or job.file_hash != document.file_hash
+                if ((not rebind_local and job.task_id != document.processing_task_id) or job.file_hash != document.file_hash
                         or job.provider != "mineru_cloud" or not job.batch_id
                         or not job.upload_complete or not job.submission_attempted
                         or not isinstance(job.parse_options.get("_cache_recipe"), dict)):
                     raise MinerUError("RAW_RESULT_IDENTITY", "原付费结果或冻结身份不完整，未恢复")
-                check_normalizer_recipe(job)
                 source = local_file(document, job, settings)
                 validate_local_file(source)
                 ordinal = 1
@@ -150,6 +163,13 @@ def retry_cloud_job(session, document, settings):
                     file_hash=source.file_hash) is not None
                 if not local_replay:
                     raise MinerUError("LOCAL_RESULT_REQUIRED", "本地原ZIP缺失，未恢复为云任务")
+                from app.services.mineru.jobs import upgrade_local_adapter
+                upgrade_local_adapter(job)
+                check_normalizer_recipe(job)
+                if rebind_local:
+                    # 仅在原件/分片/ZIP/Batch全部通过后，由正常管理事务重新绑定原付费Job。
+                    document.processing_task_id = job.task_id
+                    job.parse_options = job.parse_options | {"_local_resume_previous_task": str(previous_parse_task)}
             permitted = job.error_code == "JOB_TIMEOUT" or split_resume or local_replay
         except MinerUError:
             raise ManagementError("MANAGEMENT_CHECKPOINT") from None
@@ -301,7 +321,7 @@ def prepare_management(session, document, settings, operation: str, *, parse_mod
         roots = previous["cleanup_roots"] if previous and previous["operation"] == "delete" else cleanup_roots(document, settings)
     stage, stage_task_id, resume_failed = "parse", None, False
     if operation == "retry":
-        if document.status == "READY":
+        if document.status in {"READY", "PARTIAL_READY"}:
             if previous is not None:
                 # 入库已提交但最后编排消息丢失时，仅补完成标记，不重算任何阶段。
                 previous.update(state="done", stage="done", error_code=None, cause_code=None)
@@ -368,7 +388,7 @@ def next_action(session, document, settings) -> dict:
         return {"kind": "stopped"}
     if config["operation"] == "delete":
         return {"kind": "delete"}
-    if document.status == "READY":
+    if document.status in {"READY", "PARTIAL_READY"}:
         config.update(state="done", stage="done")
         document.management_config = config
         return {"kind": "done"}

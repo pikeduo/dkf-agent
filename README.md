@@ -194,7 +194,7 @@ python -m app.db.seed
 python -m alembic current
 ```
 
-预期 head 为 `0008_document_management`（含原pgvector索引及新增管理员编排检查点），默认知识库ID为`7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed可重复执行；应用启动不自动迁移或启用扩展。升级前备份并停止API/Worker，迁移后重启；历史文档不会自动处理。
+预期 head 为 `0009_parse_quality`（保留原索引/编排，新增可空解析质量、Block来源及PARTIAL_READY状态），默认知识库ID为`7f2044ca-2041-42ce-977d-40bf5c79ed40`。seed可重复执行；应用启动不自动迁移或启用扩展。升级前备份并停止API/Worker，由用户手动迁移后重启；不回填或自动处理历史文档。
 
 该迁移新增入库检查点和 HNSW cosine 部分索引，要求 pgvector 支持 HNSW（0.5.0 起）。普通事务建索引可能阻塞写入，已有大量向量时需安排维护窗口及磁盘/内存预算；应用不自动升级扩展或改系统服务。部署核对见 [pgvector 入库说明](docs/PGVECTOR_INDEX.md)。
 
@@ -324,7 +324,7 @@ python -c $embeddingDeployCheck
 
 #### 6. 数据库与 GPU Worker
 
-用户先按本章数据库初始化命令确认当前head `0008_document_management`（包含原GPU/入库检查点；已是head则跳过升级），再在独立终端启动GPU Worker，每张GPU只运行一个消费进程：
+用户先按本章数据库初始化命令确认当前head `0009_parse_quality`（包含原GPU/入库检查点；已是head则跳过升级），再在独立终端启动GPU Worker，每张GPU只运行一个消费进程：
 
 ```powershell
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
@@ -429,11 +429,12 @@ MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000�
 ### 状态查询与恢复
 
 - 文档详情是业务状态依据；解析完成为Document=CHUNKING、云job=done，新上传继续经过EMBEDDING/INDEXING至READY。云Celery SUCCESS或delegated_to_mineru只代表短步骤，不代表全链路完成；中间状态可能很快经过。
+- MinerU结构增强失败可保留可靠基础内容并记录`parse_quality`；内容覆盖不足但可靠块已完整索引时终态为`PARTIAL_READY`，不是完整READY。详情/状态返回质量和缺页摘要，Block返回来源指针。可靠块可参与同库检索，未知页码内容只在本地转换产物隔离，不生成假页码或严格证据命中。
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
 - 新上传失败或编排超时先查`/api/admin/documents/{doc_id}/status`、详情及parse-jobs，修复原因后用文档级`/retry`恢复，不重传或重建全库。旧无编排文档仅UPLOADED/FAILED可通过`/process`重投，活动云任务用`/mineru`恢复；活动管理任务拒绝旧写入口。收费失败且无缓存仍需明确Force，不因普通Retry新增云批次。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
 - 旧知识库嵌套`/reindex`保留仅回放到CHUNKING的兼容语义；新文档级`/api/admin/documents/{doc_id}/reindex`自动接续切片、GPU向量化及入库。两者均不重新调用MinerU，缓存缺失/损坏/参数变化明确失败，旧结果保留供诊断，不自动Force。成功回放替换Block时同事务失效旧Chunk。
-- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
+- `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY/PARTIAL_READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
 
 维护已有文档（无请求体，替换 UUID）：
 
@@ -463,7 +464,7 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 ### 文档观察与维护
 
-推荐使用`/api/admin/documents/{doc_id}`及其`/status /blocks /chunks`观察完整链路；状态返回各阶段任务和Block/Chunk/向量数量，不返回私有配置、磁盘路径或向量数组。需要用户先迁移到`0008_document_management`并重启API及全部Worker，CPU注册`app.tasks.management.manage_document`，GPU沿用原部署，不新增依赖或模型。
+推荐使用`/api/admin/documents/{doc_id}`及其`/status /blocks /chunks`观察完整链路；状态返回各阶段任务、解析质量和Block/Chunk/向量数量，不返回私有配置、磁盘路径或向量数组。需要用户先迁移到`0009_parse_quality`并重启API及全部Worker，CPU注册`app.tasks.management.manage_document`，GPU沿用原部署，不新增依赖或模型。
 
 新文档级`POST /reindex`保留原件，复用成功Parse Cache后自动重建Chunk→Embedding→Index→READY，无MinerU请求；`POST /retry`恢复已有失败阶段/同一活动云批次。`POST /reparse?force=true`才允许绕过缓存，可能再次外传/收费。202只表示已接收，用详情/status及management_task_id查询，不盲目重复收费请求。旧知识库嵌套接口保留逐阶段兼容语义。
 
@@ -761,11 +762,11 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 联合冒烟的 `SMOKE_RETRIEVAL_PREREQUISITE` 表示 READY/证据/向量前置校验未通过，Dense 尚未执行，不是 GPU 故障结论；先按 [只读失败复核](docs/PRESET_IMPORT.md#已有失败报告的只读复核) 查真实文档/Job 错误码，不重新上传。`code` 命令不可用时可用 Windows `notepad` 查看报告，无需安装新依赖。
 
-MinerU远端done、ZIP已下载但出现EMPTY_BLOCK时，保留原结果并按[合并来源排查](docs/MINERU_CLOUD.md#合并正文空占位保留原页和坐标)核对。当前归一化版本为`mineru-adapter-v3`，隔离旧v1/v2缓存；跨页表格仅在完整V1/layout证据成立时恢复。部署新版本由用户重启API/CPU Worker，旧冻结Job/Reindex版本不一致安全拒绝，不自动付费重解析。不要删除缓存、修改Job版本/状态或盲目Force。
+MinerU当前归一化版本为`mineru-adapter-v4`：先从同ZIP逐页原始结构/V1提取可靠内容，再尝试严格结构增强。局部合并失败不再一律拒绝整份正文；覆盖不足保留PARTIAL_READY及告警，不冒充完整解析。旧v1/v2/v3成功缓存隔离，不删除、覆盖或重标旧产物。详见[MinerU质量分层与本地重放](docs/MINERU_CLOUD.md#v4基础提取与质量分层)。
 
 出现`MERGE_EVIDENCE`时，成功Parse Cache可能不存在，但当前Worker会在Adapter前独立归档原ZIP。先按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对原Batch归档、Hash、版本及具体子原因；旧任务确实缺归档时才人工确认从**原已完成Batch**取得结果，不申请新Batch。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。
 
-旧v2付费Job需要用v3比较结果时，只有诊断CLI的显式`--allow-normalizer-upgrade`允许使用内存副本，报告同时保留旧/新身份。PDF新预检仅对严格证明的页边缘灰细横线免覆盖，未知绘图仍要求结果；旧冻结覆盖默认不变，另有独立`--allow-coverage-upgrade`只读比较，见[MinerU完整性故障排查](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。这些开关不是部署、缓存迁移或业务恢复授权，不自动忽略缺页或继续收费批次。
+旧v3失败Job的显式`/retry`在核对原件/分片Hash及原Batch ZIP回执后，仅新增v4本地转换配方，原云参数/Batch/旧缓存不改；强制离线、不需要Token或云访问许可。历史Retry误换本地代次时，只接受同Hash且唯一可验证的已付费Job，歧义仍拒绝。缺原ZIP或后续分片结果时停止，不自动下载/补交。只读诊断和用户手动恢复命令见上述文档；`--allow-normalizer-upgrade`仅用于离线比较，不能替代恢复请求。不要Force、清缓存或改SQL状态。
 
 数据库、原件与完整 PARSED_DIR 应一起备份；对外部署需增加鉴权、网关请求体限制和文件安全保护。
 

@@ -1,8 +1,9 @@
-"""读取 V1 正文并核对布局证据，恢复合并段落的原页/坐标，不承担缓存或落库。"""
+"""可靠内容提取与可选严格增强分层；不承担网络、缓存发布或数据库落库。"""
 
 import json
 import logging
 import math
+import stat
 from io import BytesIO
 from itertools import pairwise
 from operator import itemgetter
@@ -41,7 +42,7 @@ def page_geometry(path: Path, file_type: str) -> dict[int, tuple[float, float]] 
         raise MinerUError("GEOMETRY", "原件页码或页面尺寸无法读取") from None
 
 
-def read_content_list(archive: bytes) -> list[dict]:
+def read_content_list(archive: bytes, *, allow_invalid_items=False) -> list[dict]:
     """只在内存读取唯一内容列表；拒绝路径穿越、超量解压和无结构结果，不执行 ZIP 文件。"""
 
     try:
@@ -57,6 +58,8 @@ def read_content_list(archive: bytes) -> list[dict]:
                 path = PurePosixPath(info.filename.replace("\\", "/"))
                 if path.is_absolute() or ".." in path.parts or ":" in info.filename:
                     raise MinerUError("ZIP_PATH", "MinerU ZIP 包含不安全路径")
+                if stat.S_ISLNK(info.external_attr >> 16):
+                    raise MinerUError("ZIP_PATH", "MinerU ZIP 包含不安全符号链接")
                 if path.name == "content_list.json" or path.name.endswith(
                     "_content_list.json"
                 ):
@@ -66,9 +69,8 @@ def read_content_list(archive: bytes) -> list[dict]:
                     "CONTENT_LIST", "MinerU ZIP 缺少唯一有效的 content_list.json"
                 )
             value = json.loads(zipped.read(candidates[0]).decode("utf-8-sig"))
-            if not isinstance(value, list) or any(
-                not isinstance(item, dict) for item in value
-            ):
+            if not isinstance(value, list) or not allow_invalid_items and any(
+                not isinstance(item, dict) for item in value):
                 raise MinerUError("CONTENT_LIST", "MinerU content_list 结构不受支持")
             return value
     except (BadZipFile, UnicodeError, ValueError, RuntimeError, NotImplementedError):
@@ -371,15 +373,15 @@ class MergeEvidenceError(MinerUError):
 class EmptyBlockError(MinerUError):
     """空结果固定子原因及1-based定位；不把原文或图片地址带入日志/报告。"""
 
-    def __init__(self, kind: str, page: int, position: int, *, missing_table_body=False):
-        """安全保存结构类型/数组序号/页码，保留原有EMPTY_BLOCK外部错误码。"""
+    def __init__(self, kind: str, page: int, position: int, *, missing_table_body=False, log_failure=True):
+        """安全保存固定定位；可选增强仅记降级事件，保留EMPTY_BLOCK外部错误码。"""
         super().__init__("EMPTY_BLOCK", "MinerU 返回的正文、表格或公式没有可用文本")
         allowed = {"text", "title", "image_text", "header", "footer", "page_number",
                    "aside_text", "page_footnote", "ref_text", "table", "list", "code", "equation", "formula"}
         self.diagnostic = {"reason": "TABLE_NO_BODY" if missing_table_body else "STRUCTURE_NO_TEXT",
             "stage": "adapter.normalize", "structure_type": kind if kind in allowed else "unknown",
             "page": page, "item_index": position}
-        log_event("mineru.empty_block", level=logging.WARNING, error_code=self.code,
+        log_event("mineru.empty_block" if log_failure else "mineru.enhancement_degraded", level=logging.WARNING, error_code=self.code,
                   step=self.diagnostic["reason"], stage="adapter.normalize", page=page,
                   item_index=position, structure_type=self.diagnostic["structure_type"])
 
@@ -867,9 +869,21 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
 
 
 class MinerUResultAdapter:
-    """保留正文原序并恢复有证据的页边界项；不改写表格、公式或伪造置信度。"""
+    """先提取可靠基础内容，再尝试可选结构增强；局部增强失败不阻断整份入库。"""
 
-    def normalize(
+    def normalize(self, archive: bytes, *, doc_id: UUID, file_name: str, file_type: str,
+                  geometry: dict[int, tuple[float, float]] | None, identity: str,
+                  allow_empty_part: bool = False) -> ParsedDocument:
+        """v4安全基础提取；只有分片中间结果允许无可靠块，原文档空结果仍致命。"""
+        if file_type not in MINERU_TYPES:
+            raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
+        from app.services.mineru.content import normalize_content
+        from functools import partial
+        return normalize_content(archive, strict=partial(self.normalize_strict, log_failures=False), doc_id=doc_id,
+            file_name=file_name, file_type=file_type, geometry=geometry, identity=identity,
+            allow_empty_part=allow_empty_part)
+
+    def normalize_strict(
         self,
         archive: bytes,
         *,
@@ -878,8 +892,9 @@ class MinerUResultAdapter:
         file_type: str,
         geometry: dict[int, tuple[float, float]] | None,
         identity: str,
+        log_failures: bool = True,
     ) -> ParsedDocument:
-        """统一V4 Block（含原生ref_text正文）；PDF核对来源，Office保留逻辑页/空坐标。"""
+        """旧严格结构增强器，仅作为可选增强与独立回归入口，不再负责基础内容准入。"""
 
         if file_type not in MINERU_TYPES:
             raise MinerUError("FILE_TYPE", "该文件类型不支持 MinerU 结果转换")
@@ -895,7 +910,7 @@ class MinerUResultAdapter:
                 items, table_groups = restore_merged_tables(items, pages, archive_members=members)
             except MinerUError as exc:
                 detail = exc.diagnostic if isinstance(exc, MergeEvidenceError) else {}
-                log_event("mineru.merge_rejected", level=logging.WARNING,
+                log_event("mineru.merge_rejected" if log_failures else "mineru.enhancement_degraded", level=logging.WARNING,
                           doc_id=doc_id, error_code=exc.code,
                           stage=".".join(filter(None, (detail.get("stage", "adapter"),
                               detail.get("layout_group"), detail.get("span_role")))),
@@ -956,7 +971,7 @@ class MinerUResultAdapter:
             elif kind == "table":
                 block_type = "table"
                 if not joined_text(item.get("table_body")).strip():
-                    raise EmptyBlockError(kind, page_idx + 1, position, missing_table_body=True)
+                    raise EmptyBlockError(kind, page_idx + 1, position, missing_table_body=True, log_failure=log_failures)
                 content = "\n".join(
                     part
                     for part in (
@@ -1016,7 +1031,7 @@ class MinerUResultAdapter:
                         raise
                     empty_boundaries += 1
                 else:
-                    raise EmptyBlockError(kind, page_idx + 1, position)
+                    raise EmptyBlockError(kind, page_idx + 1, position, log_failure=log_failures)
             try:
                 blocks.append(
                     ParsedBlock(

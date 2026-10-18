@@ -11,7 +11,7 @@ class CompletenessError(ParserError):
 
 
 def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
-    """检查有效正文、页/Sheet 基本覆盖及 Office 坐标，不改 Block、ID 或顺序。"""
+    """保留身份/范围硬校验；MinerU v4缺页记录PARTIAL，Native完整性要求不变。"""
 
     if parsed.file_type != decision.file_type:
         raise CompletenessError("解析结果格式与路由决策不一致")
@@ -26,7 +26,15 @@ def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
             raise CompletenessError("PDF 解析页码超出原件范围")
         required = {page.page for page in signals.pages if page.required}
         if not required.issubset(pages):
-            raise CompletenessError("PDF 部分非空页面缺少解析结果，需要人工核对")
+            if parsed.quality is None or decision.route_strategy != "mineru_whole":
+                raise CompletenessError("PDF 部分非空页面缺少解析结果，需要人工核对")
+            parsed.quality.content = "PARTIAL"
+            parsed.quality.missing_pages = sorted(required - pages)
+            if "MISSING_REQUIRED_PAGES" not in parsed.quality.warnings and len(parsed.quality.warnings) < 128:
+                parsed.quality.warnings.append("MISSING_REQUIRED_PAGES")
+        if parsed.quality is not None:
+            parsed.quality.covered_pages = sorted(pages)
+            parsed.quality.required_pages = sorted(required)
     if decision.file_type in OFFICE_TYPES and any(
         block.bbox is not None for block in parsed.blocks
     ):

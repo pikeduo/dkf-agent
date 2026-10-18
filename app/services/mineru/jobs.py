@@ -254,6 +254,9 @@ def restore_cached_result(session, job_id: UUID, settings: Settings) -> tuple[st
     document, job = locked
     if "_cache_recipe" not in job.parse_options:
         return None
+    if "_adapter_recipe" in job.parse_options:
+        # 升级后的本地转换不误读旧Job的v3成功指针；原ZIP始终独立保全，可重复本地转换。
+        return None
     try:
         restored = ParseCache(settings).job_document(document, job.parse_options["_cache_recipe"], job_id)
         if restored is None:
@@ -348,7 +351,7 @@ def renew_local_wait(job: DocumentParseJob, settings: Settings) -> None:
 def check_normalizer_recipe(job: DocumentParseJob) -> None:
     """新转换使用冻结归一化/分片生成器；旧已验证结果可回放，不悄悄更换收费输入。"""
 
-    frozen = job.parse_options.get("_cache_recipe")
+    frozen = job.parse_options.get("_adapter_recipe") or job.parse_options.get("_cache_recipe")
     if frozen is not None and (
         not isinstance(frozen, dict) or frozen.get("normalizer_version") != NORMALIZER_VERSION
     ):
@@ -357,6 +360,15 @@ def check_normalizer_recipe(job: DocumentParseJob) -> None:
         from app.services.mineru.pdf_split import policy
         if job.parse_options["_pdf_split_request"].get("policy") != policy():
             raise MinerUError("PDF_SPLIT_CHECKPOINT", "PDF 分片生成器版本已变化，未重新提交")
+
+
+def upgrade_local_adapter(job):
+    """原ZIP已校验后的显式Retry只升级本地转换身份，冻结云参数/Batch/旧配方保持不变。"""
+    frozen = job.parse_options.get("_cache_recipe")
+    if not isinstance(frozen, dict) or frozen.get("normalizer_version") not in {"mineru-adapter-v3", NORMALIZER_VERSION}:
+        raise MinerUError("CACHE_CONFIG_CHANGED", "原Job本地转换版本不受支持，未访问云端")
+    job.parse_options = job.parse_options | {"_adapter_recipe": frozen | {"normalizer_version": NORMALIZER_VERSION}}
+    job.parse_options = job.parse_options | {"_local_replay_only": True}
 
 
 def prepare_split_step(session, document, job, settings):
@@ -587,6 +599,7 @@ def adapt_raw_result(session, document, job, settings, archive, raw_result, sour
             file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
             geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
             identity=adapter_identity,
+            allow_empty_part="_pdf_split" in job.parse_options or "_hybrid" in job.parse_options,
         )
     except MinerUError as error:
         log_event("mineru.adapter_failed", doc_id=document.doc_id, job_id=job_id,
@@ -625,7 +638,8 @@ def adapt_raw_result(session, document, job, settings, archive, raw_result, sour
             )
             raise MinerUError("COMPLETENESS", str(exc)) from None
         log_event(
-            "router.guard_passed",
+            "router.guard_partial" if getattr(parsed, "quality", None) and parsed.quality.content == "PARTIAL" else "router.guard_passed",
+            level=logging.WARNING if getattr(parsed, "quality", None) and parsed.quality.content == "PARTIAL" else logging.INFO,
             doc_id=document.doc_id,
             job_id=job_id,
             route_strategy="mineru_whole",
@@ -669,7 +683,7 @@ def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -
             raise MinerUError("FILE_HASH", "解析完成时原件 Hash 已变化，未发布缓存") from None
         cache = ParseCache(settings)
         artifacts = archive_artifacts(archive)
-        if "_hybrid" in job.parse_options:
+        if "_hybrid" in job.parse_options and not (visual.quality and visual.quality.content == "PARTIAL"):
             manifest = BundleManifest.model_validate(job.parse_options["_hybrid_result"])
             normalized = {}
             for entry in manifest.entries:
@@ -690,7 +704,7 @@ def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -
             artifacts.update({"hybrid/bundle_manifest.json": canonical(manifest.model_dump(mode="json")),
                 "hybrid/visual_bundle.pdf": read_bundle_bytes(source.path),
                 "hybrid/normalized_visual_blocks.json": canonical(normalized)})
-        cache.save_document(document, job.parse_options["_cache_recipe"], parsed,
+        cache.save_document(document, job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"], parsed,
                             artifacts, job_id=job.job_id)
     except CacheError as exc:
         raise MinerUError(exc.code, str(exc)) from None

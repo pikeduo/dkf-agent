@@ -99,12 +99,12 @@ def test_query_and_scoring_limits_are_explicit():
 
 
 def test_source_query_filters_kb_ready_docs_and_generations_without_vectors():
-    """只编译现有表的只读SQL；范围在LIMIT前绑定，无向量列/距离或额外存储表。"""
+    """只读SQL在LIMIT前绑定范围和READY/PARTIAL_READY，不读向量或新建真相表。"""
     kb_id, doc_id = uuid4(), uuid4()
     compiled = tool.source_statement(kb_id, [doc_id]).compile(dialect=postgresql.dialect())
     sql, params = str(compiled), list(compiled.params.values())
     assert sql.count('kb_id =') >= 3 and kb_id in params and [doc_id] in params
-    assert 'READY' in params and 'ACTIVE' in params
+    assert ['READY', 'PARTIAL_READY'] in params and 'ACTIVE' in params
     assert sql.index('document_chunks.doc_id IN') < sql.index('LIMIT')
     assert 'document_chunks.embedding' not in sql and ' <=> ' not in sql
     assert 'file_path' not in sql and 'embedding_config' not in sql

@@ -21,8 +21,9 @@ TRANSITIONS = {
     "OCR_PROCESSING": {"CHUNKING", "FAILED"},
     "CHUNKING": {"EMBEDDING", "FAILED"},
     "EMBEDDING": {"INDEXING", "FAILED"},
-    "INDEXING": {"READY", "FAILED"},
+    "INDEXING": {"READY", "PARTIAL_READY", "FAILED"},
     "READY": set(),
+    "PARTIAL_READY": set(),
     "FAILED": {"UPLOADED"},
 }
 
@@ -87,7 +88,7 @@ def check_source_hash(document: Document, path=None) -> None:
 def persist_blocks(
     session: Session, document: Document, parsed: ParsedDocument
 ) -> None:
-    """替换解析块并失效切片/向量/入库检查点；失败全部回滚，不删除历史向量文件。"""
+    """同事务保存可靠块及质量/来源，失效后续检查点；SQL失败仍全回滚保护旧证据。"""
 
     parsed = ParsedDocument.model_validate(parsed)
     if (parsed.doc_id, parsed.file_name, parsed.file_type) != (
@@ -103,6 +104,7 @@ def persist_blocks(
     document.chunk_task_id, document.chunk_config = None, None
     document.embedding_task_id, document.embedding_config = None, None
     document.index_task_id, document.index_config = None, None
+    document.parse_quality = parsed.quality.model_dump(mode="json") if parsed.quality else None
     session.execute(
         delete(DocumentBlock).where(DocumentBlock.doc_id == document.doc_id)
     )
@@ -119,6 +121,7 @@ def persist_blocks(
                 bbox=block.bbox,
                 source=block.source,
                 confidence=block.confidence,
+                provenance=block.provenance.model_dump(mode="json") if block.provenance else None,
             )
             for index, block in enumerate(parsed.blocks, start=1)
         ]

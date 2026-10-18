@@ -19,7 +19,7 @@ from test_mineru_merge import merged_case
 
 @pytest.mark.parametrize("outcome", ["pass", "adapter_fail", "guard_fail"])
 def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context, monkeypatch, outcome):
-    """Whole复用原归档并区分失败阶段；缺页只报冻结计数，不放宽Guard或修改Job。"""
+    """Whole复用原归档；结构增强失败保留可靠基础内容，独立安全Guard拒绝仍显式失败。"""
     document, job, settings, _ = context
     from app.services.mineru import jobs, raw_results
     from app.parsers.routing.contracts import PageSignals, RouteDecision, StructuralSignals
@@ -47,13 +47,12 @@ def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context,
     monkeypatch.setattr(guard, "guard_result", guard_stub)
     snapshot = deepcopy(vars(job)), deepcopy(vars(document))
     report = tool.inspect_job(document, job, settings, job.batch_id, None)
-    assert report["status"] == ("ADAPTER_PASS_NOT_RECOVERED" if outcome == "pass" else "FAIL")
-    assert report["adapter_normalize"] == ("FAIL" if outcome == "adapter_fail" else "PASS")
-    assert report["completeness_guard"] == {"pass": "PASS", "adapter_fail": "NOT_EXECUTED", "guard_fail": "FAIL"}[outcome]
-    if outcome != "adapter_fail":
-        assert report["block_count"] == 2
-    else:
-        assert report["merge_diagnostic"]["reason"] == "MOVED_TEXT"
+    assert report["status"] == ("FAIL" if outcome == "guard_fail" else "ADAPTER_PASS_NOT_RECOVERED")
+    assert report["adapter_normalize"] == "PASS" and report["block_count"] == 2
+    assert report["completeness_guard"] == ("FAIL" if outcome == "guard_fail" else "PASS")
+    if outcome == "adapter_fail":
+        assert "MOVED_TEXT" in report["parse_quality"]["warnings"]
+        assert report["parse_quality"]["structure"] == "DEGRADED"
     if outcome == "guard_fail":
         assert report["missing_required_original_pages"] == [2]
         assert report["missing_required_page_signals"] == [{"page": 2, "text_chars": 10,
@@ -108,7 +107,7 @@ def test_missing_zip_is_blocked_and_does_not_revive_failed_job(context):
 
 
 def test_existing_zip_reproduces_safe_subreason_without_exporting_text_or_bbox(context, tmp_path):
-    """来源单侧多出Span须报目标数量不符；诊断仍不得导出原文、坐标或私有路径。"""
+    """来源多Span按原序保留基础内容并报告增强拒绝；不导出原文、坐标或私有路径。"""
     document, job, settings, _ = context
     values, layout, _ = merged_case(originals=("PRIVATE_BODY", "PRIVATE_BODY_2"))
     layout["pdf_info"][0]["preproc_blocks"][1]["lines"][0]["spans"].append(
@@ -117,13 +116,15 @@ def test_existing_zip_reproduces_safe_subreason_without_exporting_text_or_bbox(c
     archive.write_bytes(result_zip(values, layout=layout))
     snapshot = deepcopy(vars(job))
     report = tool.inspect_job(document, job, settings, "original-batch", archive)
-    assert report["status"] == "FAIL" and report["error_code"] == "MERGE_EVIDENCE"
+    assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED" and report["error_code"] is None
     # 相同Span可合法多次出现；本夹具只增加来源项，故在来源/目标序列核对时失败。
-    diagnostic = report["merge_diagnostic"]
+    diagnostic = report["enhancement_diagnostic"]
     assert diagnostic["reason"] == "TARGET_SPAN_COUNT"
     assert diagnostic["stage"] == "adapter.restore_merged_text"
     assert (diagnostic["observed"], diagnostic["expected"]) == (2, 3)
-    assert report["merge_diagnostic"]["original_page"] == 1
+    assert diagnostic["page_idx"] == 0
+    assert report["parse_quality"]["structure"] == "DEGRADED"
+    assert "TARGET_SPAN_COUNT" in report["parse_quality"]["warnings"]
     assert report["zip_size_bytes"] == archive.stat().st_size
     serialized = json.dumps(report)
     assert all(secret not in serialized for secret in ("PRIVATE_BODY", "bbox", str(tmp_path), document.file_name))
@@ -221,7 +222,7 @@ def test_report_is_exclusive_and_io_errors_do_not_leak_or_overwrite(tmp_path, mo
 
 
 def test_old_paid_normalizer_requires_explicit_diagnostic_upgrade_without_changing_job(context):
-    """v2冻结Job默认拒绝；显式v3离线比较使用新身份，不修改旧参数或发布缓存。"""
+    """v2冻结Job默认拒绝；显式v4离线比较使用新身份，不修改旧参数或发布缓存。"""
     document, job, settings, _ = context
     job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v2"
     snapshot = deepcopy(vars(job))
@@ -229,14 +230,14 @@ def test_old_paid_normalizer_requires_explicit_diagnostic_upgrade_without_changi
         tool.inspect_job(document, job, settings, "original-batch", None)
     assert error.value.code == "CACHE_CONFIG_CHANGED"
     report = tool.inspect_job(document, job, settings, "original-batch", None, allow_normalizer_upgrade=True)
-    assert report["normalizer_upgrade_explicit"] and report["normalizer_version"] == "mineru-adapter-v3"
+    assert report["normalizer_upgrade_explicit"] and report["normalizer_version"] == "mineru-adapter-v4"
     assert report["frozen_normalizer_version"] == "mineru-adapter-v2"
     assert report["adapter_identity"] != report["frozen_adapter_identity"]
     assert vars(job) == snapshot and not report["cache_published"]
 
 
 def test_unknown_old_normalizer_cannot_use_upgrade_switch(context):
-    """升级许可只覆盖明确v2到v3，不能绕过任意历史版本或缺失身份。"""
+    """诊断升级许可仅覆盖明确v2/v3到v4，不能绕过任意历史版本或缺失身份。"""
     document, job, settings, _ = context
     job.parse_options["_cache_recipe"]["normalizer_version"] = "mineru-adapter-v1"
     with pytest.raises(MinerUError) as error:
@@ -346,7 +347,7 @@ def coverage_context(context, monkeypatch):
 
 
 def test_coverage_comparison_requires_flag_and_preserves_frozen_failure(context, tmp_path, monkeypatch):
-    """冻结缺页默认失败；显式覆盖比较只在副本通过原Guard，不改块/旧身份或发布缓存。"""
+    """冻结缺页记部分覆盖；显式比较仅改内存覆盖摘要，不改块/旧身份或发布缓存。"""
     from app.services.mineru import pdf_split_jobs
     from app.parsers.routing.contracts import RouteDecision
     from app.parsers.routing.guard import guard_result, CompletenessError
@@ -368,18 +369,18 @@ def test_coverage_comparison_requires_flag_and_preserves_frozen_failure(context,
     monkeypatch.setattr(pdf_split_jobs, "validate_piece", real_guard)
     before = deepcopy(vars(job)), deepcopy(vars(document))
     default = tool.inspect_job(document, job, settings, "original-batch", archive)
-    assert default["status"] == "FAIL" and default["error_code"] == "COMPLETENESS"
+    assert default["status"] == "ADAPTER_PARTIAL_NOT_RECOVERED" and default["error_code"] is None
     assert default["missing_required_original_pages"] == [2]
     report = tool.inspect_job(document, job, settings, "original-batch", archive, allow_coverage_upgrade=True)
     assert report["status"] == "ADAPTER_PASS_NOT_RECOVERED"
-    assert report["frozen_completeness_guard"] == "FAIL" and report["completeness_guard"] == "PASS"
+    assert report["frozen_completeness_guard"] == "PARTIAL" and report["completeness_guard"] == "PASS"
     assert report["guard_evaluation_scope"] == "proposed_coverage_only"
     assert report["frozen_missing_required_original_pages"] == [2]
     assert report["missing_required_original_pages"] == []
     assert report["coverage_change_pages"] == [{"page": 2, "frozen_required": True,
         "proposed_required": False, "reason": "margin_rule_only", "drawing_count": 4,
         "decorative_drawing_count": 4}]
-    assert report["normalizer_version"] == "mineru-adapter-v3"
+    assert report["normalizer_version"] == "mineru-adapter-v4"
     assert not report["normalizer_changed_by_coverage_comparison"]
     assert report["frozen_adapter_identity"] == report["adapter_identity"]
     assert all(value == calls[0] for value in calls)

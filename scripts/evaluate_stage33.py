@@ -121,6 +121,7 @@ def main(argv=None):
                 status=report["status"], file_count=report["ready"], item_count=report["fixed_qa_count"],
                 error_code=error_code, duration_ms=(perf_counter() - started) * 1000)
             print(f"{report['status']}：READY={report['ready']}/{report['fixed_document_count']}；"
+                  f"PARTIAL_READY={report.get('partial_ready', 0)}；"
                   f"QA登记={report['fixed_qa_count']}；报告={run / 'summary.md'}；运行器错误={error_code or '-'}")
             if args.step == "import" and report["ready"] != report["fixed_document_count"]:
                 print("存在失败或未完成文档；运行器无异常不代表恢复成功，逐文件原因见import_report.json。")

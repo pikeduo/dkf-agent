@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：固定200份/4087题；最新10份离线检查1份通过、9份失败，另1份预检超限。已补多页重复表头与续接行组合证明；V1缺文/纯图片无文字仍不伪造成功，新增测试及恢复待用户执行，不进入34，阶段32数据不改。**
+当前阶段：**33全量导入排错中：固定200份/4087题；MinerU v4已分离可靠基础内容与可选增强，补质量/来源、PARTIAL_READY及原ZIP本地Retry。0009迁移、Mock、批量离线回放及真实恢复均待用户执行，不宣称全部READY，不进入34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -58,10 +58,10 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 全量导入排错中；原ZIP离线复用保留，补多页重复表头/续接与整页网格证明；部分V1缺文、无文字图片和预检超限仍阻塞，测试/恢复由用户执行，完整READY/4087题评测未通过 |
+| 33 | 已编写v4基础内容/可选增强分层、三维质量、部分终态与只读批量ZIP回放；原Job本地恢复及全量200/4087报告保留，迁移/测试/真实回放待用户执行，完整验收未通过 |
 | 34 及后续 | 未执行，等待用户确认 |
 
-- 当前迁移 head 为 `0008_document_management`；新增仅管理员编排检查点，保留原向量/处理语义；尚未由Codex执行迁移，“已实现”不等于已验收。
+- 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
 - 阶段30的LangGraph仅封装原Search/Query/Formula服务，不改Parser/上传/检索/原RAG Prompt或索引语义；此前业务验收不会因阶段32数据提取自动通过，后续模型/云端/测试仍须另行授权。
 - 用户后续单独授权阶段32本地数据提取，固定于`data/dataset/stage32_run_01/`，仅OHR/OCB；历史阶段16三基准工具/素材保留。正式QA必须全依赖存在且Hash一致，每原件至少一题；断言不拼答案，Domain未审不纳入。3份OHR超200页，后续可由新云PDF分片机制处理，但Codex不得自行执行真实分片、上传、评测或覆盖旧run。
@@ -159,10 +159,10 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 保留 Redis Lua 共享原子限流：50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9；滚动 24 小时日额度，1000 优先页仅按 UTC 日观测。按文件/查询数计量，同账户共用 Redis/命名空间，Redis 故障关闭云调用。
 - submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
 - POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
-- 每个云结果ZIP的唯一 content_list.json 为结构化正文，拒绝未知结构、空正文、恶意/超量 ZIP，不以 full.md 替代。只凭可信 layout 父块 index 恢复同页 header/footer，必须唯一关联、保留正文相对顺序和原数组位置 ID；无证据/歧义/复杂布局保留整页原序，禁止全局按 y 排序、拆表或公式。
+- v4先从可信同ZIP的逐页preproc/discarded原始Span/HTML/公式取得基础内容，缺布局时用V1独立项；每块标明真实来源类别/指针/Hash，不把layout冒称V1，不用V2/full.md补字。遵循原数组或可信index，不按bbox猜阅读顺序。局部未知类型/Span/坐标不连带拒绝可靠正文，不能补造页码。
 - 云结果先校验全部ZIP成员CRC及唯一非空结构列表，在PARSED_DIR独立保留原字节/Hash/Batch回执，再运行Adapter；转换失败不删原ZIP，也不发布成功缓存或标记业务成功。隔离验收CLI仅复用分片器/Provider/共享限流取得原ZIP，不操作旧Job/业务库、不运行Adapter和后续模型；默认dry-run，真实执行须另行授权全部新分片费用。
-- 文本合并须父块身份唯一，Span按出现序号核对，不按相同值去重；完整V1字符仍须可核对。只按非连续原索引写回，原样间隔必须有唯一layout身份且保留。跨页默认相邻且cross_page=true；用户已批准严格例外：中间每页全部para/preproc结构一致、均唯一映射为保留的图表/代码等间隔时允许跨过整页，未知正文、缺页、倒页仍拒绝。同页分栏的已验证接缝允许英文续词。表格按相邻源表/网格切V1原行，等价tbody/br不算损坏；已验证重复页首行可复用。两页边界行合并只在逐格非空白字符完整一致、无跨行跨度、全部原V1切片可核对时拆分，原标签/实体/数字不改。不从layout补缺失附注，不用宽松兜底伪造成功。
-- 当前Normalizer为v3，旧v1/v2 Whole/视觉/分片缓存隔离，旧付费Job默认拒绝版本变化；只有诊断CLI显式允许v2→v3内存比较，报告保留两套身份，不修改Job或发布缓存。Completeness缺页必须失败，不因Adapter通过删除required页、造块或自动追加Batch；不自动复活FAILED、回填旧ZIP或新增收费。
+- 原有文本/表格严格恢复保留在`normalize_strict`增强层，唯一映射、字符/Span/网格及跨页保护不删除；增强失败记录DEGRADED子原因，回到可靠基础块，不再作为整份FAILED的默认理由。仅内容完整可READY；真实缺页/未识别视觉/隔离内容标PARTIAL，经原Chunk/GPU/Index完整写入可靠块后为PARTIAL_READY。未知页码文字留本地产物，不生成假Block或严格页命中；全局无可靠内容、Hash/Batch/ZIP安全错误仍失败。
+- 当前Normalizer为v4，旧成功缓存版本隔离且不覆盖。原v3失败Job显式Retry验证原件/片/ZIP/Batch后，仅新增本地转换配方并强制离线；原云参数、Batch/收费身份保留。历史本地代次误换只接受唯一同Hash原Job，歧义拒绝。旧v2仅允许诊断显式比较，不静默迁移。缺后续片原ZIP停止，不自动追加云任务。
 
 ### 整份 Router v1
 
@@ -171,7 +171,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - RouteDecision 版本固定，只含模式/格式/策略、白名单理由、结构计数、页摘要和回退次数，不含正文、地址、凭据或虚构置信度；任务结果与 job 的 `_route_decision` 保存，不参与供应商参数 Hash、不透传 API。
 - auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。所有云入口远端 failed 不自动追加批次，云失败不降 Native；PUT/GET/下载有限重试仍用同批次。
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
-- PDF覆盖独立版本化为`pdf-coverage-v2`，不改变Normalizer v3/正文/缓存键；只凭全部绘制证据证明页边缘单条不透明灰细横线才免覆盖，保留原drawing_count、固定依据/装饰计数。未知矢量/隐藏文字/图像/批注/复杂图表仍要求覆盖，不以绘图数量或云端缺页推断装饰。旧快照默认v1且required不重算；仅诊断显式`--allow-coverage-upgrade`可在Hash/原始计数一致时比较内存副本，与Normalizer升级许可独立，不改Job/Guard/缓存、不恢复或投递收费任务。详见[覆盖比较](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。
+- PDF覆盖仍独立使用`pdf-coverage-v2`，不因云缺页改变required；装饰证明及冻结比较规则不变。Native缺页仍严格失败；MinerU v4有可靠内容但缺required页时保留缺口并标PARTIAL，不冒充完整。诊断显式覆盖比较仅操作副本，与Normalizer许可独立，不改Job/缓存或投递云任务。详见[覆盖比较](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。
 - 云交接保持行锁/代次检查、提交后投递；路由拒绝为 Document=FAILED、Celery=FAILURE，固定安全理由可追踪，无新 Block/云调用。交接成功不等于解析成功，查询 Document/Parse Job。
 - 云费用按 doc_id/job_id/batch_id 去重：普通Whole/Bundle计划1，PDF分片计划数以实际物化manifest为准；每个确认Batch的文件计1，片缓存命中计0，不直接累加重复日志。提交不确定不等于未计费，须平台核对。
 
@@ -186,7 +186,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 ### Parse Cache
 
 - 整份键包含原件 Hash/格式、Provider、模型、语言、OCR/表格/公式选项、Route/覆盖范围及版本；Hybrid 额外含 Extractor、manifest/视觉内容摘要。视觉键使用原图片字节 Hash，不使用临时 PDF Hash、doc_id 或 Anchor。
-- 缓存只发布已完整校验结果，保存不可变代次和文件校验和；跨文档重绑身份，Reindex 使用该文档冻结代次以保持 ID/顺序。Native XLSX 原式不得被缓存云计算值覆盖。
+- 缓存只发布安全校验通过的转换产物，保留三维质量、隔离内容与校验和；缓存有效不等于文档内容完整，PARTIAL不能被回放成完整READY。跨文档重绑身份，Reindex使用冻结代次；Native XLSX原式不被云计算值覆盖。
 - `PARSED_DIR` 由所有进程共享并备份整个目录（含隐藏元数据）；缓存含原文，不入仓库/日志，变更归一化或提取算法时维护版本失效。损坏/缺失不静默重新付费，旧已完成结果不自动回填。
 - 相同活动内容用数据库事务锁/Job 检查点保护；普通重试遇收费历史而无可用结果停止，只有显式 Force Reparse 允许新调用。缓存发布和数据库非同一事务；已验证结果可在 SQL 回滚后同代次恢复，落库日志只在提交后记录。
 
@@ -199,7 +199,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 ### pgvector 入库
 
 - /index 只消费已完成本地向量，一个文档一个 default_queue 任务；不加载模型/Parser 或调用云端。独立 index_task_id/index_config 冻结解析、切片、GPU 代次及文件/模型摘要，重试只恢复同一代次。
-- HNSW cosine 部分索引由用户执行迁移创建，任务只校验有效索引。全量输入/文件身份、1024 维、有限单位向量通过后批量更新原 Chunk，数量/维度/范数与 READY 同事务，任一失败整体回滚；成功日志仅在提交后。
+- HNSW cosine部分索引由用户迁移，任务只校验。全量可靠Chunk输入/向量通过后与终态同事务提交；内容COMPLETE为READY、PARTIAL为PARTIAL_READY，任何向量错误仍全回滚。两类可靠块可检索，知识库/文档/模型/代次隔离不变，正式全量验收只计READY。
 - READY 重复 /index、/chunk、/embed 不重算；活动入库拒绝维护。显式 Reindex/Reparse 与成功 Block/Chunk 重建失效旧入库检查点，失败保留原证据；未来检索必须限定 READY 及模型/编码版本，不能用有值的旧向量冒充新代次。
 
 ### LlamaIndex Adapter

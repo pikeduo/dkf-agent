@@ -1,6 +1,17 @@
 # 文档管理与动态增量入库（阶段25/26）
 
-阶段25/26代码与用例已实现。最新用户验收：阶段26缓存命中增量主链、READY/ingest-done、新文档检索及旧文档不变已通过；缓存未命中新云批次尚待人工确认。本轮获单独授权执行相关Mock回归，不执行数据库迁移、真实文件清理、Worker、GPU或MinerU请求。以前阶段待办保留，阶段27公式业务不变。阶段26没有新迁移、依赖或环境变量；补充验收见[阶段26补充](STAGE26_SUPPLEMENT.md)。
+阶段25/26验收基线保留；阶段33新增MinerU v4质量分层和PARTIAL_READY，本轮只编写代码/Mock，由用户执行迁移及验收，不调用云端。此前阶段未验收事项不自动通过；阶段26补充见[专页](STAGE26_SUPPLEMENT.md)。
+
+## v4质量与部分索引状态
+
+`0009_parse_quality`新增可空Document.parse_quality、Block.provenance及PARTIAL_READY状态约束，需备份、停止API/Worker并手动执行`python -m alembic upgrade head`，不修改历史行。迁移后重启所有进程，不能只更新CLI。
+
+- `/status`与详情返回`parse_quality`，`/blocks`返回`provenance`；质量只包含固定原因、计数及页范围，不含正文/Token/私有路径。
+- 结构增强降级但内容完整：原链路可到READY；内容部分可用：原Chunk→Embedding→Index校验全部可靠块向量后到PARTIAL_READY，management仍done/done，但正式全量验收不计为READY。空内容、ZIP/Hash/身份错误仍FAILED。
+- PARTIAL_READY重复Retry仅补编排done，不隐式重解析/补收费；显式Reindex回放原质量，不会把部分覆盖改成完整。Dense/BM25/Evidence可读取该状态的可靠块，仍执行原范围、代次、来源及Hash校验。
+- 原v3本地失败Job的Retry核对原件/分片/ZIP/Batch后升级本地配方为v4，原云配方和Batch不改；强制本地、不需Token、不访问MinerU。旧Retry换了本地代次时，只接受唯一同Hash原付费Job；歧义、坏原ZIP或缺后续片结果停止，不自动新建Batch。
+
+只读批量回放及单文档恢复的完整PowerShell步骤见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。Codex未执行恢复；本轮不覆盖用户run、报告、原ZIP或QA。
 
 ## 接口与观察
 
@@ -87,7 +98,7 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-预期head为`0008_document_management`。按README重启API/CPU/GPU Worker；CPU应注册管理任务，GPU仍solo/concurrency=1。XLSX Hybrid Reparse依照原README使用CPU solo/concurrency=1，不改变部署约束。
+当前预期head为`0009_parse_quality`。按README重启API/CPU/GPU Worker；CPU应注册管理任务，GPU仍solo/concurrency=1。XLSX Hybrid沿用CPU solo/concurrency=1，不改变部署约束。
 
 选择有成功Parse Cache的已有READY测试文档，替换一次UUID，在PowerShell中：
 
@@ -154,7 +165,7 @@ python -m pytest tests/document_upload_smoke.py tests/document_processing_smoke.
 
 ### 2. 启动现有服务
 
-确认已部署PostgreSQL17/pgvector、Redis、BGE-M3及GPU，迁移head为`0008_document_management`。若阶段25迁移尚未执行，先按README备份/停止进程，由用户执行升级；阶段26不新增迁移。重启API和所有Worker，三个独立PowerShell终端分别执行：
+确认已部署PostgreSQL17/pgvector、Redis、BGE-M3及GPU，当前迁移head为`0009_parse_quality`。先按README备份/停止进程，由用户手动升级；阶段26历史基线保留。重启API和所有Worker，三个独立PowerShell终端分别执行：
 
 ```powershell
 conda activate dkf-agent

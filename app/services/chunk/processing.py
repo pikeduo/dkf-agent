@@ -42,7 +42,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise ChunkError("CHUNK_BUSY：文档仍有活动解析任务")
-    if document.status in {"EMBEDDING", "INDEXING", "READY"} and document.chunk_task_id is not None:
+    if document.status in {"EMBEDDING", "INDEXING", "READY", "PARTIAL_READY"} and document.chunk_task_id is not None:
         checkpoint_options(document)
         return document.chunk_task_id, False
     if document.status not in {"CHUNKING", "FAILED"} or (
@@ -86,7 +86,8 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     log_event("chunk.started", doc_id=doc_id, kb_id=document.kb_id, task_id=task_id,
               block_count=len(blocks), chunk_size=options.size, chunk_overlap=options.overlap)
     inputs = [SourceBlock(block.block_id, block.block_index, block.page, block.section,
-                          block.block_type, block.text, block.source, block.bbox) for block in blocks]
+                          block.block_type, block.text, block.source, block.bbox,
+                          getattr(block, "provenance", None)) for block in blocks]
     drafts = build_chunks(doc_id, document.kb_id, document.file_type, inputs, options)
     session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == doc_id))
     document.embedding_task_id, document.embedding_config = None, None
@@ -94,6 +95,8 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     for draft in drafts:
         metadata = draft.metadata | {"source_parse_task_id": source_generation(document),
                                      "file_hash": document.file_hash}
+        if getattr(document, "parse_quality", None):
+            metadata["parse_quality"] = document.parse_quality
         session.add(DocumentChunk(chunk_id=draft.chunk_id, doc_id=doc_id, kb_id=document.kb_id,
             text=draft.text, page_start=draft.page_start, page_end=draft.page_end,
             section=draft.section, chunk_metadata=metadata, embedding=None))

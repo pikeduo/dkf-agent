@@ -6,6 +6,8 @@
 
 ## 入口与事务
 
+阶段33补充：用户已确认新增`0009_parse_quality`，未代跑迁移/测试。原Index仍完整校验所有可靠Chunk向量；解析内容COMPLETE提交READY，PARTIAL提交PARTIAL_READY。两类终态同样幂等且可按原知识库/文档/模型/代次检索，PARTIAL不计入正式完整验收。向量失败仍整体回滚，不降低1024维、范数或身份校验。
+
 - POST `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index`，无请求体；INDEXING 才能首次提交，FAILED 仅恢复已有入库检查点。未完成 Embedding/普通解析失败返回 409，跨知识库返回 404。
 - 返回 202、doc_id/kb_id/index_task_id/status。独立 index_task_id/index_config 冻结解析、切片、GPU 代次、输入及选项 Hash、向量文件校验和、实际模型指纹。API 不读取向量或加载模型，提交检查点后投递 default_queue，每文档一个 CPU 任务。
 - CPU 先校验完整 manifest/文件，再核对 Chunk 原顺序/文本 Hash、模型名/指纹/编码版本/精度/长度、1024 维有限 L2 单位向量。固定 256 行参数化批量更新原 Chunk，不插入新 Chunk，不改变正文、页码、section 或 metadata，不静默重新归一化。

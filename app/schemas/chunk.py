@@ -12,7 +12,7 @@ class ChunkTaskResponse(BaseModel):
     doc_id: UUID
     kb_id: UUID
     chunk_task_id: UUID
-    status: Literal["CHUNKING", "EMBEDDING", "INDEXING", "READY"]
+    status: Literal["CHUNKING", "EMBEDDING", "INDEXING", "READY", "PARTIAL_READY"]
 
 
 class ChunkResponse(BaseModel):

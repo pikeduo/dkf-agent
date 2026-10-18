@@ -94,6 +94,7 @@ def read_snapshot(kb_id, *, detailed=True):
                 result[doc.file_hash] = {"doc_id": str(doc.doc_id), "kb_id": str(doc.kb_id),
                     "file_hash": doc.file_hash, "file_type": doc.file_type, "file_name": doc.file_name,
                     "status": doc.status, "block_count": block_counts.get(doc.doc_id, 0),
+                    "parse_quality": getattr(doc, "parse_quality", None),
                     "chunk_count": chunks, "vector_count": vectors, "invalid_vector_count": bad,
                     "management": management.model_dump(mode="json") if management else None,
                     "error_code": error or (parser_causes[0] if parser_causes else None)
@@ -137,14 +138,19 @@ def is_ready(row):
     """READY必须同时具备Block、完整1024维单位向量及结束的已有编排。"""
     management = row.get("management")
     return (row["status"] == "READY" and row["block_count"] > 0
+        and (row.get("parse_quality") or {}).get("content") != "PARTIAL"
         and row["chunk_count"] == row["vector_count"] > 0 and row["invalid_vector_count"] == 0
         and (management is None or management["state"] == "done"))
 
 
 def scope_identity(rows):
     """冻结文档集合/代次/向量数量，避免恢复后混算不同索引快照。"""
-    return digest({sha: {k: row[k] for k in ("doc_id", "status", "block_count", "chunk_count",
-        "vector_count", "invalid_vector_count", "index_identity")} for sha, row in sorted(rows.items())})
+    values = {sha: {k: row[k] for k in ("doc_id", "status", "block_count", "chunk_count",
+        "vector_count", "invalid_vector_count", "index_identity")} for sha, row in sorted(rows.items())}
+    for sha, row in rows.items():
+        if row.get("parse_quality"):
+            values[sha]["parse_quality"] = row["parse_quality"]
+    return digest(values)
 
 
 class API:
@@ -255,7 +261,7 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
             initial_cloud = sorted({(u["batch_id"], u["data_id"]) for r in rows.values()
                 for j in r.get("parse_jobs", []) for u in j["units"] if u.get("batch_id") and u.get("data_id")})
             write_json(run / "baseline.json", {"confirmed_cloud_files": initial_cloud})
-        active = sum(r["status"] not in {"FAILED", "READY"} for r in rows.values())
+        active = sum(r["status"] not in {"FAILED", "READY", "PARTIAL_READY"} for r in rows.values())
         changed = False
         for doc in data["documents"]:
             item = state[doc["file_id"]]
@@ -270,7 +276,7 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
                 continue
             if row:
                 item.update(row)
-                item["execution_status"] = "READY" if is_ready(row) else (
+                item["execution_status"] = "PARTIAL_READY" if row["status"] == "PARTIAL_READY" else "READY" if is_ready(row) else (
                     "FAILED" if row["status"] in {"FAILED", "READY"} or (row.get("management") or {}).get("state") == "failed"
                     else "WAITING")
                 if row["status"] == "READY" and not is_ready(row):
@@ -313,7 +319,7 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
             active += 1
             changed = True
         write_json(state_path, state)
-        terminal = {"READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}
+        terminal = {"READY", "PARTIAL_READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}
         pending_retry = retry_failed and any(state[fid]["execution_status"] == "FAILED"
             and fid not in retried and not state[fid].get("retry_intent") for fid in targets)
         # 本轮刚发过请求时再观察一轮，HTTP超时但已落库的文档不能被过早判为失联。
@@ -331,7 +337,7 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
     # 所有文件始终保留；超时不是后台取消，也不把未调度文件当作成功。
     for fid in targets:
         item = state[fid]
-        if item["execution_status"] not in {"READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}:
+        if item["execution_status"] not in {"READY", "PARTIAL_READY", "FAILED", "UPLOAD_UNCONFIRMED", "RETRY_UNCONFIRMED", "INPUT_FAILED"}:
             item["execution_status"] = "TIMEOUT_PENDING"
     write_json(state_path, state)
     if retry_failed_only:

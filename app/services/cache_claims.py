@@ -24,8 +24,11 @@ def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_
     from app.services.mineru.pdf_split_jobs import has_submission_history
 
     key = key_for(value)
-    lock_keys(session, [key, *visual_keys])
+    lock_keys(session, [key, value["file_hash"], *visual_keys])
     identities = [DocumentParseJob.parse_options.contains({"_cache_key": key})]
+    # 本地Normalizer升级不能使旧收费历史失踪；先恢复原Job的ZIP生成新缓存。
+    identities.append((DocumentParseJob.file_hash == value["file_hash"]) &
+                      (DocumentParseJob.provider == "mineru_cloud"))
     identities.extend(DocumentParseJob.parse_options.contains({"_cache_visual_keys": [v]}) for v in visual_keys)
     previous = session.scalars(select(DocumentParseJob).where(or_(*identities))).all()
     if any(job.is_active for job in previous):
@@ -33,9 +36,9 @@ def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_
         raise MinerUError("CACHE_IN_PROGRESS", "相同内容已有活动云任务，未重复提交；完成后重试即可复用缓存")
     # 同代次已有 batch/申请意图包括失败或 done 后本地结果缺失，普通重试不重复花费。
     if not force_reparse and any(has_submission_history(job) for job in previous):
-        raise MinerUError("CACHE_REPARSE_REQUIRED", "相同内容已有云提交历史但可用缓存缺失；未自动收费，请核对旧批次或显式 Reparse")
+        raise MinerUError("CACHE_REPARSE_REQUIRED", "相同内容已有云提交历史；请先用原Job的本地ZIP恢复，未自动上传或重新收费")
     legacy = session.scalars(select(DocumentParseJob).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.file_hash == document.file_hash,
         DocumentParseJob.provider == "mineru_cloud")).all()
     if not force_reparse and any(has_submission_history(job) for job in legacy):
-        raise MinerUError("CACHE_REPARSE_REQUIRED", "该文档已有云提交但当前参数下无可用缓存；普通重试不重新收费，请核对后显式 Reparse")
+        raise MinerUError("CACHE_REPARSE_REQUIRED", "该文档已有付费结果历史；请恢复原Job的本地ZIP，不应因Adapter错误强制重解析")

@@ -21,9 +21,10 @@ def validate_archive(archive: bytes, limit: int) -> int:
     if not archive or len(archive) > limit:
         raise MinerUError("ZIP_SIZE", "MinerU 原始结果大小无效")
     try:
-        items = read_content_list(archive)  # 复用路径、成员数量及总展开大小限制。
-        if not items or any(not isinstance(item.get("type"), str) or not item["type"].strip()
-                            or type(item.get("page_idx")) is not int or item["page_idx"] < 0 for item in items):
+        items = read_content_list(archive, allow_invalid_items=True)
+        # 局部条目/page损坏交给Adapter隔离，不能因此丢弃已经付费取得的整个原ZIP。
+        if not items or not any(isinstance(item, dict) and isinstance(item.get("type"), str)
+                                and item["type"].strip() for item in items):
             raise MinerUError("CONTENT_LIST", "MinerU 原始结果没有有效的结构化条目")
         with ZipFile(BytesIO(archive)) as zipped:
             names = zipped.namelist()

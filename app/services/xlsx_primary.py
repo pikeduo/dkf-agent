@@ -83,7 +83,7 @@ def prepare_primary(document, settings: Settings, decision: RouteDecision | None
 
 def complete_primary(document, context: dict, cloud: ParsedDocument,
                      decision: RouteDecision | None) -> ParsedDocument:
-    """保留 Native 整表原式，再附整份云块原序；不猜 Sheet 映射、不覆盖公式、不拆结构块。"""
+    """保留Native原式及云块原序/质量；不猜Sheet、覆盖公式或把部分云内容冒充完整。"""
 
     try:
         checkpoint = PrimaryCheckpoint.model_validate(context)
@@ -102,6 +102,7 @@ def complete_primary(document, context: dict, cloud: ParsedDocument,
             "block_id": uuid5(document.doc_id, f"xlsx-primary-v1:whole:{block.block_id}")
         }) for block in cloud.blocks]
         return ParsedDocument(doc_id=document.doc_id, file_name=document.file_name,
-                              file_type="xlsx", title=native.title, blocks=blocks)
+                              file_type="xlsx", title=native.title, blocks=blocks,
+                              quality=cloud.quality, quarantined_content=cloud.quarantined_content)
     except (ParserError, ValueError, KeyError, TypeError, AttributeError):
         raise MinerUError("XLSX_PRIMARY_CHECKPOINT", "XLSX 主结果或云结果校验失败，未写入部分 Block") from None

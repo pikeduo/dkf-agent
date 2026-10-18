@@ -93,7 +93,7 @@ def test_merge_normalizer_version_isolates_whole_and_visual_cache(cache_context,
 
     ctx = cache_context
     current_version = module.NORMALIZER_VERSION
-    assert current_version == "mineru-adapter-v3"
+    assert current_version == "mineru-adapter-v4"
     monkeypatch.setattr(module, "NORMALIZER_VERSION", "mineru-adapter-v2")
     old_whole = recipe(ctx.document, ctx.settings, "mineru_whole")
     old_visual = visual_recipe("b" * 64, cloud_options(ctx.settings), VERSION)

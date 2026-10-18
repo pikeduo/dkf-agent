@@ -107,7 +107,7 @@ def _loaded(model, fields) -> dict:
 def evidence_statement(kb_id: UUID, chunk_id: UUID, doc_id: UUID | None = None):
     """范围、ACTIVE/READY和唯一Chunk均下推SQL，不读取原件路径/向量或扩大范围。"""
     filters = [DocumentChunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
-               DocumentChunk.chunk_id == chunk_id, KnowledgeBase.status == "ACTIVE", Document.status == "READY"]
+               DocumentChunk.chunk_id == chunk_id, KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"])]
     if doc_id is not None:
         filters.append(Document.doc_id == doc_id)
     return (select(DocumentChunk, Document).join(Document,
@@ -159,6 +159,8 @@ def _trace(chunk: dict, document: dict, metadata: dict, spans: list[SourceSpan],
         total = 0
         for block in blocks:
             value = _loaded(block, BLOCK_FIELDS)
+            if any(s.block_id == value["block_id"] and s.provenance is not None for s in spans):
+                value["provenance"] = _loaded(block, ("provenance",))["provenance"]
             if value["doc_id"] != document["doc_id"] or value["block_id"] in lookup:
                 raise ValueError
             total += len(value["text"])
@@ -171,6 +173,9 @@ def _trace(chunk: dict, document: dict, metadata: dict, spans: list[SourceSpan],
         resolved, parts, offset = [], [], 0
         for span in spans:
             block = lookup[span.block_id]
+            if not span.page_reliable or span.provenance is not None and (
+                    span.provenance != block.get("provenance") or not span.provenance.get("page_reliable")):
+                raise ValueError
             if (any(getattr(span, field) != block[field] for field in ("block_index", "page", "block_type", "source", "bbox"))
                     or span.block_text_hash != hashes[span.block_id] or span.end_char > len(block["text"])
                     or span.chunk_end_char > len(chunk["text"])
@@ -223,7 +228,7 @@ class EvidenceService:
             raise EvidenceError("EVIDENCE_SOURCE")
         chunk, document = _loaded(rows[0][0], CHUNK_FIELDS), _loaded(rows[0][1], DOCUMENT_FIELDS)
         if (chunk["chunk_id"] != chunk_id or chunk["kb_id"] != kb_id or document["kb_id"] != kb_id
-                or chunk["doc_id"] != document["doc_id"] or document["status"] != "READY"
+                or chunk["doc_id"] != document["doc_id"] or document["status"] not in {"READY", "PARTIAL_READY"}
                 or doc_id is not None and document["doc_id"] != doc_id):
             raise EvidenceError("EVIDENCE_SOURCE")
         metadata, spans = _source_metadata(chunk, document)
@@ -239,7 +244,7 @@ class EvidenceService:
                     raise EvidenceError("EVIDENCE_STALE")
         ids = {span.block_id for span in spans}
         statement = (select(DocumentBlock).where(DocumentBlock.doc_id == document["doc_id"], DocumentBlock.block_id.in_(ids))
-            .options(load_only(*(getattr(DocumentBlock, field) for field in BLOCK_FIELDS), raiseload=True))
+            .options(load_only(*(getattr(DocumentBlock, field) for field in (*BLOCK_FIELDS, "provenance")), raiseload=True))
             .order_by(DocumentBlock.block_index, DocumentBlock.block_id).limit(MAX_SPANS + 1))
         blocks = session.execute(statement).scalars().all()
         return _trace(chunk, document, metadata, spans, blocks)

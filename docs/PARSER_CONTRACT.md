@@ -10,6 +10,14 @@
 
 ## 统一结构
 
+### MinerU v4质量扩展
+
+- 新增可选`ParsedDocument.quality`：`content=COMPLETE/PARTIAL`、`structure=BASE/ENHANCED/DEGRADED`、`evidence=VERIFIED/PARTIAL`，以及固定告警/安全诊断、覆盖/必需/缺失页和隔离计数。COMPLETE只表示当前结构化产物未发现内容缺口，不证明OCR语义无误。
+- `ParsedBlock.provenance`记录同ZIP来源类别、结构指针、原结构SHA256及页码/bbox可靠性。来源可为逐页preproc/discarded、独立V1或已验证增强，不能把layout内容冒称为V1原文。按原来源序列生成稳定ID，不按文件名写兼容特例。
+- 页码可靠但bbox缺失：保留正文/原页、bbox=NULL并记证据质量。页码不可靠：文字保存在`quarantined_content`本地产物，不写假page=1的Block，不进入Chunk和严格页命中评分；全局没有可用可靠块仍失败。
+- 质量与来源通过原Block→Chunk字符证据→Node/Citation保留。`0009_parse_quality`仅新增可空质量/来源列及PARTIAL_READY状态，用户手动迁移，不回填旧数据。可靠块向量齐全但内容不完整则PARTIAL_READY；正式完整验收仍只计READY。
+- Native/旧结果未使用扩展时不序列化新增空字段，保持既有Native主结果Hash输入。详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
+
 ```json
 {
   "doc_id": "7f2044ca-2041-42ce-977d-40bf5c79ed40",

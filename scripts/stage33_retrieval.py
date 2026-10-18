@@ -74,10 +74,12 @@ def hit_rows(nodes, documents, kb_id):
             if (type(page) is not int or not value.page_start <= page <= value.page_end
                     or not span.get("block_id") or not span.get("block_text_hash")):
                 raise Stage33Error("RETRIEVAL_EVIDENCE")
-            pages.add(page)
+            if span.get("page_reliable", True) is True and (
+                    span.get("provenance") is None or span["provenance"].get("page_reliable") is True):
+                pages.add(page)
         semantics = value.metadata.get("page_semantics")
         if value.file_type != doc["file_type"] or (value.file_type == "pdf" and (
-                semantics != "physical_pdf" or max(pages) > int(doc["page_count"]))):
+                semantics != "physical_pdf" or pages and max(pages) > int(doc["page_count"]))):
             raise Stage33Error("RETRIEVAL_PAGE_SEMANTICS")
         output.append({"rank": rank, "chunk_id": str(value.chunk_id), "doc_id": str(value.doc_id),
             "kb_id": str(value.kb_id), "file_id": doc["file_id"], "file_name": value.file_name,

@@ -118,7 +118,7 @@ def eligibility(kb_id: UUID, identity: dict, doc_ids: tuple[UUID, ...] | None = 
     parse_id = cast(Document.processing_task_id, String)
     filters = (
         DocumentChunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
-        KnowledgeBase.status == "ACTIVE", Document.status == "READY", DocumentChunk.embedding.is_not(None),
+        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]), DocumentChunk.embedding.is_not(None),
         Document.index_task_id.is_not(None),
         config["version"].as_string() == INDEX_VERSION,
         config["result"]["model"] == identity,
@@ -187,7 +187,7 @@ def select_dense_hits(session: Session, kb_id: UUID | str, query_vector: list[fl
             config = document.index_config
             if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
                     or (doc_ids is not None and chunk.doc_id not in doc_ids)
-                    or document.status != "READY" or document.index_task_id is None
+                    or document.status not in {"READY", "PARTIAL_READY"} or document.index_task_id is None
                     or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
                     or model_snapshot(config["result"]["model"]) != identity
                     or any(config.get(key) != str(getattr(document, attribute)) for key, attribute in (

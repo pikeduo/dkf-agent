@@ -58,9 +58,11 @@ class DocumentResponse(BaseModel):
         "EMBEDDING",
         "INDEXING",
         "READY",
+        "PARTIAL_READY",
         "FAILED",
     ]
     error_message: str | None
+    parse_quality: dict | None = None
     task_id: UUID | None = Field(default=None, validation_alias="processing_task_id")
     index_task_id: UUID | None = None
     created_at: datetime

@@ -55,6 +55,7 @@ class DocumentStatusResponse(BaseModel):
     original_present: bool
     parse_cache_present: bool
     updated_at: datetime
+    parse_quality: dict | None = None
 
 
 class BlockResponse(BaseModel):
@@ -70,3 +71,4 @@ class BlockResponse(BaseModel):
     bbox: list[float] | None
     source: str
     confidence: float | None
+    provenance: dict | None = None

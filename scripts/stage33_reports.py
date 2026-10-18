@@ -101,6 +101,8 @@ def generate(data, run, *, fatal_code=None):
         "fixed_document_count": len(documents), "fixed_qa_count": len(questions),
         "qa_strategy_records": len(questions) * len(STRATEGIES),
         "import_attempted_or_reused": attempted, "ready": doc_ready,
+        "partial_ready": sum(r["execution_status"] == "PARTIAL_READY" for r in documents),
+        "degraded_documents": sum(bool((r.get("parse_quality") or {}).get("warnings")) for r in documents),
         "dataset_formats": {d: dict(Counter(r["file_type"] for r in documents if r["dataset"] == d))
                             for d in ("ohr", "ocb")}, "evaluation_validity": validity,
         "metrics": metrics, "fees": fee_summary(documents),
@@ -122,9 +124,17 @@ def generate(data, run, *, fatal_code=None):
     else:
         report["metrics_status"] = "VALID_EXECUTION_RECORDS"
     write_json(run / "import_report.json", {"documents": documents})
+    quality_rows = [{"dataset": r["dataset"], "file_id": r["file_id"], "doc_id": r.get("doc_id"),
+        "execution_status": r["execution_status"], "parse_quality": r.get("parse_quality")}
+        for r in documents]
+    write_json(run / "parse_quality_report.json", {"fixed_document_count": len(documents),
+        "partial_ready": report["partial_ready"], "degraded_documents": report["degraded_documents"],
+        "documents": quality_rows})
+    write_csv(run / "parse_quality_report.csv", quality_rows,
+        ["dataset", "file_id", "doc_id", "execution_status", "parse_quality"])
     write_csv(run / "import_report.csv", documents, ["dataset", "file_id", "file_path", "file_type", "sha256",
         "doc_id", "execution_status", "status", "error_code", "adapter_diagnostic", "parser_reason_codes", "route_strategy", "block_count", "chunk_count", "vector_count",
-        "invalid_vector_count", "management", "parse_jobs", "index_identity", "retry_http_status", "retry_request_error"])
+        "invalid_vector_count", "parse_quality", "management", "parse_jobs", "index_identity", "retry_http_status", "retry_request_error"])
     atomic_write(run / "qa_execution.jsonl", b"".join(encoded(r) + b"\n" for r in executions))
     write_csv(run / "qa_execution.csv", metric_rows, ["dataset", "qa_id", "strategy", "source_file_ids", "doc_ids", "status",
         "scorable", "manual_pending", "error_code", "duration_seconds", "recall_at_5", "recall_at_10", "mrr_at_20"])
@@ -149,6 +159,7 @@ def generate(data, run, *, fatal_code=None):
         "unscorable", "manual_pending", "recall_at_5", "recall_at_10", "mrr_at_20", "document_proxy_metrics",
         "document_recall_at_5", "document_recall_at_10", "document_mrr_at_20", "latency_seconds"])
     text = ["# 阶段33全量导入与检索", "", f"状态：{report['status']}；文档 {doc_ready}/{len(documents)} READY；QA范围 {len(questions)}。",
+        f"部分索引 PARTIAL_READY：{report['partial_ready']}；存在质量告警：{report['degraded_documents']}。部分索引不计入完整READY。",
         "", "| 数据集 | 策略 | 成功执行 | 可评分总分母 | 成功评分 | 不可评分 | Recall@5 | Recall@10 | MRR@20 |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|"]
     for row in summary_rows:

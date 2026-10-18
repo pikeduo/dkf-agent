@@ -54,8 +54,8 @@ def table_case(*, footnote=True):
 
 
 def normalize(items, pages, *, doc_id=None):
-    """只调用正式Adapter，page geometry来自固定Mock，不读原件或外部服务。"""
-    return MinerUResultAdapter().normalize(result_zip(items, layout={"pdf_info": list(pages.values())}),
+    """单独验证旧严格表格增强器，公共v4基础提取/降级由新契约测试覆盖。"""
+    return MinerUResultAdapter().normalize_strict(result_zip(items, layout={"pdf_info": list(pages.values())}),
         doc_id=doc_id or uuid4(), file_name="metadata.pdf", file_type="pdf",
         geometry={0: (600, 800), 1: (600, 800)}, identity="frozen-case")
 

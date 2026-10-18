@@ -4,23 +4,58 @@
 
 当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 默认自动路由与内部 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
 
+## v4基础提取与质量分层
+
+当前入口`normalize()`按“ZIP安全校验→可靠基础提取→可选normalize_strict增强→质量记录”处理。旧版把合并/布局证明放在任何Block生成之前，增强异常沿Parse Job事务变成整份FAILED，这是之前MERGE_EVIDENCE集中出现的架构原因，不代表云端解析失败。
+
+- **仍致命**：ZIP路径/符号链接/CRC/解压预算、原件/分片Hash或Job/Batch身份错误、全局结构无效、整份没有来源可确认的内容。失败不删除原ZIP、不发布业务成功。
+- **可降级**：TARGET_TEXT、BOUNDARY_TEXT、LINE_SPAN_COUNT、TABLE_ROWS/EXTRAS/LIMIT等增强错误。基础层优先读取同ZIP逐页`preproc_blocks`及`discarded_blocks`的原始Span/HTML/公式，按可信index或原数组顺序保留；不按bbox猜阅读顺序。无可用原始布局的页使用V1独立项；跨页合并正文无法定位则隔离，不把整段错算到第一页。V2/full.md不补正文，不执行HTML或公式。
+- **三维质量**：内容COMPLETE/PARTIAL，结构BASE/ENHANCED/DEGRADED，证据VERIFIED/PARTIAL。记录固定子原因、位置和计数；缺bbox设NULL，未知页码文字仅在本地normalized_document隔离。仅增强降级且内容完整可READY；缺页/未识别视觉/隔离内容只能PARTIAL_READY。COMPLETE不是OCR/语义准确率。
+- 原ZIP/回执独立保全，v4结果使用新缓存身份。原v3失败Job的显式Retry核对原件、分片及原Batch ZIP后，新增`_adapter_recipe`并强制`_local_replay_only`，不更改原云配方/Batch，不调用Provider/限流/HTTP。历史Retry误换代次时，仅允许同Hash且唯一可验证的原付费Job通过正常管理事务重新绑定；不是SQL改状态或新增恢复框架。
+- 全部必要分片必须有本地可验证结果。无文字的中间片可记录PARTIAL，但整份仍须存在可靠块；缺ZIP停止LOCAL_RESULT_REQUIRED，不自动发云。合并沿用原物理页，缺页及来源指针带分片序号。XLSX Native整表/公式不改，缺失视觉页只记PARTIAL且不发布共享视觉缓存，Bundle页不冒充Excel页。
+
+已获用户确认编写`0009_parse_quality`迁移，**未执行迁移、pytest、25份真实ZIP回放或单文档恢复**。下面旧v3严格规则保留为`normalize_strict()`可选增强和历史验收依据，不再作为v4基础内容的入库门槛。
+
+用户手动验证（无MinerU请求）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_content.py tests/test_mineru_content_pipeline.py tests/test_mineru_local_replay.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split_jobs.py tests/test_parse_cache.py tests/test_stage33_pipeline.py -q -ra
+python scripts/mineru_adapter_replay.py --checkpoint results/stage33/stage33_run_01/import_checkpoint.json --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --output "results/stage33_v4_replay_$(Get-Date -Format yyyyMMdd_HHmmss).json" --timeout 600
+```
+
+第二条遍历checkpoint中**全部**MERGE_EVIDENCE项，无前N份限制。逐项记录基础Block/Chunk预览、增强/降级、覆盖/缺页、隔离和失败原因；登记数以实际checkpoint为准，不预称25份全部成功。只读数据库/本地原件与ZIP，PyMuPDF仅读取页尺寸，不调用OCR/模型/云、不写SQL或缓存。无当前唯一Job、Hash不符及预算耗尽均保留记录。退出码0只表示登记项已转换（包括PARTIAL），不代表业务恢复或正式验收通过。迁移前该诊断延迟加载新字段，可先回放再升级。
+
+确认Mock/离线报告后，备份数据库与PARSED_DIR，停止API/所有Worker，由用户执行`python -m alembic upgrade head`确认0009，再按README重启。选择一份报告通过且原ZIP回执有效的FAILED文档：
+
+```powershell
+$docId = "填写离线报告中的真实doc_id"
+$base = "http://127.0.0.1:8000/api/admin/documents/$docId"
+Invoke-RestMethod -Uri $base | ConvertTo-Json -Depth 8
+# 人工核对原Job/Batch后执行；不加force或allow-cloud。
+Invoke-RestMethod -Method Post -Uri "$base/retry" -TimeoutSec 120
+Invoke-RestMethod -Uri "$base/status" | ConvertTo-Json -Depth 8
+```
+
+预期原doc_id/Job/Batch和ZIP不变，新增MinerU提交为0；原Chunk/GPU/Index完成后为READY或PARTIAL_READY，management=done/done。后者只表示可靠块向量齐全，需审核缺口，不能计入阶段33全200 READY。请求会正常写业务状态并运行本地模型，**由用户执行**；本轮不批量恢复、Force或删旧记录。
+
 ## 1. 官方契约与实现边界
 
 - 官方协议依据：[精准解析 API 文档](https://mineru.net/apiManage/docs)。采用 V4 本地批量申请上传链接、签名 PUT、批次 GET；不使用轻量 Agent API。
 - 生产 HTTP 客户端固定 `trust_env=False`，API、签名上传、结果下载共用直连策略，不发现环境 / Windows 系统代理，不自动回退代理。保持默认 HTTPS 证书校验；不读取 `SSL_CERT_FILE / SSL_CERT_DIR`，不修改系统代理或 VPN / TUN 路由。不新增环境变量。
 - 结构化结果依据：官方 [ContentListV1 序列化源码](https://github.com/opendatalab/MinerU/blob/3e60291846cb7c3bf8fe7f4f16238f4fc6cce491/mineru/backend/pipeline/pipeline_middle_json_mkcontent.py)。云端实际格式仍须以真实 ZIP 验收；不能把 API V4 与开源模型版本或 ContentListV2 混为一谈。
 - 默认 `vlm / ch / enable_table=true / enable_formula=true / is_ocr=true`，保存提交时参数快照。原 `/mineru/documents` 接收 1～50 个 multipart `file`，OpenAPI 为文件数组以支持 Swagger 多选；只选一份保持原 202/Parse Job，多份逐文件建立独立 Document 和 Parse Job，HTTP 200 返回逐项报告。不新增 `/batch` 路径，不是云端合批或预置知识库批量导入；Provider 的批量申请协议与按文件数计量的共享频控不变。
-- Adapter 内存读取唯一 `content_list.json / *_content_list.json`；完整校验成功后阶段12缓存保存 ZIP、结构化结果及可选 full.md。未知 V2/类型失败，不以 Markdown 代正文；详见 [Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。
+- Adapter内存读取唯一V1列表并校验ZIP；同ZIP逐页原始layout可作为明确标记来源的基础内容，局部未知类型不连带拒绝其他正文。不以V2/Markdown代正文，质量和缓存见上节。
 - ContentListV1 的 `page_idx` 转 1 基页码、归一化 bbox 转原件尺寸，保留正文顺序和实际标题章节；只在可选 layout 证据明确时恢复页眉/页脚位置，具体保护条件见下节。表格 HTML 与公式文本原样作为证据，不执行 HTML / JavaScript / 公式。图片仅有路径而无文字时不伪造正文；无可用块时失败。
 - `full.md` 可在供应商平台下载用于人工比对；当前没有 Admin 预览接口。
 
-### 阅读顺序：仅恢复有证据的页边界项
+### 阅读顺序：仅恢复有证据的页边界项（可选严格增强）
 
 真实扫描样本的 V1 数组把 `type=header` 放在该页正文、页底之后；数组项没有独立的阅读顺序字段。相同 ZIP 的旧版 `layout.json` 含 `pdf_info`：页眉在 `discarded_blocks` 中，父块 `index=0`，正文在 `para_blocks` 中且索引递增。原 Adapter 只读 V1 数组，因此丢失了这份可用的顺序证据；`persist_blocks` 忠实地把列表位置写成 block_index，并非 SQL 排序或页码错误。
 
 当前修复不重新推断整页阅读顺序：
 
-1. V1 仍是唯一正文输入。只内存读取唯一、最多 64 MiB 的可选 `layout.json`；未知新 schema、缺失、损坏或歧义时不用它改序，不用 V2 / Markdown 替代。
+1. 本节严格增强以V1为正文输入；v4基础层另按上节读取逐页原始来源。只读取唯一、最多64 MiB的layout；不使用V2/Markdown。
 2. 每个页面的所有原始项（含稍后跳过的空图片）必须与 `para_blocks + discarded_blocks` 的父块数量相同，并按类型、归一化 bbox 全量唯一关联；页内 `index` 必须为唯一的非负整数。坐标每个分量的容差为 2/1000，仅兼容取整，不是排序键。超过 512 项的页面保守不改序，限制匹配成本。
 3. 只允许移动明确的 header/footer。header 必须位于页面顶部 15% 且在所有正文上方；footer 必须位于底部 15% 且在所有正文下方。候选顺序来自 layout.index，且所有正文项的相对顺序必须完全不变；普通 title 不因位置靠上就被改序。
 4. 横向分离且纵向重叠的并排块、正文纵向回跳、无 bbox、索引或关联歧义均保留该页原序。检测只是保护条件，不是可靠的通用单栏/多栏分类器；绝不依靠 bbox 重建多栏顺序。
@@ -41,7 +76,7 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 - 每组最多64个占位与64个间隔、V1正文最多1MiB、每页父块最多512个。页眉脚仍在边缘15%且与正文矩形无实际交叠，不以另一栏标题的y或另一阅读流index误拒；窄小page_number也允许在全部正文上下且index在外。只用于校验、不据此排序。同一来源不能重复使用，目标在V1中也必须唯一。V1和唯一边界来源同时为确切空串时，保留其原空Block/位置/ID，不视为正文或页面覆盖、不会生成空Chunk；不一致仍失败。非相邻跨页、未知Span、真空正文/表格/公式仍拒绝，不落半份Block或发布成功缓存。
 - `mineru.merge_rejected` 保留对外`MERGE_EVIDENCE`，内部由`MergeEvidenceError.diagnostic`细分失败条件；日志`step`是固定子码，`stage`是项目函数及固定source/target或para/preproc结构角色，附局部1-based页、原数组1-based位置、受限计数和异常类型。不输出文字、bbox明细、路径或签名URL。恢复日志不等于事务提交。
 
-归一化缓存身份现为`mineru-adapter-v3`，Native版本不变。表格恢复改变正文/附注的页归属，必须与旧v1/v2 Whole/视觉/片缓存隔离；不删除旧成功结果、改写旧Job或复用旧键发布新语义。Reindex/旧冻结任务遇版本不一致返回CACHE_CONFIG_CHANGED，不自动重算/收费。部署时由用户重启各进程；旧付费Job的v2→v3比较只能显式在诊断副本执行，见下节。
+历史v3引入严格表格恢复；当前v4将基础与增强分层，Native版本不变。新旧Whole/视觉/片缓存隔离，旧成功产物/云配方保留。普通Reindex不静默换版本或收费；原v3失败Job的显式本地Retry及诊断许可见顶部。
 
 #### MERGE_EVIDENCE只读诊断与原Batch复用
 
@@ -51,7 +86,7 @@ Adapter 的受限兼容规则（代码已实现，用例待用户执行）：
 
 普通`/retry`对同Hash/代次、已上传、Normalizer一致且归档有效的本地错误（MERGE_EVIDENCE、EMPTY_BLOCK、CONTENT_TYPE、CONTENT_LIST、BBOX、PAGE、GEOMETRY、NO_TEXT、COMPLETENESS）恢复同一Job，强制`_local_replay_only=true`。没有Provider可调用，不需要Token，不GET/PUT/POST或下载。迟到submit消息也转入本地重放；分片成功只调度下一次本地检查，保留下一片已有Batch。后续没有完整本地结果则LOCAL_RESULT_REQUIRED停止，不自动追加收费批次；所有片成功前不写半份Block。原ZIP缺失/损坏不当成云端cache miss。未知POST、远端failed、坏ZIP不自动复活；旧v2不静默升级，也不为版本变化重新POST。
 
-本轮仅兼容此前拒绝但可严格验证的结构，Normalizer保持v3，既有成功结构仍输出相同V1原字符/页归属/ID。layout单元格`<eq>x</eq>`只在来源比较时对应V1的` $x$ `，网格/单元格仍须等价；删除附注允许多条空串，已移动附注允许文字/行内公式多Span，但V1列表、来源、逐Span坐标及原序全部核对；不合并、补写丢失注释。表格链预算200页/512个已验证边界，HTML/网格/字节预算不变。缺行、乱序、丢失caption/footnote继续失败；旧v2不自动升级。新增兼容和真实ZIP结果仍须用户运行确认。
+历史v3逐项兼容与严格证明继续保留在增强路径；拒绝不再阻断v4逐页原始内容。新来源类别和质量必须明确，不能将缺失/未知页码假称完整。新增Mock和真实ZIP回放由用户执行，不能据代码宣称200份已READY。
 
 两份CONTENT_TYPE失败ZIP只读字段核对均出现`ref_text`（分别29项、2项），字段为`text/page_idx/bbox/type`；现按普通text Block保留V1原文、原页/bbox及稳定位置ID，不猜参考答案/引用或丢弃条目。真正空正文、坏坐标/页码及其他未知类型仍报错。此为类型兼容修复，不代表这两份ZIP完整Adapter/Guard已通过；用户需运行离线诊断确认后续分支。
 

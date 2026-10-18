@@ -2,7 +2,27 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 失败定位与原知识库恢复
+## v4原ZIP回放、质量报告与恢复
+
+MinerU v4先提取可靠内容，再尝试可选严格增强；MERGE_EVIDENCE不再自动等于整份FAILED。新增`0009_parse_quality`需由用户迁移。`PARTIAL_READY`表示可靠块及全部对应向量可用，不计入完整READY；缺页不删除、不伪造Block。当前代码/测试未由Codex运行，25份ZIP实际结果仍待用户执行。
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_content.py tests/test_mineru_content_pipeline.py tests/test_mineru_local_replay.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split_jobs.py tests/test_parse_cache.py tests/test_stage33_pipeline.py -q -ra
+$reportPath = "results/stage33_v4_replay_$(Get-Date -Format yyyyMMdd_HHmmss).json"
+python scripts/mineru_adapter_replay.py --checkpoint results/stage33/stage33_run_01/import_checkpoint.json --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --output $reportPath --timeout 600
+Get-Content $reportPath -Raw -Encoding UTF8
+```
+
+批量工具登记checkpoint内全部MERGE_EVIDENCE，不限前N份；无当前唯一Job/缺原ZIP/Hash不符/预算耗尽均逐项列出，不假称25份通过。只读DB和本地ZIP、预览原Chunk器数量，不请求MinerU或加载模型，不写业务库/成功缓存。迁移前也可执行该只读工具。单文件命令对冻结v3另加`--allow-normalizer-upgrade`，仅比较、不恢复。
+
+审阅报告后备份数据库/PARSED_DIR、停止API/Worker，手动升级到0009并按README重启。然后只对**一份**离线通过的FAILED文档手动POST原`/api/admin/documents/{doc_id}/retry`，不Force、不加allow-cloud。原Job新增v4本地配方，Batch/原ZIP不变，后续缺片则LOCAL_RESULT_REQUIRED停止。命令见[MinerU本地恢复](MINERU_CLOUD.md#v4基础提取与质量分层)。不得以恢复为由再次上传这200份。
+
+导入checkpoint单列PARTIAL_READY且不再当WAITING/自动重传；`summary.json/md`分别记录ready、partial_ready、degraded_documents，新增`parse_quality_report.json/csv`保留每份覆盖/缺页/固定诊断。原200行/4087题和正式分母不变，仍须全200完整READY才运行正式四策略评测。OHR计分只读可靠`source_spans[].page`，不使用Chunk页范围填补未知页证据。PARTIAL的可检索性不代表正式全量验收通过。
+
+## 失败定位与原知识库恢复（历史严格增强排查）
+
+下列v3结构兼容历史记录仍可查阅；当前基础入库/部分质量以本节v4规则为准，严格子原因只限制增强，不再默认阻断可靠正文。
 
 **更新源码不等于运行进程已更新。** API和Celery Worker会保留已导入模块；执行恢复前必须在原终端停止并重新启动API/CPU Worker，确认PID/启动时间已改变，不能仅启动新版导入CLI。已有进程可用`Get-Process -Id <日志中的PID> | Select-Object Id,StartTime`只读核对。旧API可能把MERGE失败送回普通Parse，再由CACHE_REPARSE_REQUIRED阻止重复收费；这不是新Adapter拒绝，也不是云端新失败。
 

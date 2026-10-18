@@ -88,7 +88,8 @@ def get_document_status(doc_id: UUID, session: AdminSession) -> DocumentStatusRe
         index_task_id=document.index_task_id, management=management_view(document),
         block_count=block_count, chunk_count=chunk_count, vector_count=vector_count,
         invalid_vector_count=invalid_count, original_present=original_present,
-        parse_cache_present=cache_present, updated_at=document.updated_at)
+        parse_cache_present=cache_present, updated_at=document.updated_at,
+        parse_quality=getattr(document, "parse_quality", None))
 
 
 @router.get("/{doc_id}/blocks", response_model=PageResponse[BlockResponse], summary="按原阅读序号分页查询Block")

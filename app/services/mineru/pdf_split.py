@@ -244,7 +244,7 @@ def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
 
 def piece_recipe(job, part: PDFPart) -> dict:
     """片缓存不含 doc_id/原页偏移，可复用完全相同的分片；不与整份成功缓存混淆。"""
-    value = dict(job.parse_options["_cache_recipe"])
+    value = dict(job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"])
     value.update(file_hash=part.file_hash, route_strategy="mineru_pdf_part",
                  pdf_split=policy(), coverage_scope="pdf_part", page_count=part.page_end - part.page_start + 1)
     return value
@@ -254,7 +254,13 @@ def load_piece(cache: ParseCache, job, part: PDFPart) -> ParsedDocument | None:
     """按不可变代次核对片结果；已成功片缺失/损坏绝不当作新收费 miss。"""
     try:
         record = ReadyRecord.model_validate(part.result) if part.result is not None else None
-        loaded = cache.load(piece_recipe(job, part), record)
+        value = piece_recipe(job, part)
+        if record is not None and record.recipe.get("normalizer_version") == "mineru-adapter-v3" and part.state == "done":
+            legacy = value | {"normalizer_version": "mineru-adapter-v3"}
+            if record.recipe != legacy:
+                raise ValueError
+            value = legacy  # 已完成且来源有效的旧片不重算，也不把旧结果冒称为v4。
+        loaded = cache.load(value, record)
     except (TypeError, ValueError):
         raise MinerUError("PDF_SPLIT_RESULT", "PDF 分片结果指针无效，未重新收费") from None
     if loaded is None:
@@ -264,7 +270,9 @@ def load_piece(cache: ParseCache, job, part: PDFPart) -> ParsedDocument | None:
     try:
         parsed = ParsedDocument.model_validate_json(loaded[1]["normalized_document.json"])
         count = part.page_end - part.page_start + 1
-        if (parsed.file_type != "pdf" or not parsed.blocks
+        empty_partial = (parsed.quality is not None and parsed.quality.content == "PARTIAL"
+                         and (parsed.quarantined_content or parsed.quality.visual_only_count))
+        if (parsed.file_type != "pdf" or not parsed.blocks and not empty_partial
                 or any(b.page > count or b.source != "mineru_cloud" or not b.text.strip() for b in parsed.blocks)):
             raise ValueError
         part.result = loaded[0].model_dump(mode="json")
@@ -286,6 +294,26 @@ def merge_parts(document, manifest: SplitManifest, parsed_parts: list[ParsedDocu
             values = block.model_dump()
             values.update(page=part.page_start + block.page - 1,
                           block_id=uuid5(document.doc_id, f"{VERSION}:{manifest.file_hash}:{part.result['key']}:{part.page_start}:{index}:{block.page}:{block.block_type}"))
+            if values.get("provenance"):
+                values["provenance"]["pointer"] = f"part/{part.ordinal}/" + values["provenance"]["pointer"]
             blocks.append(ParsedBlock.model_validate(values))
+    from app.schemas.parsed_document import ParseQuality
+    qualities = [p.quality for p in parsed_parts if p.quality is not None]
+    quality = None
+    if qualities:
+        quality = ParseQuality(content="PARTIAL" if any(q.content == "PARTIAL" for q in qualities) else "COMPLETE",
+            structure="DEGRADED" if any(q.structure == "DEGRADED" for q in qualities) else "BASE",
+            evidence="PARTIAL" if any(q.evidence == "PARTIAL" for q in qualities) else "VERIFIED",
+            warnings=list(dict.fromkeys(w for q in qualities for w in q.warnings))[:128],
+            diagnostics=[entry | {"part_ordinal": part.ordinal} for part, parsed in zip(manifest.parts, parsed_parts)
+                if parsed.quality for entry in parsed.quality.diagnostics][:128],
+            required_pages=sorted({part.page_start + p - 1 for part, parsed in zip(manifest.parts, parsed_parts)
+                if parsed.quality for p in parsed.quality.required_pages}),
+            missing_pages=sorted({part.page_start + p - 1 for part, parsed in zip(manifest.parts, parsed_parts)
+                if parsed.quality for p in parsed.quality.missing_pages}),
+            covered_pages=sorted({b.page for b in blocks}), quarantined_count=sum(q.quarantined_count for q in qualities),
+            visual_only_count=sum(q.visual_only_count for q in qualities), base_block_count=len(blocks))
+    quarantine = [value | {"part_ordinal": part.ordinal} for part, parsed in zip(manifest.parts, parsed_parts)
+                  for value in parsed.quarantined_content]
     return ParsedDocument(doc_id=document.doc_id, file_name=document.file_name, file_type="pdf",
-                          title=parsed_parts[0].title, blocks=blocks)
+                          title=parsed_parts[0].title, blocks=blocks, quality=quality, quarantined_content=quarantine)

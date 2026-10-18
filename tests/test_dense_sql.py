@@ -61,13 +61,13 @@ class SqlSessionStub:
 
 
 def test_statement_filters_before_exact_top_k_and_binds_identity():
-    """SQL 内强制跨库/READY/非空/实际模型及当前代次过滤，物化后稳定精确排序。"""
+    """SQL限定已索引完整/部分状态、知识库/模型/代次，仍在Top-K前过滤。"""
     kb_id, identity = uuid4(), model_identity()
     statement = dense_statement(kb_id, [1.0] + [0.0] * 1023, identity)
     compiled = statement.compile(dialect=postgresql.dialect())
     sql, values = str(compiled), list(compiled.params.values())
     assert "dense_eligible AS MATERIALIZED" in sql and " <=> " in sql
-    assert "documents.status =" in sql and "READY" in values and "ACTIVE" in values
+    assert "documents.status IN" in sql and ["READY", "PARTIAL_READY"] in values and "ACTIVE" in values
     assert sql.count("kb_id =") >= 3 and kb_id in values
     assert "document_chunks.embedding IS NOT NULL" in sql
     assert identity in values and INDEX_VERSION in values
@@ -82,7 +82,7 @@ def test_statement_filters_before_exact_top_k_and_binds_identity():
 
 @pytest.mark.parametrize("multiple", [False, True])
 def test_document_filter_is_bound_before_distance_and_limit(multiple):
-    """单/多文档 UUID 在物化候选内参数化过滤，不先全库 Top-K 再删除证据。"""
+    """单/多文档与可索引状态在候选内绑定，不先全库Top-K再删除证据。"""
     kb_id, first, second = uuid4(), uuid4(), uuid4()
     doc_ids = [str(first), second, first] if multiple else [str(first)]
     statement = dense_statement(kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=doc_ids)
@@ -92,7 +92,7 @@ def test_document_filter_is_bound_before_distance_and_limit(multiple):
     assert any(value == list(validate_doc_ids(doc_ids)) for value in compiled.params.values() if isinstance(value, list))
     assert str(first) not in sql and str(second) not in sql
     assert sql.count("kb_id =") >= 3
-    assert "READY" in compiled.params.values() and "ACTIVE" in compiled.params.values()
+    assert ["READY", "PARTIAL_READY"] in compiled.params.values() and "ACTIVE" in compiled.params.values()
     assert "document_chunks.embedding IS NOT NULL" in sql and model_identity() in compiled.params.values()
 
 

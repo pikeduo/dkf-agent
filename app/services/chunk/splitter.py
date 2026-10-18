@@ -57,6 +57,7 @@ class SourceBlock:
     text: str
     source: str
     bbox: list[float] | None = None
+    provenance: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,9 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     payload = [{"id": str(block.block_id), "index": block.block_index, "page": block.page,
                 "section": block.section, "type": block.block_type, "text": block.text,
                 "source": block.source, "bbox": block.bbox} for block in blocks]
+    for value, block in zip(payload, blocks):
+        if block.provenance is not None:
+            value["provenance"] = block.provenance
     input_hash = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     # 同一个长 Block 可贡献很多片段，整块 Hash 只计算一次，避免随 Chunk 数量重复扫描全文。
     text_hashes = {block.block_id: hashlib.sha256(block.text.encode()).hexdigest() for block in blocks}
@@ -224,6 +228,9 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                 "bbox": span.block.bbox, "start_char": span.start, "end_char": span.end,
                 "chunk_start_char": offset, "chunk_end_char": offset + len(span.text), "role": span.role,
                 "block_text_hash": text_hashes[span.block.block_id]})
+            if span.block.provenance is not None:
+                evidence[-1]["provenance"] = span.block.provenance
+                evidence[-1]["page_reliable"] = span.block.provenance.get("page_reliable", False)
             offset += len(span.text)
         text = "\n\n".join(text_parts)
         index = len(result) + 1

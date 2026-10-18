@@ -52,7 +52,7 @@ def index_document(self, doc_id: str) -> dict:
         log_event("index.failed", level=logging.ERROR, doc_id=identifier, task_id=task_id, error_code=code)
         raise DocumentProcessingError(str(IndexingError(code))) from None
     # 成功只在整个 SQL 事务提交后记录，批次执行日志不能充当落库成功。
-    log_event("index.persisted" if result["status"] == "ready" else "index.skipped",
+    log_event("index.persisted" if result["status"] in {"ready", "partial_ready"} else "index.skipped",
               doc_id=identifier, task_id=task_id, state=result.get("document_status"), status=result["status"],
               chunk_count=result.get("chunk_count"), dimension=result.get("dimension"),
               duration_ms=(perf_counter() - started) * 1000)

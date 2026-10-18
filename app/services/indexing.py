@@ -61,10 +61,13 @@ def input_identity(document: Document) -> dict:
                 or any(not isinstance(result[key], str) or re.fullmatch(r"[0-9a-f]{64}", result[key]) is None
                        for key in ("model_fingerprint", "vectors_sha256"))):
             raise IndexingError("INDEX_CHECKPOINT")
-        return {"version": INDEX_VERSION, "embedding_task_id": str(document.embedding_task_id),
+        identity = {"version": INDEX_VERSION, "embedding_task_id": str(document.embedding_task_id),
                 "source_parse_task_id": config["source_parse_task_id"],
                 "source_chunk_task_id": config["source_chunk_task_id"], "source_hash": config["source_hash"],
                 "options_hash": digest_json(config["options"]), "embedding_result": dict(result)}
+        if getattr(document, "parse_quality", None):
+            identity["parse_quality_hash"] = digest_json(document.parse_quality)
+        return identity
     except (EmbeddingError, ValueError, TypeError, KeyError):
         raise IndexingError("INDEX_CHECKPOINT") from None
 
@@ -116,8 +119,8 @@ def prepare_index(session: Session, document: Document) -> tuple[UUID, bool]:
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise IndexingError("INDEX_BUSY")
-    if document.status not in {"INDEXING", "FAILED", "READY"} or (
-            document.status in {"FAILED", "READY"} and document.index_task_id is None):
+    if document.status not in {"INDEXING", "FAILED", "READY", "PARTIAL_READY"} or (
+            document.status in {"FAILED", "READY", "PARTIAL_READY"} and document.index_task_id is None):
         raise IndexingError("INDEX_STATE")
     identity = input_identity(document)
     require_vector_index(session)
@@ -127,7 +130,7 @@ def prepare_index(session: Session, document: Document) -> tuple[UUID, bool]:
         raise IndexingError("INDEX_CHECKPOINT")
     else:
         document.index_task_id, document.index_config = uuid4(), identity
-    if document.status == "READY":
+    if document.status in {"READY", "PARTIAL_READY"}:
         require_complete_vectors(session, document, identity["embedding_result"]["chunk_count"])
         return document.index_task_id, False
     # FAILED 只恢复自己的入库检查点；不把解析/模型失败的旧结果当作完整 GPU 输出。
@@ -258,9 +261,11 @@ def run_index_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     summary = {"chunk_count": len(rows), "dimension": DIMENSION, "model": dict(manifest["model"]),
                "vectors_sha256": manifest["vectors_sha256"], "index_name": INDEX_NAME}
     document.index_config = config | {"result": summary}
-    transition_document(document, "READY")
+    # 向量完整只证明可靠块已索引；解析覆盖不足必须保留独立终态。
+    quality = getattr(document, "parse_quality", None) or {}
+    transition_document(document, "PARTIAL_READY" if quality.get("content") == "PARTIAL" else "READY")
     session.flush()
-    return result | {"status": "ready", "document_status": document.status,
+    return result | {"status": "partial_ready" if document.status == "PARTIAL_READY" else "ready", "document_status": document.status,
                      "chunk_count": len(rows), "dimension": DIMENSION, "model_name": MODEL_ID}
 
 

@@ -166,3 +166,38 @@ def test_stage33_report_keeps_local_result_required_without_freeform_error():
     from scripts.smoke_stage16_17 import safe_job_code
     assert safe_job_code("LOCAL_RESULT_REQUIRED") == "LOCAL_RESULT_REQUIRED"
     assert safe_job_code("PRIVATE_SIGNED_URL") == "UNKNOWN_ERROR_CODE"
+
+
+@pytest.mark.parametrize("damage", [None, "ambiguous", "hash", "raw"])
+def test_retry_recovers_unique_historical_paid_job_only_after_source_validation(context, monkeypatch, damage):
+    """修复旧Retry换了本地代次的场景；原件/原ZIP核对前不重绑Job或升级配方。"""
+    from copy import deepcopy
+    from uuid import uuid4
+    settings, document, job, session = context
+    stub_local_conversion(monkeypatch, document, job)
+    job.state, job.error_code, job.is_active, document.status = "failed", "MERGE_EVIDENCE", False, "FAILED"
+    job.parse_options = {"_cache_recipe": {"normalizer_version": "mineru-adapter-v3"}}
+    document.processing_task_id = uuid4()
+    previous = document.processing_task_id
+    frozen = deepcopy(job.parse_options)
+    session.scalar = lambda _: None
+    session.scalars = lambda _: [job, job] if damage == "ambiguous" else [job]
+    if damage == "hash":
+        job.file_hash = "f" * 64
+    elif damage == "raw":
+        def bad_raw(*args, **kwargs):
+            """原ZIP校验失败不能成为云端miss或本地换绑许可。"""
+            raise MinerUError("RAW_RESULT_CHANGED", "原ZIP校验失败")
+        monkeypatch.setattr(raw_results, "load_raw_result", bad_raw)
+    if damage:
+        with pytest.raises(management.ManagementError):
+            management.retry_cloud_job(session, document, settings)
+        assert document.processing_task_id == previous and job.parse_options == frozen
+        assert document.status == "FAILED" and not job.is_active
+    else:
+        assert management.retry_cloud_job(session, document, settings) is job
+        assert document.processing_task_id == job.task_id and job.is_active
+        assert job.parse_options["_local_resume_previous_task"] == str(previous)
+        assert job.parse_options["_cache_recipe"] == frozen["_cache_recipe"]
+        assert job.parse_options["_adapter_recipe"]["normalizer_version"] == NORMALIZER_VERSION
+        assert job.parse_options["_local_replay_only"] and job.batch_id == "existing-batch"

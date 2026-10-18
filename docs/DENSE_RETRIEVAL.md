@@ -1,5 +1,7 @@
 # Dense Retrieval：只读边界与用户验收
 
+阶段33 v4补充：SQL接受READY/PARTIAL_READY的已索引可靠块，知识库、doc_ids、模型、编码版本和代次防线不变。质量/来源在Chunk metadata保留；未知页码内容不进入Node，PARTIAL不计入正式全量READY。迁移/验收见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
+
 **阶段18单文档过滤已由用户测试并确认通过。** 阶段16正式数据验收及阶段17等此前待验收事项仍保留；本次确认不代表完整RAG或官方基准通过，不自动进入19。
 
 ## 范围与复用

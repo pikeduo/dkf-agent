@@ -11,11 +11,42 @@ from pydantic import (
     StringConstraints,
     field_validator,
     model_validator,
+    model_serializer,
 )
 
 from app.core.file_formats import FileType
 
 BlockType = Literal["title", "text", "table", "formula", "image_text"]
+
+
+class ParseQuality(BaseModel):
+    """解析质量与安全覆盖摘要；部分内容不冒充完整READY，不包含正文或私有路径。"""
+
+    model_config = ConfigDict(extra="forbid")
+    policy: Literal["mineru-content-v4"] = "mineru-content-v4"
+    content: Literal["COMPLETE", "PARTIAL"] = "COMPLETE"
+    structure: Literal["BASE", "ENHANCED", "DEGRADED"] = "BASE"
+    evidence: Literal["VERIFIED", "PARTIAL"] = "VERIFIED"
+    warnings: list[str] = Field(default_factory=list, max_length=128)
+    diagnostics: list[dict] = Field(default_factory=list, max_length=128)
+    covered_pages: list[int] = Field(default_factory=list)
+    required_pages: list[int] = Field(default_factory=list)
+    missing_pages: list[int] = Field(default_factory=list)
+    quarantined_count: int = Field(default=0, ge=0)
+    visual_only_count: int = Field(default=0, ge=0)
+    base_block_count: int = Field(default=0, ge=0)
+    enhanced: bool = False
+
+
+class BlockProvenance(BaseModel):
+    """同ZIP内来源指针与摘要；不把layout字节误称为V1，也不猜测未知页码。"""
+
+    model_config = ConfigDict(extra="forbid")
+    origin: Literal["content_list", "layout_preproc", "layout_discarded", "verified_enhancement"]
+    pointer: str
+    raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_reliable: bool = True
+    bbox_reliable: bool = False
 
 # 不接受布尔值、数字字符串、NaN 或无穷值，避免无效坐标和置信度进入后续链路。
 Coordinate = Annotated[float, Field(strict=True, allow_inf_nan=False)]
@@ -40,6 +71,15 @@ class ParsedBlock(BaseModel):
     confidence: (
         Annotated[float, Field(strict=True, ge=0, le=1, allow_inf_nan=False)] | None
     ) = None
+    provenance: BlockProvenance | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler):
+        """旧Native/检查点不追加空来源字段，避免无关Schema扩展改变既有输入Hash。"""
+        value = handler(self)
+        if self.provenance is None:
+            value.pop("provenance", None)
+        return value
 
     @field_validator("source")
     @classmethod
@@ -75,6 +115,19 @@ class ParsedDocument(BaseModel):
     title: StrictStr = ""
     # blocks 必须显式返回；允许空集合，但空集合不代表 OCR 或入库已经完成。
     blocks: Annotated[list[ParsedBlock], Field(strict=True)]
+    quality: ParseQuality | None = None
+    # 无可靠页码的局部内容只保留在本地结果中，不制造page=1进入Chunk或证据评分。
+    quarantined_content: list[dict] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler):
+        """无质量扩展的历史/Native结果保持旧序列化形状和冻结主结果Hash。"""
+        value = handler(self)
+        if self.quality is None:
+            value.pop("quality", None)
+        if not self.quarantined_content:
+            value.pop("quarantined_content", None)
+        return value
 
     @field_validator("file_name")
     @classmethod

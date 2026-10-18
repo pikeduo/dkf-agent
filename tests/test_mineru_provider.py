@@ -346,20 +346,23 @@ def test_adapter_order_geometry_types_context_and_stable_ids():
         ({"confidence": 2}, "CONTENT_LIST"),
     ],
 )
-def test_adapter_rejects_unknown_or_invalid_data(override, code):
-    """不伪造页码、正文、置信度或未知类型；错误时不产生半份统一结果。"""
+def test_adapter_classifies_local_schema_damage_without_fabricating_evidence(override, code):
+    """全局无来源/无正文仍失败；局部坐标/类型/置信度损坏保留可靠文字并记录质量。"""
 
     item = {"type": "text", "text": "正文", "page_idx": 0} | override
-    with pytest.raises(MinerUError) as error:
-        MinerUResultAdapter().normalize(
-            result_zip([item]),
-            doc_id=uuid4(),
-            file_name="测试.pdf",
-            file_type="pdf",
-            geometry={0: (600, 800)},
-            identity="x",
-        )
-    assert error.value.code == code
+    arguments = dict(doc_id=uuid4(), file_name="测试.pdf", file_type="pdf",
+                     geometry={0: (600, 800)}, identity="x")
+    if code in {"PAGE", "EMPTY_BLOCK"}:
+        with pytest.raises(MinerUError) as error:
+            MinerUResultAdapter().normalize(result_zip([item]), **arguments)
+        assert error.value.code == ("NO_TEXT" if code == "EMPTY_BLOCK" else "PAGE")
+    else:
+        parsed = MinerUResultAdapter().normalize(result_zip([item]), **arguments)
+        assert parsed.blocks[0].text == "正文" and parsed.blocks[0].page == 1
+        assert parsed.blocks[0].bbox is None and parsed.blocks[0].confidence is None
+        assert parsed.quality.structure == "DEGRADED" and parsed.quality.content == "COMPLETE"
+        assert ("BBOX_UNAVAILABLE" if code == "BBOX" else "UNKNOWN_LOCAL_TYPE" if code == "CONTENT_TYPE"
+                else "CONTENT_LIST") in parsed.quality.warnings
 
 
 @pytest.mark.parametrize(

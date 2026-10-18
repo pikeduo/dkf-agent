@@ -542,7 +542,7 @@ def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolic
 
 
 def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocument:
-    """按 Sheet/Anchor 插入完整视觉块，保留整 Sheet Native table 和公式，映射失败全部拒绝。"""
+    """按Sheet/Anchor保留Native原式与已映射视觉块；质量继续传递，不掩盖云结果降级。"""
 
     manifest, native = plan.manifest, plan.native
     if (digest(native.model_dump_json().encode("utf-8")) != manifest.native_hash
@@ -552,6 +552,7 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
     if len({entry.visual_id for entry in manifest.entries}) != len(manifest.entries):
         raise HybridPreflightError()
     pages = {}
+    missing_visuals = set()
     if manifest.bundle_page_count:
         if (visual is None or visual.doc_id != native.doc_id or visual.file_type != "pdf"
             or visual.file_name != native.file_name):
@@ -560,7 +561,9 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
             if block.source != "mineru_cloud" or not block.text.strip():
                 raise HybridPreflightError()
             pages.setdefault(block.page, []).append(block)
-        if set(pages) != set(range(1, manifest.bundle_page_count+1)):
+        expected_pages = set(range(1, manifest.bundle_page_count+1))
+        partial_visual = visual.quality is not None and visual.quality.content == "PARTIAL"
+        if not set(pages) <= expected_pages or set(pages) != expected_pages and not partial_visual:
             raise HybridPreflightError()
     elif visual is not None:
         raise HybridPreflightError()
@@ -599,7 +602,12 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
                     raise HybridPreflightError()
             else:
                 if entry.bundle_page not in pages:
-                    raise HybridPreflightError()
+                    # 原Bundle来源已由manifest核对，未识别视觉页不补造正文；Native原式仍保留。
+                    if visual is None or visual.quality is None or visual.quality.content != "PARTIAL":
+                        raise HybridPreflightError()
+                    entry.state, entry.block_ids = "failed", []
+                    missing_visuals.add(entry.visual_id)
+                    continue
                 source_blocks = pages[entry.bundle_page]
             if entry.reused_from is not None:
                 original = next((e for e in manifest.entries if e.visual_id == entry.reused_from), None)
@@ -617,20 +625,29 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
                 copied = block.model_copy(update={
                     "block_id": uuid5(native.doc_id, f"{VERSION}:{entry.visual_id}:{index}"),
                     "section": sheet, "page": 1, "bbox": None,
+                    "provenance": block.provenance.model_copy(update={"bbox_reliable": False,
+                        "pointer": f"hybrid/{entry.visual_id}/" + block.provenance.pointer}) if block.provenance else None,
                 })
                 blocks.append(copied)
                 entry.block_ids.append(copied.block_id)
             entry.state = "reused" if entry.reused_from is not None or entry.cache_hit else "parsed"
             if not entry.block_ids:
                 raise HybridPreflightError()
-    if any(e.state not in {"parsed", "filtered", "reused"} for e in manifest.entries):
+    if any(e.state not in {"parsed", "filtered", "reused"} and e.visual_id not in missing_visuals for e in manifest.entries):
         raise HybridPreflightError()
     if any(block.section not in manifest.sheet_names for block in native.blocks):
         raise HybridPreflightError()
     if not blocks or not any(block.text.strip() for block in blocks):
         raise NoTextError("XLSX 过滤后没有有效正文，不能判为解析成功")
+    quality = visual.quality.model_copy(deep=True) if visual and visual.quality else None
+    if quality:
+        # 对外沿用原XLSX逻辑页，不能把Bundle中间页当成原件页码。
+        quality.covered_pages, quality.required_pages, quality.missing_pages = [1], [1], []
+        if missing_visuals and "MISSING_VISUAL_PAGES" not in quality.warnings and len(quality.warnings) < 128:
+            quality.warnings.append("MISSING_VISUAL_PAGES")
     return ParsedDocument(doc_id=native.doc_id, file_name=native.file_name, file_type="xlsx",
-                          title=native.title, blocks=blocks)
+                          title=native.title, blocks=blocks, quality=quality,
+                          quarantined_content=visual.quarantined_content if visual else [])
 
 
 def is_solid(pixmap) -> bool:

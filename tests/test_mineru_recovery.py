@@ -24,6 +24,10 @@ class SessionStub:
         """不执行SQL，供显式Retry读取当前代次的候选。"""
         return self.job
 
+    def scalars(self, statement):
+        """默认无其他历史Job；需要唯一历史绑定的用例显式提供候选，不连接数据库。"""
+        return []
+
     def commit(self):
         """记录短步骤提交；测试不发布真实消息。"""
         self.commits += 1

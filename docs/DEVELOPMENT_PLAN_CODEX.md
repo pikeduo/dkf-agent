@@ -3469,6 +3469,8 @@ retrieved_chunks
 
 # 39. 阶段 33：Retrieval 评测
 
+当前增量：MinerU v4基础内容与可选结构增强分离，质量/来源可追溯；用户确认PARTIAL_READY及0009迁移文件。原ZIP本地Retry、全失败项只读回放、200份/4087题及完整READY验收分母保留。迁移、Mock、真实ZIP和恢复均待用户执行，未推进34。具体规则以[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)为准，历史v3全局严格失败描述不再用于基础正文入库。
+
 当前正式实现及操作见[阶段33全量评测](STAGE33_EVALUATION.md)。固定读取stage32_run_01的200文件、OHR3588+OCB499=4087题，不抽样/缩减；通过原上传API/管理编排入库，可有界分批与断点续跑。全200 READY及同模型/索引身份才运行全题Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker，保留完整来源。模型/云/数据库真实执行与测试未由Codex执行，等待用户授权；不开发阶段34。
 
 正式指标为Recall@5、Recall@10、MRR@20，显式区分总题数、成功执行、可评分总分母、成功评分、失败、未执行、不可评分及人工待审。OHR使用官方0-based→物理1-based页的来源单位；OCB无相关Chunk/页标注时正式证据指标为null，reference_files仅作另列文档代理指标，不把expected_assertions拼成答案或相关性标签。失败不从全量分母删除；尚未执行/快照无效不发布正式分数。原先小题量建议不限制本阶段全量范围。

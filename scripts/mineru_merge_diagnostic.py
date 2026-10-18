@@ -110,9 +110,10 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
     from app.services.mineru.pdf_split_jobs import current_part, validate_piece
 
     if "_pdf_split" not in job.parse_options:
-        if allow_normalizer_upgrade or allow_coverage_upgrade:
-            raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole诊断不自动改变冻结Normalizer或覆盖规则")
-        return inspect_whole_job(document, job, settings, batch_id, archive_path)
+        if allow_coverage_upgrade:
+            raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole诊断不自动改变冻结覆盖规则")
+        return inspect_whole_job(document, job, settings, batch_id, archive_path,
+                                 allow_normalizer_upgrade=allow_normalizer_upgrade)
     manifest = checked_manifest(document, job)
     part = current_part(manifest)
     if (job.provider != "mineru_cloud" or document.file_type != "pdf"
@@ -125,9 +126,8 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         raise MinerUError("CACHE_CONFIG_CHANGED", "缺少一致的冻结归一化版本，未恢复任务")
     frozen_version = frozen.get("normalizer_version")
     upgrade = frozen_version != NORMALIZER_VERSION
-    if upgrade and not (allow_normalizer_upgrade and frozen_version == "mineru-adapter-v2"
-                        and NORMALIZER_VERSION == "mineru-adapter-v3"):
-        raise MinerUError("CACHE_CONFIG_CHANGED", "旧Job版本不一致，须显式允许仅诊断的v2到v3升级")
+    if upgrade and not (allow_normalizer_upgrade and frozen_version in {"mineru-adapter-v2", "mineru-adapter-v3"}):
+        raise MinerUError("CACHE_CONFIG_CHANGED", "旧Job版本不一致，须显式允许仅本地诊断升级")
     # 只在内存副本校验拟用版本；绝不修改原Job、原缓存键或冻结参数。
     check_normalizer_recipe(SimpleNamespace(parse_options=job.parse_options | {
         "_cache_recipe": frozen | {"normalizer_version": NORMALIZER_VERSION}}))
@@ -171,6 +171,7 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         if archive_path is not None and file_hash(regular_path(archive_path)) != record["sha256"]:
             raise MinerUError("DIAGNOSTIC_IDENTITY", "指定ZIP与原Batch归档Hash不一致")
         report["zip_batch_provenance"] = "validated_local_receipt"
+        report["zip_integrity"] = "PASS"
     elif archive_path is None:
         return report
     else:
@@ -189,17 +190,26 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         from io import BytesIO
         from zipfile import ZipFile
         from app.services.mineru.table_merge import restore_merged_tables
-        items, restored_count = restore_merged_text(read_content_list(archive), read_layout_pages(archive))
-        with ZipFile(BytesIO(archive)) as zipped:
-            members = zipped.namelist()
-        _, table_groups = restore_merged_tables(items, read_layout_pages(archive), archive_members=members)
-        report.update(text_restored_count=restored_count, table_restoration=table_groups)
+        try:
+            items, restored_count = restore_merged_text(read_content_list(archive), read_layout_pages(archive))
+            with ZipFile(BytesIO(archive)) as zipped:
+                members = zipped.namelist()
+            _, table_groups = restore_merged_tables(items, read_layout_pages(archive), archive_members=members)
+            report.update(text_restored_count=restored_count, table_restoration=table_groups)
+        except MinerUError as error:
+            if error.code not in {"MERGE_EVIDENCE", "CONTENT_LIST"}:
+                raise
+            report["enhancement_error"] = error.code
+            if isinstance(error, MergeEvidenceError):
+                report["enhancement_diagnostic"] = dict(error.diagnostic)
         parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
-            file_name=document.file_name, file_type="pdf", geometry=geometry, identity=identity)
+            file_name=document.file_name, file_type="pdf", geometry=geometry, identity=identity, allow_empty_part=True)
         report.update(adapter_normalize="PASS", block_count=len(parsed.blocks),
+                      zip_integrity="PASS", quality_page_scope="part_local_1based",
                       adapter_unexplained_empty_text_or_tables=0,
                       original_pages=sorted({part.page_start + block.page - 1 for block in parsed.blocks}))
         guard_error = None
+        unguarded = parsed.model_copy(deep=True)
         report["guard_evaluation_scope"] = "frozen"
         try:
             validate_piece(document, job, part, parsed)
@@ -219,7 +229,10 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
                     for p in decision.signals.pages if p.page in report["missing_required_original_pages"]]
             else:
                 raise
-        report["frozen_completeness_guard"] = "FAIL" if guard_error else "PASS"
+        quality_missing = parsed.quality.missing_pages if parsed.quality else []
+        if quality_missing:
+            report["missing_required_original_pages"] = [part.page_start + page - 1 for page in quality_missing]
+        report["frozen_completeness_guard"] = "FAIL" if guard_error else "PARTIAL" if quality_missing else "PASS"
         report["completeness_guard"] = report["frozen_completeness_guard"]
         report["frozen_missing_required_original_pages"] = report.get("missing_required_original_pages", [])
         if allow_coverage_upgrade:
@@ -227,12 +240,17 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
             report.update(comparison, guard_evaluation_scope="proposed_coverage_only")
             # 使用未修改的生产分片 Guard；只替换副本的覆盖摘要，不改 Block/页码/ID/Normalizer。
             report["completeness_guard"] = "FAIL"
+            parsed = unguarded  # 不让冻结覆盖产生的PARTIAL污染独立比较副本。
             validate_piece(document, proposed_job, part, parsed)
-            report["missing_required_original_pages"] = []
+            report["missing_required_original_pages"] = [part.page_start + p - 1
+                for p in (parsed.quality.missing_pages if parsed.quality else [])]
             report["missing_required_page_signals"] = []
         elif guard_error is not None:
             raise guard_error
         report["completeness_guard"] = "PASS"
+        report.update(content_summary(parsed, getattr(document, "kb_id", None)))
+        if parsed.quality and parsed.quality.content == "PARTIAL":
+            report["completeness_guard"] = "PARTIAL"
     except MinerUError as error:
         report.update(status="FAIL", error_code=error.code)
         if isinstance(error, MergeEvidenceError):
@@ -244,14 +262,14 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
             report["empty_diagnostic"] = dict(error.diagnostic) | {
                 "original_page": part.page_start + error.diagnostic["page"] - 1}
         return report
-    report.update(status="ADAPTER_PASS_NOT_RECOVERED", error_code=None, block_count=len(parsed.blocks),
+    report.update(status="ADAPTER_PARTIAL_NOT_RECOVERED" if report["completeness_guard"] == "PARTIAL" else "ADAPTER_PASS_NOT_RECOVERED", error_code=None, block_count=len(parsed.blocks),
                   unexplained_empty_text_or_tables=0,
                   original_pages=sorted({part.page_start + block.page - 1 for block in parsed.blocks}))
     return report
 
 
-def inspect_whole_job(document, job, settings, batch_id, archive_path):
-    """核对Whole原ZIP/冻结身份及缺页信号；不请求云端、不放宽Guard、不写库或缓存。"""
+def inspect_whole_job(document, job, settings, batch_id, archive_path, *, allow_normalizer_upgrade=False):
+    """核对Whole原ZIP/冻结身份；v4缺页如实记录PARTIAL，不请求云端或写库/缓存。"""
     from app.parsers.routing.contracts import RouteDecision
     from app.parsers.routing.guard import CompletenessError, guard_result
     from app.services.document_processing import source_path
@@ -262,12 +280,15 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
             or batch_id != job.batch_id or not job.upload_complete or not job.submission_attempted
             or "_hybrid" in job.parse_options or "_pdf_split_request" in job.parse_options):
         raise MinerUError("DIAGNOSTIC_IDENTITY", "当前Whole文档/批次身份无法核对，未转换")
-    check_normalizer_recipe(job)
     frozen = job.parse_options.get("_cache_recipe", {})
-    if (frozen.get("normalizer_version") != NORMALIZER_VERSION
+    frozen_version = frozen.get("normalizer_version")
+    if (frozen_version != NORMALIZER_VERSION and not (
+            allow_normalizer_upgrade and frozen_version in {"mineru-adapter-v2", "mineru-adapter-v3"})
             or frozen.get("file_hash") != document.file_hash or frozen.get("file_type") != "pdf"
             or frozen.get("provider") != job.provider):
         raise MinerUError("DIAGNOSTIC_OPTIONS", "Whole冻结解析身份无法核对")
+    check_normalizer_recipe(SimpleNamespace(parse_options=job.parse_options | {
+        "_adapter_recipe": frozen | {"normalizer_version": NORMALIZER_VERSION}}))
     names = ("model_version", "language", "is_ocr", "enable_table", "enable_formula")
     options = {name: job.parse_options.get(name) for name in names}
     if (any(name not in frozen or frozen[name] != options[name] for name in names)
@@ -288,6 +309,8 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
         "data_id": job.data_id, "status": "FAIL", "job_state": job.state,
         "original_sha256": document.file_hash, "zip_sha256": record["sha256"],
         "zip_size_bytes": record["size_bytes"], "normalizer_version": NORMALIZER_VERSION,
+        "zip_integrity": "PASS",
+        "frozen_normalizer_version": frozen_version, "normalizer_upgrade_explicit": frozen_version != NORMALIZER_VERSION,
         "source_hashes_verified": True, "zip_batch_provenance": "validated_local_receipt",
         "adapter_normalize": "NOT_EXECUTED", "completeness_guard": "NOT_EXECUTED",
         "database_modified": False, "cache_published": False, "cloud_submitted": False}
@@ -296,13 +319,17 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
         parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
             file_name=document.file_name, file_type="pdf", geometry=page_geometry(path, "pdf"),
             identity=job.file_hash + ":" + job.options_hash)
-        report.update(adapter_normalize="PASS", block_count=len(parsed.blocks))
+        report.update(adapter_normalize="PASS", block_count=len(parsed.blocks), zip_integrity="PASS",
+                      quality_page_scope="document_1based")
         decision = RouteDecision.model_validate(job.parse_options.get("_route_decision")
                                                or job.parse_options["_cache_guard"])
         guard_result(parsed, decision)
         if file_hash(path) != document.file_hash:
             raise MinerUError("FILE_HASH", "转换期间原件Hash变化，未接受结果")
-        report.update(status="ADAPTER_PASS_NOT_RECOVERED", completeness_guard="PASS", error_code=None)
+        report.update(content_summary(parsed, getattr(document, "kb_id", None)))
+        partial = parsed.quality is not None and parsed.quality.content == "PARTIAL"
+        report.update(status="ADAPTER_PARTIAL_NOT_RECOVERED" if partial else "ADAPTER_PASS_NOT_RECOVERED",
+                      completeness_guard="PARTIAL" if partial else "PASS", error_code=None)
     except (MinerUError, CompletenessError) as error:
         if report["adapter_normalize"] == "RUNNING":
             report["adapter_normalize"] = "FAIL"
@@ -323,6 +350,29 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
     return report
 
 
+def content_summary(parsed, kb_id=None):
+    """仅导出质量/数量；用户执行时用现有Chunk器预览，不落库、不加载模型或启动任务。"""
+    from app.services.chunk.splitter import SourceBlock, build_chunks, ChunkError
+    summary = {"parse_quality": parsed.quality.model_dump(mode="json") if parsed.quality else None,
+               "quarantined_count": len(parsed.quarantined_content),
+               "reliable_page_block_count": len(parsed.blocks),
+               "located_block_count": sum(block.bbox is not None for block in parsed.blocks),
+               "enhancement_status": parsed.quality.structure if parsed.quality else "LEGACY"}
+    if kb_id is None:
+        return summary | {"chunk_preview_count": None, "chunk_preview_status": "KB_ID_UNAVAILABLE"}
+    if not parsed.blocks:
+        return summary | {"chunk_preview_count": 0, "chunk_preview_status": "EMPTY_PART_NOT_A_DOCUMENT"}
+    blocks = [SourceBlock(b.block_id, i, b.page, b.section, b.block_type, b.text, b.source, b.bbox,
+                          b.provenance.model_dump(mode="json") if b.provenance else None)
+              for i, b in enumerate(parsed.blocks, 1)]
+    try:
+        summary["chunk_preview_count"] = len(build_chunks(parsed.doc_id, kb_id, parsed.file_type, blocks))
+        summary["chunk_preview_status"] = "PASS"
+    except ChunkError:
+        summary.update(chunk_preview_count=None, chunk_preview_status="LIMIT_OR_SOURCE")
+    return summary
+
+
 def inspect_database(job_id: UUID, settings, batch_id: str, archive_path: Path | None,
                      *, allow_normalizer_upgrade=False, allow_coverage_upgrade=False) -> dict:
     """只读取得原检查点及显式比较许可；始终回滚，不调用带恢复/提交副作用的入口。"""
@@ -339,6 +389,7 @@ def inspect_database(job_id: UUID, settings, batch_id: str, archive_path: Path |
             row = session.execute(select(Document, DocumentParseJob).join(
                 DocumentParseJob, DocumentParseJob.doc_id == Document.doc_id).where(
                 DocumentParseJob.job_id == job_id).options(
+                defer(Document.parse_quality),
                 defer(DocumentParseJob.upload_url), defer(DocumentParseJob.error_message))).one_or_none()
             if row is None:
                 raise MinerUError("DIAGNOSTIC_JOB", "未找到原解析Job")
@@ -375,7 +426,7 @@ def main(argv=None) -> int:
     parser.add_argument("--zip", type=Path)
     parser.add_argument("--output", required=True, help="必须是results下尚不存在的JSON文件")
     parser.add_argument("--allow-normalizer-upgrade", action="store_true",
-                        help="显式仅在离线诊断副本允许冻结v2使用v3，不修改或恢复原Job")
+                        help="显式仅在离线诊断副本允许冻结v2/v3使用v4，不修改或恢复原Job")
     parser.add_argument("--allow-coverage-upgrade", action="store_true",
                         help="显式对Hash一致原件重新预检，在内存副本比较PDF覆盖v1到v2，不恢复Job")
     args = parser.parse_args(argv)
@@ -409,7 +460,7 @@ def main(argv=None) -> int:
         print("DIAGNOSTIC_OUTPUT：报告未能独占写入，未覆盖已有文件", file=sys.stderr)
         return 2
     print(f"{report['status']}：{report['error_code'] or 'ADAPTER_VALIDATED'}；仅诊断，未恢复/提交任务")
-    return 0 if report["status"] == "ADAPTER_PASS_NOT_RECOVERED" else 2
+    return 0 if report["status"] in {"ADAPTER_PASS_NOT_RECOVERED", "ADAPTER_PARTIAL_NOT_RECOVERED"} else 2
 
 
 if __name__ == "__main__":

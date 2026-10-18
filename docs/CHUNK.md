@@ -6,6 +6,8 @@
 
 ## 策略与计量边界
 
+MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进入source_spans，Document.parse_quality进入Chunk metadata。未知页码文字只保留本地隔离产物，不造page=1的Chunk；切片规则/公式/原字符偏移不改。部分覆盖最终只能PARTIAL_READY，详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
+
 - 按从 1 开始的连续 block_index 阅读；未知历史顺序安全失败，不按页码/bbox/UUID 排序。
 - 标题/section 边界优先，不把旧章节的正文重叠带入新章节。后续切片尽量带当前标题（最多估算 100 token）；长标题主内容仍完整保留。
 - 普通正文/image_text 优先空行段落，超长段落按字符/token 区间切分。段落拼接用两个换行；source_spans 精确标识哪些字符来自 Block，拼接分隔符不是原文。

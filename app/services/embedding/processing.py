@@ -72,7 +72,7 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
     if active is not None:
         raise EmbeddingError("EMBEDDING_BUSY")
-    if document.status in {"INDEXING", "READY"} and document.embedding_task_id is not None:
+    if document.status in {"INDEXING", "READY", "PARTIAL_READY"} and document.embedding_task_id is not None:
         checked_config(document)
         return document.embedding_task_id, False
     if document.index_task_id is not None:

@@ -47,9 +47,9 @@ def merged_case(*, cross_page=False, columns=False, originals=("前段正文", "
 
 
 def normalize_case(values, layout, geometry, *, doc_id=None):
-    """调用唯一 Adapter；输入全为内存元数据，不读取原件、不使用任务或数据库。"""
+    """独立验证严格增强器；公共v4容错入口另测，不把增强失败当作基础内容失败。"""
 
-    return MinerUResultAdapter().normalize(result_zip(values, layout=layout),
+    return MinerUResultAdapter().normalize_strict(result_zip(values, layout=layout),
         doc_id=doc_id or uuid4(), file_name="元数据用例.pdf", file_type="pdf",
         geometry=geometry, identity="frozen-input")
 

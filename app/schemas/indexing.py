@@ -12,4 +12,4 @@ class IndexTaskResponse(BaseModel):
     doc_id: UUID
     kb_id: UUID
     index_task_id: UUID
-    status: Literal["INDEXING", "READY"]
+    status: Literal["INDEXING", "READY", "PARTIAL_READY"]

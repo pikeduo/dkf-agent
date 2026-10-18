@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.core.business_logging import log_event
 from app.models import DocumentParseJob
@@ -108,14 +108,16 @@ def source_for_part(document, job, settings) -> LocalFile:
 
 
 def claim_piece(session, document, job) -> None:
-    """片缓存 miss 后按内容锁登记唯一提交者；跨原件重复片也不并行收费。"""
+    """按片Hash及缓存身份保护跨文档/Normalizer历史，升级不能绕过旧分片收费记录。"""
     manifest = checked_manifest(document, job)
     part = current_part(manifest)
     key = key_for(piece_recipe(job, part))
-    lock_keys(session, [key])
+    lock_keys(session, [key, part.file_hash])
     owners = session.scalars(select(DocumentParseJob).where(
         DocumentParseJob.job_id != job.job_id,
-        DocumentParseJob.parse_options.contains({"_pdf_split_claims": [key]}))).all()
+        DocumentParseJob.provider == "mineru_cloud",
+        or_(DocumentParseJob.parse_options.contains({"_pdf_split_claims": [key]}),
+            DocumentParseJob.parse_options["_pdf_split"]["parts"].contains([{"file_hash": part.file_hash}])))).all()
     for owner in owners:
         # 仅检查相同片的历史，而不是把另一片的提交当成此片已收费。
         rows = owner.parse_options.get("_pdf_split", {}).get("parts", [])
@@ -135,7 +137,8 @@ def complete_cached_piece(session, document, job, settings):
     if part is None:
         return finalize_split(session, document, job, settings, manifest)
     # 有 Batch 的结果先写缓存再提交 SQL，回滚时以本片独立指针恢复，不重复 GET/POST。
-    pointer = part_path(ParseCache(settings), document.doc_id, job.job_id, part.ordinal).parent / f"result-{part.ordinal:04d}.json"
+    prefix = "result-v4" if "_adapter_recipe" in job.parse_options else "result"
+    pointer = part_path(ParseCache(settings), document.doc_id, job.job_id, part.ordinal).parent / f"{prefix}-{part.ordinal:04d}.json"
     if pointer.exists():
         import json
         try:
@@ -154,12 +157,20 @@ def complete_cached_piece(session, document, job, settings):
 
 
 def validate_piece(document, job, part, parsed) -> None:
-    """把原页 Guard 摘要平移到当前局部范围，缓存与新云结果执行相同完整性校验。"""
+    """平移真实原页要求；无可靠文字片仅保存PARTIAL，整份仍须有可索引的可靠块。"""
     decision = RouteDecision.model_validate(job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"])
     pages = tuple(page.model_copy(update={"page": page.page - part.page_start + 1})
                   for page in decision.signals.pages if part.page_start <= page.page <= part.page_end)
     local = decision.model_copy(update={"signals": decision.signals.model_copy(update={
         "page_count": part.page_end - part.page_start + 1, "pages": pages})})
+    if (not parsed.blocks and parsed.file_type == "pdf" and parsed.quality is not None
+            and parsed.quality.content == "PARTIAL"
+            and (parsed.quarantined_content or parsed.quality.visual_only_count)):
+        parsed.quality.required_pages = sorted(page.page for page in pages if page.required)
+        parsed.quality.missing_pages = list(parsed.quality.required_pages)
+        if "MISSING_REQUIRED_PAGES" not in parsed.quality.warnings and len(parsed.quality.warnings) < 128:
+            parsed.quality.warnings.append("MISSING_REQUIRED_PAGES")
+        return
     try:
         guard_result(parsed, local)
     except CompletenessError:
@@ -174,7 +185,8 @@ def complete_piece(session, document, job, settings, parsed, archive):
     cache = ParseCache(settings)
     record = cache.save(piece_recipe(job, part), archive_artifacts(archive) | {
         "normalized_document.json": parsed.model_dump_json().encode()})
-    pointer = part_path(cache, document.doc_id, job.job_id, part.ordinal).parent / f"result-{part.ordinal:04d}.json"
+    prefix = "result-v4" if "_adapter_recipe" in job.parse_options else "result"
+    pointer = part_path(cache, document.doc_id, job.job_id, part.ordinal).parent / f"{prefix}-{part.ordinal:04d}.json"
     atomic_write(pointer, record.model_dump_json().encode())
     part.result = record.model_dump(mode="json")
     part.batch_id, part.submission_attempted, part.upload_complete = job.batch_id, job.submission_attempted, job.upload_complete
@@ -237,7 +249,7 @@ def finalize_split(session, document, job, settings, manifest):
     except CompletenessError:
         raise MinerUError("COMPLETENESS", "PDF 完整原页覆盖不符，未写入部分 Block") from None
     save_manifest(job, manifest, settings)
-    cache.save_document(document, job.parse_options["_cache_recipe"], merged,
+    cache.save_document(document, job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"], merged,
                         {"pdf_split/manifest.json": canonical(manifest.model_dump(mode="json"))}, job_id=job.job_id)
     finish_job(session, document, job, merged)
     session.commit()

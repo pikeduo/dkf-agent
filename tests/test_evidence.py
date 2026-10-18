@@ -109,12 +109,12 @@ class SessionStub:
             assert bound_filter_value(statement, Document.kb_id) == kb_id
             assert bound_filter_value(statement, KnowledgeBase.kb_id) == kb_id
             assert bound_filter_value(statement, KnowledgeBase.status) == "ACTIVE"
-            status = bound_filter_value(statement, Document.status)
-            assert status == "READY"
+            statuses = bound_filter_value(statement, Document.status, operation=operators.in_op)
+            assert statuses == ["READY", "PARTIAL_READY"]
             self.rows = (self.forced_rows if self.forced_rows is not None else [
                 (chunk, doc) for chunk, doc, _ in self.sources
                 if chunk.chunk_id == chunk_id and chunk.kb_id == kb_id and doc.kb_id == kb_id
-                and doc.status == status and (doc_id is None or doc.doc_id == doc_id)])
+                and doc.status in statuses and (doc_id is None or doc.doc_id == doc_id)])
         else:
             assert statement.column_descriptions[0]["entity"] is DocumentBlock, "Mock不接受未知SELECT"
             doc_id = bound_filter_value(statement, DocumentBlock.doc_id)
@@ -185,14 +185,39 @@ def test_real_source_fields_and_page_semantics_remain_readonly(file_type, page, 
 
 
 def test_scope_status_and_minimal_columns_are_pushed_into_sql():
-    """编译只读表达式验证KB/doc/READY/ACTIVE过滤；不选路径或向量，不实际执行SQL。"""
+    """只读表达式验证KB/doc/索引终态/ACTIVE过滤，不选私有路径或向量。"""
     kb_id, chunk_id, doc_id = uuid4(), uuid4(), uuid4()
     compiled = tool.evidence_statement(kb_id, chunk_id, doc_id).compile(dialect=postgresql.dialect())
     sql, values = str(compiled), list(compiled.params.values())
-    assert "READY" in values and "ACTIVE" in values and all(value in values for value in (kb_id, chunk_id, doc_id))
+    assert ["READY", "PARTIAL_READY"] in values and "ACTIVE" in values and all(value in values for value in (kb_id, chunk_id, doc_id))
     assert sql.count("kb_id =") >= 3 and "LIMIT" in sql
     assert "file_path" not in sql and "document_chunks.embedding" not in sql
     assert all(word not in sql for word in ("UPDATE", "INSERT", "DELETE", "FOR UPDATE"))
+
+
+@pytest.mark.parametrize("damage", [None, "source", "unreliable"])
+def test_partial_ready_keeps_verified_provenance_and_rejects_damaged_or_unknown_page(damage):
+    """部分文档的可靠Chunk可反查；新增来源字段不绕过原字符/Hash/页码验证。"""
+    chunk, document, blocks = source_fixture()
+    document.status = "PARTIAL_READY"
+    provenance = {"origin": "layout_preproc", "pointer": "layout/page/1/preproc_blocks/0",
+                  "raw_sha256": "c" * 64, "page_reliable": True, "bbox_reliable": True}
+    blocks[0].provenance = copy.deepcopy(provenance)
+    span = chunk.chunk_metadata["source_spans"][0]
+    span.update(provenance=copy.deepcopy(provenance), page_reliable=True)
+    if damage == "source":
+        span["provenance"]["pointer"] = "layout/page/1/preproc_blocks/1"
+    elif damage == "unreliable":
+        span["page_reliable"] = False
+    service, _ = service_for((chunk, document, blocks))
+    if damage:
+        with pytest.raises(tool.EvidenceError) as error:
+            service.resolve(chunk.kb_id, chunk.chunk_id)
+        assert error.value.code == "EVIDENCE_SOURCE"
+    else:
+        trace = service.resolve(chunk.kb_id, chunk.chunk_id)
+        assert trace.document_status == "PARTIAL_READY"
+        assert trace.source_spans[0].provenance == provenance and trace.source_spans[0].page_reliable
 
 
 @pytest.mark.parametrize("use_table_labels", [False, True])

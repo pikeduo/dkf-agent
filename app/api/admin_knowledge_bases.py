@@ -352,7 +352,7 @@ def submit_maintenance(session: Session, document: Document, operation: str,
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
-    if (active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING", "EMBEDDING", "INDEXING", "READY"}
+    if (active is not None or document.status not in {"UPLOADED", "FAILED", "CHUNKING", "EMBEDDING", "INDEXING", "READY", "PARTIAL_READY"}
             or document.status == "CHUNKING" and document.chunk_task_id is not None
             or document.status == "EMBEDDING" and document.embedding_task_id is not None
             or document.status == "INDEXING" and document.index_task_id is not None):

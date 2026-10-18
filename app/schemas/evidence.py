@@ -29,6 +29,8 @@ class SourceSpan(BaseModel):
     source: StrictStr = Field(min_length=1, max_length=64)
     bbox: BoundingBox | None
     block_text_hash: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    provenance: dict | None = None
+    page_reliable: bool = True
     start_char: StrictInt = Field(ge=0)
     end_char: StrictInt = Field(gt=0)
     chunk_start_char: StrictInt = Field(ge=0)
@@ -71,7 +73,7 @@ class EvidenceTrace(BaseModel):
     file_type: FileType
     file_hash: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     source_type: Literal["preset", "uploaded"]
-    document_status: Literal["READY"]
+    document_status: Literal["READY", "PARTIAL_READY"]
     source_parse_task_id: UUID
     source_chunk_task_id: UUID
     text: StrictStr

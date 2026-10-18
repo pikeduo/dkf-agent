@@ -19,8 +19,8 @@ from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.cache_files import cache_guard
 
 VERSION = "parse-cache-v1"
-# 跨页表格恢复改变表体/附注的页面归属，必须隔离旧缓存；不修改旧付费Job或自动重算。
-NORMALIZER_VERSION = "mineru-adapter-v3"
+# v4基础来源/质量分层改变转换语义，隔离旧成功缓存；原ZIP/云参数不改、不自动收费。
+NORMALIZER_VERSION = "mineru-adapter-v4"
 NATIVE_VERSION = "native-v1"
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACTS = frozenset({"normalized_document.json", "raw/mineru_result.zip",

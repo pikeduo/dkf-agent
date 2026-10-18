@@ -1,5 +1,7 @@
 # Citation / Evidence：来源链与人工验收
 
+阶段33 v4补充：EvidenceService允许READY/PARTIAL_READY中的可靠Chunk，仍逐字符/Hash/原页核对。新source_spans保留provenance/page_reliable，与数据库Block来源必须一致；未知页内容不造Block或进入严格页评分。缺bbox允许NULL，不等于页码不可靠；PARTIAL文档不能宣称整份证据完整。
+
 阶段23代码已实现；用户运行Mock后发现测试桩SQL参数名兼容问题，修正待用户复测，真实数据库来源与答案忠实度仍待人工验收。不新增依赖、配置、数据库表/迁移或HTTP接口，不开发阶段24。
 
 ## 两层来源边界
