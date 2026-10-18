@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentParseJob
-from app.parsers.routing.contracts import RouteDecision
+from app.parsers.routing.contracts import OFFICE_SNAPSHOT_VERSION, RouteDecision
 from app.parsers.routing.guard import CompletenessError, guard_result
 from app.parsers.routing.inspector import inspect_document
 from app.parsers.common import ParserError
@@ -80,7 +80,7 @@ def create_job(
     hybrid_context: dict | None = None,
     force_reparse: bool = False,
 ) -> DocumentParseJob:
-    """先查已验证缓存，首次miss/明确Reparse才创建云身份；同步换绑编排，恢复沿用原批次。"""
+    """先查版本隔离缓存，保存快照冻结PARTIAL范围；恢复沿用原批次，不重复提交。"""
 
     document = session.scalar(
         select(Document)
@@ -182,7 +182,9 @@ def create_job(
             options = options | {"_pdf_split_request": {"policy": split_policy, "page_count": page_count}}
             identity = hashlib.sha256(canonical(parse_options(settings) | {"pdf_split": split_policy})).hexdigest()
     cache_recipe = recipe(document, settings, "hybrid_bundle" if hybrid_context else "mineru_whole",
-                          manifest=manifest, pdf_split_policy=split_policy)
+                          manifest=manifest, pdf_split_policy=split_policy,
+                          office_snapshot_version=(OFFICE_SNAPSHOT_VERSION if hybrid_context is None
+                              and guard_decision.signals.office_snapshot_rel_count else None))
     cache_key = key_for(cache_recipe)
     visual_keys = sorted({key_for(visual_recipe(entry.content_hash, options, manifest.version))
         for entry in manifest.entries if entry.source_type == "embedded_image"

@@ -25,12 +25,17 @@
 | JPG/JPEG/PNG、DOC/XLS/PPT/PPTX | mineru_whole / VISUAL_OR_LEGACY_FORMAT |
 | XLSX 媒体、绘图、图表 | 优先 hybrid_bundle；提交前的已知能力缺口可一次转 Whole，保留 Native 公式主结果 |
 | XLSX 嵌入、VML、特殊 Sheet | 先 Hybrid 预检；受控能力缺口可提交前 Whole；外链附件缺失直接 FAILED |
+| DOCX/PPTX保存图表更新源、带包内副本的链接图片；XLSX外部工作簿更新引用 | 已验证保存快照走Whole；XLSX保留Native原式；标PARTIAL，不访问外链 |
 | MD 图片引用（本地/远程/HTML），附件未上传 | FAILED / MD_ASSET_NOT_UPLOADED |
 | 超资源上限 | FAILED / PREFLIGHT_LIMIT 或 HYBRID_RESOURCE_LIMIT |
 
 预检禁止 XML DTD/实体和网络获取，先验证真实容器及 Hash。PDF 逐页检查，横向重叠只判断风险，不改阅读顺序。小 logo、绘图/文本量和预检规模阈值通过 `.env` 中 ROUTER_* 配置，见 README。
 
-DOCX只有精确官方`attachedTemplate`且`TargetMode=External`时可视为非正文排版依赖，不抓取模板；内部模板缺件、其他命名空间的同名类型、外部图片/OLE/工作簿仍拒绝。Office XML单部件默认16MiB，超限新增`router.inspection_rejected / XML_PART_SIZE`，只记录实际`size_bytes`与`limit_count`，总XML预算、DTD/实体保护不变。调整既有`ROUTER_XML_PART_MAX_MB`需由用户重启相关进程；配置参与缓存身份，先完成旧配置下缓存恢复。
+DOCX精确官方`attachedTemplate / External`是非正文排版依赖，不抓取模板。保存快照是另一个有界分支：图表`externalData`必须指向同一关系且有可用保存缓存（稀疏空点不补零）；链接图片的同一`blip`必须有合法内部`embed`副本；XLSX仅接受标准`externalBook`及已识别备用更新URL关系，原公式从原件保留，不能用缓存计算值替代。任何其他缺件仍阻塞。XLSX快照直接Whole，不放宽Hybrid的外部资源规则。
+
+非零`signals.office_snapshot_rel_count`冻结范围，旧摘要零值不序列化以保持身份；理由为`OFFICE_SAVED_SNAPSHOT`。Guard在硬校验后保留原块及既有质量，并追加`EXTERNAL_SOURCE_UNVERIFIED`及关系计数，`content=PARTIAL`，索引后为PARTIAL_READY。缓存增加可选`office_snapshot_version=office-saved-snapshot-v1`隔离此分支，旧成功缓存/Job不升级。没有原Job的失败项经用户Retry可能首次付费；已有Job必须复用原结果，不因本分支重投。
+
+Office XML单部件默认16MiB，超限事件`router.inspection_rejected / XML_PART_SIZE`只记录实际字节与限制；关系及所读Owner XML各自总预算64MiB，DTD/实体/路径/Hash检查保留。调整既有`ROUTER_XML_PART_MAX_MB`需由用户重启相关进程；配置参与缓存身份，先完成旧配置下缓存恢复。定向元数据/Mock用例为`tests/test_office_saved_snapshot.py`，Codex未执行。
 
 `PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数；PDF_OBJECT_LIMIT保留步骤名称兼容，现仅针对单页图片数超过5000。日志保留触发页及实际计数/阈值，绘图数不能被日志白名单丢弃；不据通用错误码猜测云端失败。
 

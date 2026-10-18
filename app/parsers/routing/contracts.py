@@ -2,13 +2,14 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 from app.core.file_formats import FileType
 
 ParseMode = Literal["auto", "native", "mineru"]
 RouteStrategy = Literal["native", "mineru_whole", "hybrid_bundle", "failed"]
 PDF_COVERAGE_VERSION = "pdf-coverage-v2"
+OFFICE_SNAPSHOT_VERSION = "office-saved-snapshot-v1"
 REASON_CODES = frozenset(
     {
         "PREFLIGHT_LIMIT",
@@ -21,6 +22,7 @@ REASON_CODES = frozenset(
         "MD_ASSET_NOT_UPLOADED",
         "PREFLIGHT_UNCERTAIN",
         "EXTERNAL_ATTACHMENT_MISSING",
+        "OFFICE_SAVED_SNAPSHOT",
         "XLSX_EXTERNAL_ASSET_MISSING",
         "XLSX_WHOLE_WITH_NATIVE_PRIMARY",
         "HYBRID_PREFLIGHT_WHOLE_FALLBACK",
@@ -110,9 +112,19 @@ class StructuralSignals(BaseModel):
     chart_count: int = Field(default=0, ge=0)
     embedded_count: int = Field(default=0, ge=0)
     image_reference_count: int = Field(default=0, ge=0)
+    # 非零只表示已证明存在的包内保存内容；外部更新源仍未核验，不声明完整。
+    office_snapshot_rel_count: int = Field(default=0, strict=True, ge=0)
     pages: tuple[PageSignals, ...] = ()
     # 缺省视为旧规则；新预检显式冻结独立版本，不改 Normalizer/供应商参数。
     pdf_coverage_version: Literal["pdf-coverage-v1", "pdf-coverage-v2"] = "pdf-coverage-v1"
+
+    @model_serializer(mode="wrap")
+    def serialize_compatible(self, handler):
+        """旧摘要不追加零计数字段，保持已有Job/主结果检查点的序列化身份。"""
+        value = handler(self)
+        if not self.office_snapshot_rel_count:
+            value.pop("office_snapshot_rel_count", None)
+        return value
 
     @model_validator(mode="after")
     def validate_pdf_coverage_version(self):

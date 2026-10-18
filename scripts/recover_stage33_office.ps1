@@ -3,14 +3,20 @@
 param(
     [switch]$ExecuteLocal,
     [switch]$ExecuteNewParse,
+    [switch]$ExecuteSavedOffice,
     [switch]$AllowCloud,
     [ValidateRange(60,86400)][int]$TimeoutSeconds = 7200
 )
 
 $ErrorActionPreference = 'Stop'
-if ($ExecuteLocal -and $ExecuteNewParse) { throw '请分别执行本地恢复和新解析，不能混在一次运行中。' }
-if ($ExecuteNewParse -and -not $AllowCloud) { throw '新解析可能收费；确认费用后须显式增加 -AllowCloud。' }
-if ($AllowCloud -and -not $ExecuteNewParse) { throw '-AllowCloud 仅用于显式 -ExecuteNewParse，其他模式无需云许可。' }
+$executionModes = @($ExecuteLocal, $ExecuteNewParse, $ExecuteSavedOffice) | Where-Object { $_ }
+if (@($executionModes).Count -gt 1) { throw '请分别执行本地恢复、新解析和Office保存快照恢复。' }
+if (($ExecuteNewParse -or $ExecuteSavedOffice) -and -not $AllowCloud) {
+    throw '首次云解析可能收费；确认费用后须显式增加 -AllowCloud。'
+}
+if ($AllowCloud -and -not ($ExecuteNewParse -or $ExecuteSavedOffice)) {
+    throw '-AllowCloud仅用于显式新解析或Office保存快照恢复。'
+}
 $apiRoot = 'http://127.0.0.1:8000/api/admin'
 $kbId = '158030a1-42d6-42ee-835d-02fdbff23f81'
 # 仅已检查过的缓存恢复项；不会从通用错误码推断其他文件也可重建。
@@ -27,6 +33,14 @@ $newParseIds = @(
     '68989d39-3032-40c0-8d42-dddb29ea2185', '3f73d303-099f-4698-8910-4748667f64d2',
     '7440559b-26e2-40dd-ae35-39881536ac11', 'ee5e1f7a-0208-4c2d-adbc-eca7b98a4aa7',
     '7339e772-0627-40bf-b90f-a0e6646c0356', '83d24856-fb63-49f9-9466-8db2bf8543c8'
+)
+# 仅本轮逐项核过关系元数据的九份；没有云Job时才允许首次提交，绝不Force或补投旧Batch。
+$savedOfficeIds = @(
+    '4d18710e-c8bf-4504-8982-bd5ce7e115a9', '926d4339-96f6-4756-af61-121901efd806',
+    'e1f59a27-a401-4de1-809b-a998ae7c63f1', 'c8e4ca42-f739-48c4-9c2d-50120f956309',
+    '2d4cb398-1f04-461a-87e8-84437fcf2554', 'fd0eed46-d01c-450d-901e-d6c10edcdb68',
+    'd5eefa49-4d03-4e66-aa33-54b7d27e5734', '5f7494bb-d83a-41cf-b4ee-30a618b4da60',
+    'b353a134-04d8-4cb2-ae30-9d87301f459f'
 )
 # 已确认切片成功、聚合预算检查阻止GPU任务创建的两份；恢复只接续现有Chunk。
 $embeddingBudgetIds = @(
@@ -56,7 +70,7 @@ function Wait-Stage33Recovery {
 }
 
 function ConvertTo-Stage33Row {
-    # 同时展示业务/管理状态；准备阶段失败不再被EMBEDDING外观误判为仍在运行。
+    # 同时展示业务/管理/质量；保存快照单独授权首次云任务，不冒充完整READY。
     param($Document, $State)
     $passed = ($State.status -eq 'READY' -and $State.block_count -gt 0 -and
         $State.chunk_count -gt 0 -and $State.chunk_count -eq $State.vector_count -and
@@ -76,6 +90,11 @@ function ConvertTo-Stage33Row {
         if ($Document.doc_id -in $localIds) {
             $action = if ($State.parse_cache_present) { 'LOCAL_REINDEX' } else { 'LOCAL_CACHE_REQUIRED' }
         } elseif ($Document.doc_id -in $newParseIds) { $action = 'NEW_PARSE_REQUIRES_CLOUD_PERMISSION' }
+        elseif ($Document.doc_id -in $savedOfficeIds -and (
+            $State.management.cause_code -in @('EXTERNAL_ATTACHMENT_MISSING','XLSX_EXTERNAL_ASSET_MISSING') -or
+            $State.error_message -match 'EXTERNAL_ATTACHMENT_MISSING|XLSX_EXTERNAL_ASSET_MISSING')) {
+            $action = 'SAVED_OFFICE_REQUIRES_CLOUD_PERMISSION'
+        }
         elseif ($State.management.cause_code -eq 'EXTERNAL_ATTACHMENT_MISSING') { $action = 'EXTERNAL_CONTENT_REQUIRED' }
         elseif ($State.management.cause_code -eq 'PREFLIGHT_LIMIT') { $action = 'XML_BUDGET_REVIEW' }
         elseif ($State.management.stage -eq 'cloud') { $action = 'ORIGINAL_CLOUD_JOB_REVIEW' }
@@ -106,6 +125,7 @@ if ($documents.Count -ne 200 -or @($documents.doc_id | Select-Object -Unique).Co
     throw "原知识库文档数或身份不符，实取$($documents.Count)份，预期200份；未执行恢复。"
 }
 
+$savedOfficeStopped = $false
 $rows = @(
     foreach ($document in $documents) {
         $state = Get-Stage33Status $document.doc_id
@@ -113,8 +133,13 @@ $rows = @(
         $operation = $null
         if ($ExecuteLocal -and $row.action -eq 'LOCAL_REINDEX') { $operation = 'reindex' }
         if ($ExecuteLocal -and $row.action -eq 'LOCAL_RETRY') { $operation = 'retry' }
-        if ($ExecuteNewParse -and $row.action -eq 'NEW_PARSE_REQUIRES_CLOUD_PERMISSION') {
+        if (($ExecuteNewParse -and $row.action -eq 'NEW_PARSE_REQUIRES_CLOUD_PERMISSION') -or
+            ($ExecuteSavedOffice -and -not $savedOfficeStopped -and
+             $row.action -eq 'SAVED_OFFICE_REQUIRES_CLOUD_PERMISSION')) {
             $detail = Invoke-RestMethod "$apiRoot/documents/$($document.doc_id)" -TimeoutSec 30
+            if ($detail.doc_id -ne $document.doc_id -or $detail.kb_id -ne $kbId) {
+                throw '文档详情身份不符，未提交新解析。'
+            }
             if (@($detail.parse_jobs).Count -gt 0) {
                 throw "已有Job：$($document.doc_id)，停止新解析，请先核对原结果和费用。"
             }
@@ -134,6 +159,11 @@ $rows = @(
             }
             $row = ConvertTo-Stage33Row $document $state
             Write-Host "处理结果：$($document.doc_id) / $($row.status) / $($row.cause)"
+            if ($ExecuteSavedOffice -and $state.status -notin @('READY','PARTIAL_READY')) {
+                # 第一份实际失败后暂停该组后续提交，仍完整生成200份状态报告供定位。
+                $savedOfficeStopped = $true
+                Write-Warning 'Office恢复未完成，已停止该组后续新提交；请先检查此文档原始阶段和原因。'
+            }
         }
         $row
     }

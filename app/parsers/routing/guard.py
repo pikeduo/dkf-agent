@@ -3,7 +3,9 @@
 from app.core.file_formats import OFFICE_TYPES
 from app.parsers.common import ParserError
 from app.parsers.routing.contracts import RouteDecision
-from app.schemas.parsed_document import ParsedDocument
+from app.schemas.parsed_document import ParsedDocument, ParseQuality
+
+OFFICE_SNAPSHOT_WARNINGS = ("OFFICE_SAVED_SNAPSHOT", "EXTERNAL_SOURCE_UNVERIFIED")
 
 
 class CompletenessError(ParserError):
@@ -11,7 +13,7 @@ class CompletenessError(ParserError):
 
 
 def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
-    """保留身份/范围硬校验；MinerU v4缺页记录PARTIAL，Native完整性要求不变。"""
+    """保留身份/范围硬校验；缺页或外部更新快照明确PARTIAL，不冒充完整内容。"""
 
     if parsed.file_type != decision.file_type:
         raise CompletenessError("解析结果格式与路由决策不一致")
@@ -63,3 +65,18 @@ def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
             raise CompletenessError("Office 转换后逻辑页超出平台范围")
     else:
         raise CompletenessError("尚未允许的路由结果不能写入最终 Block")
+    if signals.office_snapshot_rel_count:
+        if decision.file_type not in {"docx", "xlsx", "pptx"}:
+            raise CompletenessError("保存快照范围与原件格式不一致")
+        quality = parsed.quality or ParseQuality(base_block_count=len(parsed.blocks))
+        warnings = list(dict.fromkeys(quality.warnings + list(OFFICE_SNAPSHOT_WARNINGS)))
+        diagnostic = {"stage": "router.office_snapshot", "reason": "EXTERNAL_SOURCE_UNVERIFIED",
+                      "count": signals.office_snapshot_rel_count}
+        diagnostics = list(quality.diagnostics)
+        if diagnostic not in diagnostics:
+            diagnostics.append(diagnostic)
+        if len(warnings) > 128 or len(diagnostics) > 128:
+            raise CompletenessError("保存快照质量摘要超出安全上限")
+        # 不更改块、原式或既有缺页/视觉记录；证明的是本地来源，未核验外部数据版本。
+        quality.content, quality.warnings, quality.diagnostics = "PARTIAL", warnings, diagnostics
+        parsed.quality = quality

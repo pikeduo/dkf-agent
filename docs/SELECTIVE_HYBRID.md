@@ -5,6 +5,7 @@
 ## 范围与策略
 
 - 省略模式默认为 auto。复杂 XLSX 默认优先 Hybrid；管理员可显式 Native/Whole 覆盖，关闭增强时采用带 Native 主结果保护的 Whole。DOCX/PDF/PPT 不做 Hybrid，不使用 Review 策略。
+- 已验证的外部工作簿更新快照由Router直接Whole并保留Native原式，最终质量为PARTIAL；不进入Hybrid或放宽其外部关系/完整性检查。详见[保存快照规则](PARSER_ROUTER.md#2-决策与原子性)。
 - 先读现有 XlsxParser，保留原始 Sheet 顺序、单元格和公式。Native 全空 Workbook 仍失败。
 - 没有单元格但含可用视觉内容的工作表允许空 Native 暂存；最终必须有有效 Chart/云视觉正文，全部过滤或纯空 Workbook 仍失败，不伪造表格或公式。
 - OOXML 包关系定位 Sheet → drawing → image/chart；只接受有界包内关系和 one/twoCellAnchor。复杂图表、绝对 Anchor、真实裁剪/旋转、OLE/VML 等不能局部覆盖时记录具体原因，提交云端前可转 Whole；外链附件缺失、损坏或孤立部件直接失败。空效果/零裁剪、常见图表线条颜色样式/附属 Style 以及共享公式优先兼容。

@@ -2,7 +2,39 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 23:45快照与下一步单文档恢复
+## 10月19日：九份Office保存快照恢复
+
+用户报告上一轮操作已完成，尚无新的全200份CSV，本节不猜测当前总数。只读核对这9份冻结原件及关系元数据后，确认先前“全部缺少正文附件”的分类不准确：5份DOCX/PPTX含已保存数据的图表更新源，其中1份链接图片同时有包内副本；4份XLSX包含外部工作簿更新引用，原单元格/公式仍可保留。此前统一报`EXTERNAL_ATTACHMENT_MISSING`发生在MinerU提交前，不是上一轮strong切片修复失效或MinerU解析失败。
+
+本次仅允许有证据的保存快照：精确关系类型及拥有者、缓存索引/值、同元素图片副本和包内目标均验证。真正单独外链图片、未知关系、内部缺件及损坏仍拒绝。XLSX走Whole加Native主结果，原公式保留且不计算；不抓取外部URL，也不将缓存值当作外部数据完整证明。Guard保留原块及既有缺口，新增`OFFICE_SAVED_SNAPSHOT / EXTERNAL_SOURCE_UNVERIFIED`，最终索引状态应为PARTIAL_READY，正式完整验收仍未通过。缓存仅此分支增加`office_snapshot_version=office-saved-snapshot-v1`，其他旧Job/缓存/READY向量不重建。
+
+由用户先运行定向回归（Codex未执行）：
+
+```powershell
+Set-Location 'D:\python project\dkf-agent'
+conda activate dkf-agent
+python -m pytest tests/test_office_saved_snapshot.py tests/test_stage33_office_recovery.py tests/test_parser_router.py tests/test_xlsx_primary.py tests/test_parse_cache.py -q -ra
+```
+
+通过后停止新投递，检查active/reserved/scheduled，确认相关任务安全结束再正常停止并按README重启API、全部CPU/GPU Worker；不强杀、不清队列，无新迁移/依赖或环境变量。保持目前已采用的配置，不为这9份额外调整XML预算。
+
+```powershell
+python -m celery -A app.core.celery_app:celery_app inspect active
+python -m celery -A app.core.celery_app:celery_app inspect reserved
+python -m celery -A app.core.celery_app:celery_app inspect scheduled
+# 默认只读：登记原知识库全200份并另存实时CSV，不以旧checkpoint判断状态。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+# 仅确认首次云解析费用后执行：固定九份、串行等待、每份POST一次，不执行Force。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteSavedOffice -AllowCloud
+# 完成后重新取得全200份实时报告。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+```
+
+九份固定身份为下方历史清单中的4份外部工作簿及5份OLE/图片关系文档，脚本已单独列明。当前可用记录均没有Job；可能首次提交0～9个Whole云任务，并非已有ZIP的无云恢复。脚本再次读取实时详情，已有任何Job即停止新提交，不借本修复重传旧Batch；跳过READY/PARTIAL_READY及活动任务。第一份实际失败后不再提交该组后续项，但仍完整生成200份报告；HTTP确认失败/超时停止，不盲重发。
+
+验收可靠内容入库需`PARTIAL_READY`、`chunk_count=vector_count>0`、`invalid_vector_count=0`、管理done，并确认质量保留外部源告警与原公式/来源；这不能替代完整外部数据验收或宣称200份READY。若失败，使用新CSV的stage/cause/error及对应Worker原异常继续定位，不能将“路由放行”当成恢复成功。9份真实供应商转换、GPU/索引及新增测试尚未执行，必须由用户确认。
+
+## 23:45快照与单文档恢复（历史）
 
 10月18日23:42/23:45两份用户实时CSV均为115 READY、72 PARTIAL_READY、13 FAILED，全部200份均有记录；187份已索引文档的Chunk数与向量数一致、无无效向量。剩余13份为9份外部依赖、2份原云失败、1份真实Token超限、1份XML预算超限。PARTIAL_READY不是全量完整验收，其中10份记录required缺页。
 
@@ -53,7 +85,7 @@ Invoke-RestMethod -Uri "$xmlBase/status" -TimeoutSec 30 -ErrorAction Stop |
     Select-Object status,error_message,management | ConvertTo-Json -Depth 6
 ```
 
-其余9份仍需原外部工作簿/图片/OLE依赖；2份远端failed需核对原Job/Batch的平台具体原因，不能用本地切片修复代替或自动申请新批次。72份PARTIAL_READY的缺页/视觉/空结构分别核对，不清警告改READY。完成上述单文档后用默认只读命令刷新全200份报告，不读旧checkpoint判断恢复结果：
+9份外部关系已由10月19日的逐项检查修正为可处理保存快照，详见上节；外部源内容完整性仍待核验。2份远端failed需核对原Job/Batch的平台具体原因，不能用本地切片修复代替或自动申请新批次。72份PARTIAL_READY的缺页/视觉/空结构分别核对，不清警告改READY。完成上述单文档后用默认只读命令刷新全200份报告，不读旧checkpoint判断恢复结果：
 
 ```powershell
 powershell -NoProfile -File scripts/recover_stage33_office.ps1
@@ -108,7 +140,7 @@ powershell -NoProfile -File scripts/recover_stage33_office.ps1
 | 6+2 | DOCX排版模板/customXml误拒绝 | 兼容代码已编写，加载新Worker后Retry；可能首次提交0～8个新云文件，须用户确认费用 |
 | 3 | 同Hash原成功Job只有v2缓存，当前目标无缓存/Job | 新增显式本地缓存升级CLI，核对原成功Job及原ZIP，转换后由原Reindex接续 |
 | 1 | 单XML 20204999字节大于16MiB | 不取消资源保护，最后单独调整既有预算至32MiB，再由用户恢复；不能保证无后续问题/费用 |
-| 9 | 真正的外部工作簿、图片/OLE依赖 | 保留失败，不能伪造缺失内容或将预览/缓存值当完整结果 |
+| 9 | 当时按外部工作簿、图片/OLE关系统一拒绝 | 10月19日已确认保存快照可继续处理，保留外部源未核验的PARTIAL，见最新恢复节 |
 | 2 | 原MinerU Job远端failed | 没有已证明成功结果；需要平台具体原因，不自动重投、Force或追加批次 |
 
 68份PARTIAL_READY已存在真实向量，但不等于完整内容通过。19:57本地质量快照按优先原因分为：10份缺required页、27份含纯视觉页、12份存在空结构/表格内容，另19份需进一步质量审核；分类互斥，仅用于定位，不据此猜测图片语义或批量改READY。最新逐文档缺页、待审页、警告及错误由下述只读脚本重新查询并输出CSV。
@@ -167,14 +199,14 @@ powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteLocal
 powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteNewParse -AllowCloud
 ```
 
-脚本始终登记原知识库全部200份，但每次只对一份执行POST并有界等待；已有活动编排不覆盖、请求确认失败/超时不盲重发。新解析只允许前述8个已修预检的固定身份，发现已有Job停止，不把真正缺附件的9份加入收费列表。缓存升级3项缺目标缓存时留`LOCAL_CACHE_REQUIRED`，不会误走云重试。若重建后仍出现v3 Chunk，立即停止后续恢复并提示重启旧Worker。一个文档确实失败时保留其原因，继续登记其他文档；失败不被标成功。
+脚本始终登记原知识库全部200份，每次只对一份POST并有界等待；已有活动编排不覆盖，请求确认失败/超时不盲重发。原`-ExecuteNewParse`仍只允许上述8个身份；10月19日新增九份独立`-ExecuteSavedOffice -AllowCloud`，发现已有Job停止，不能把新开关用于其他文件。缓存缺失不会误走云重试；旧Worker版本检查保留。失败原因原样保留，不标成功。
 
 报告位于`results/stage33/recovery_status_*.csv`，记录所有200份的`status/passed/action/cause/error`及`warnings/missing_pages/visual_review_pages/diagnostic_reasons`。再次检查用默认命令，不读取旧checkpoint状态，不自动刷新run或启动QA评测。CSV含文件名与内部质量摘要，仅保留在本地受限results目录。
 
 ### 4. 本轮不能自动消除的项
 
 - `082ebed3-a4e9-4b61-934b-4025b472192e`：先完成所有旧配置缓存操作，再由用户调整现有`ROUTER_XML_PART_MAX_MB=32`并重启相关API/CPU进程；允许32MiB不等于跳过总XML/DTD/实体检查。确认潜在首次云费用后，只对该文档手动`POST /api/admin/documents/082ebed3-a4e9-4b61-934b-4025b472192e/retry`。当前脚本不替用户更改配置或授权这笔费用。
-- 外部内容依赖9份、远端failed 2份的真实身份见下方历史清单；需要缺失的原依赖或原Batch具体原因，不以普通Retry/Force绕过。
+- 外部关系9份、远端failed 2份身份见下方历史清单；九份保存快照规则已修正见最新节，远端失败仍需原Batch具体原因，不Force绕过。
 - PARTIAL_READY的68份：可靠块/向量已入库，可继续查看来源和质量；正式全量验收仍须完整READY。缺页、缺表体、纯视觉内容必须按原件/原ZIP核对，不能统一清警告或把未识别图像当装饰。当前没有据日志凭空补文的修复。
 
 ## 19:57历史检查点与既有Office兼容修复
@@ -188,7 +220,7 @@ powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteNewParse 
 | 6 | DOCX仅外部排版模板被误判缺正文附件 | 仅官方`attachedTemplate`外部关系例外；不下载模板，不放行内容附件；此前未创建云Job，Retry可能首次收费 |
 | 2 | Workbook合法的根`customXml/item*.xml`被Hybrid误判必须在xl内 | 精确官方关系允许已有包内部件，其他路径/内容校验保留；后续可能新建Bundle/Whole云任务 |
 | 1 | XLSX单XML部件20204999字节超过默认16MiB；Sheet总XML38016609字节 | 保留保护并增加实测字节日志；由用户完成前述缓存恢复后受控设置既有预算32MiB，不能直接宣称已通过 |
-| 9 | 外部工作簿、OLE或图片内容关系 | 真实依赖仍未提供；没有把缓存公式值/预览图当完整内容，无自动放行 |
+| 9 | 外部工作簿、OLE或图片内容关系 | 当时保守阻塞；10月19日核对保存快照后可继续PARTIAL索引，不冒充外部源完整 |
 | 3 | 同Hash旧付费成功缓存为Normalizer v2，新v4缓存不命中 | 找到旧缓存及其中ZIP的文件路径；未执行Hash/转换验证，未复制身份或静默升级，费用保护保留 |
 | 2 | 日志明确记录MinerU远端state=failed | 没有可证明成功的本地结果，不能用Adapter修改修复或自动申请新批次 |
 

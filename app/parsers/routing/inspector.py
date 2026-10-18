@@ -19,6 +19,10 @@ from app.parsers.text import FENCE, read_text
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 RELATIONSHIP_ROOT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+EXTERNAL_LINKS = "http://schemas.microsoft.com/office/spreadsheetml/2021/extlinks2021"
 # 图片面积仍需逐项计算；绘图细查超预算时只保留计数并要求云端覆盖。
 PDF_MAX_IMAGES_PER_PAGE = 5000
 PDF_GEOMETRY_DETAIL_LIMIT = 5000
@@ -29,15 +33,104 @@ class InspectionLimitError(ParserError):
 
 
 def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
-    """检查内容附件；DOCX外部排版模板不当正文依赖，视觉/对象外链仍阻塞且不抓取。"""
+    """保留旧严格检查入口；新路由显式读取保存快照摘要，不静默修改旧调用语义。"""
+
+    return external_asset_summary(archive, root, limit)[0]
+
+
+def internal_relationship_part(owner: str, node, names: set[str]) -> str:
+    """验证包内目标且不读取外部地址；缺件/路径越界仍是原件错误。"""
+    target = node.get("Target", "")
+    part = posixpath.normpath(target.lstrip("/") if target.startswith("/")
+                             else posixpath.join(posixpath.dirname(owner), target))
+    if (not target or "\\" in target or ":" in target or "?" in target or "#" in target
+            or part.startswith("../") or part not in names):
+        raise ParserError("Office 附件关系无效或内部部件缺失")
+    return part
+
+
+def saved_chart_available(tree) -> bool:
+    """只证明原图表有保存数据；允许原有稀疏空点，不补零、不计算或重建外部工作簿。"""
+    if tree.tag != f"{{{C}}}chartSpace" or not tree.findall(f".//{{{C}}}ser"):
+        return False
+    points_present = False
+    for reference in tree.iter():
+        cache_tag = {f"{{{C}}}numRef": "numCache", f"{{{C}}}strRef": "strCache"}.get(reference.tag)
+        if cache_tag is None:
+            if reference.tag == f"{{{C}}}multiLvlStrRef":
+                return False
+            continue
+        cache = reference.find(f"{{{C}}}{cache_tag}")
+        count = cache.find(f"{{{C}}}ptCount") if cache is not None else None
+        raw_count = count.get("val", "") if count is not None else ""
+        if not raw_count.isascii() or not raw_count.isdigit() or len(raw_count) > 7:
+            return False
+        size, indices = int(raw_count), set()
+        for point in cache.findall(f"{{{C}}}pt"):
+            raw_index = point.get("idx", "")
+            if (not raw_index.isascii() or not raw_index.isdigit() or len(raw_index) > 7
+                    or int(raw_index) >= size or int(raw_index) in indices
+                    or point.find(f"{{{C}}}v") is None):
+                return False
+            indices.add(int(raw_index))
+        points_present |= cache_tag == "numCache" and any(
+            (point.find(f"{{{C}}}v").text or "").strip() for point in cache.findall(f"{{{C}}}pt"))
+    return points_present
+
+
+def saved_external_relationship(archive: ZipFile, root: str, owner: str, tree, nodes: dict,
+                                node, names: set[str]) -> bool:
+    """识别保存快照的更新关系；仅接受精确OOXML类型及同元素已存在的包内图片副本。"""
+    identifier, kind = node.get("Id"), node.get("Type")
+    relation_ns = RELATIONSHIP_ROOT.rstrip("/")
+    references = [element for element in tree.iter() if any(
+        key.startswith("{" + relation_ns + "}") and value == identifier
+        for key, value in element.attrib.items())]
+    if not references:
+        # 不以“没找到引用”为由忽略未知部件，避免漏掉其他命名空间的内容关系。
+        return False
+    if (kind in {RELATIONSHIP_ROOT + "oleObject", RELATIONSHIP_ROOT + "package"}
+            and re.fullmatch(re.escape(root) + r"/charts/chart\d+\.xml", owner)
+            and all(element.tag == f"{{{C}}}externalData"
+                    and element.get(f"{{{relation_ns}}}id") == identifier for element in references)):
+        return saved_chart_available(tree)
+    if (root == "xl" and kind == RELATIONSHIP_ROOT + "externalLinkPath"
+            and re.fullmatch(r"xl/externalLinks/externalLink\d+\.xml", owner)
+            and tree.tag == f"{{{S}}}externalLink"
+            and tree.find(f"{{{S}}}externalBook") is not None):
+        # externalBook及其备用地址均为更新入口；公式仍从原单元格保留，不拿缓存值代替。
+        return all(element.get(f"{{{relation_ns}}}id") == identifier and (
+            element.tag == f"{{{S}}}externalBook" or (
+            element.tag in {f"{{{EXTERNAL_LINKS}}}absoluteUrl", f"{{{EXTERNAL_LINKS}}}relativeUrl"}
+            and element.getparent() is not None
+            and element.getparent().tag == f"{{{EXTERNAL_LINKS}}}alternateUrls"
+            and element.getparent().getparent() is tree.find(f"{{{S}}}externalBook")
+        )) for element in references)
+    if kind != RELATIONSHIP_ROOT + "image":
+        return False
+    for element in references:
+        embedded = nodes.get(element.get(f"{{{relation_ns}}}embed"))
+        if (element.tag != f"{{{A}}}blip" or element.get(f"{{{relation_ns}}}link") != identifier
+                or embedded is None or embedded.get("TargetMode", "Internal") != "Internal"
+                or embedded.get("Type") != RELATIONSHIP_ROOT + "image"):
+            return False
+        part = internal_relationship_part(owner, embedded, names)
+        if not part.startswith(root + "/media/") or not archive.getinfo(part).file_size:
+            return False
+    return True
+
+
+def external_asset_summary(archive: ZipFile, root: str, limit: int, *, saved_snapshot: bool = False) -> tuple[bool, int]:
+    """返回真正缺件与保存快照关系计数；只读有界包内XML，不访问关系中的URL。"""
 
     names = set(archive.namelist())
-    parts = [name for name in names if name.startswith(root + "/") and name.endswith(".rels")]
+    parts = sorted(name for name in names if name.startswith(root + "/") and name.endswith(".rels"))
     if sum(archive.getinfo(name).file_size for name in parts) > 64 * 1024**2:
         raise InspectionLimitError("Office 关系规模超出预检安全上限")
-    external = False
+    external, snapshots, owner_size = False, 0, 0
     for name in parts:
         parent = posixpath.dirname(posixpath.dirname(name))
+        owner = posixpath.join(parent, posixpath.basename(name)[:-5])
         tree = xml_part(archive, name, limit)
         if etree.QName(tree).localname != "Relationships":
             raise ParserError("Office 附件关系结构无法识别")
@@ -48,6 +141,9 @@ def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
                 or identifier in identifiers or not node.get("Type") or not node.get("Target")):
                 raise ParserError("Office 附件关系损坏或存在重复标识")
             identifiers.add(identifier)
+        nodes = {node.get("Id"): node for node in tree}
+        owner_tree = None
+        for node in tree:
             if node.get("Type", "").rsplit("/", 1)[-1] == "hyperlink":
                 continue
             if node.get("TargetMode", "Internal") != "Internal":
@@ -55,15 +151,19 @@ def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
                         and node.get("Type") == RELATIONSHIP_ROOT + "attachedTemplate"):
                     # 模板只影响外部排版，不补正文；精确类型例外不放行图片/OLE或内部缺件。
                     continue
+                if saved_snapshot and node.get("TargetMode") == "External" and owner in names:
+                    if owner_tree is None:
+                        owner_size += archive.getinfo(owner).file_size
+                        if owner_size > 64 * 1024**2:
+                            raise InspectionLimitError("Office 保存快照规模超出预检安全上限")
+                        owner_tree = xml_part(archive, owner, limit)
+                    if saved_external_relationship(archive, root, owner, owner_tree, nodes, node, names):
+                        snapshots += 1
+                        continue
                 external = True
                 continue
-            target = node.get("Target", "")
-            part = posixpath.normpath(target.lstrip("/") if target.startswith("/")
-                                     else posixpath.join(parent, target))
-            if (not target or "\\" in target or ":" in target or "?" in target or "#" in target
-                or part.startswith("../") or part not in names):
-                raise ParserError("Office 附件关系无效或内部部件缺失")
-    return external
+            internal_relationship_part(owner, node, names)
+    return external, snapshots
 
 
 def xml_part(archive: ZipFile, name: str, limit: int):
@@ -109,7 +209,7 @@ def cell_has_content(cell, shared_strings: list[str]) -> bool:
 
 
 def inspect_office(path: Path, kind: str, settings: Settings) -> Inspection:
-    """检查 DOCX/XLSX 覆盖结构和附件关系；不渲染 Office，也不计算打印页。"""
+    """检查覆盖和真正缺件；更新依赖有保存内容时冻结PARTIAL快照范围，不渲染或联网。"""
 
     root = "word" if kind == "docx" else "xl"
     limit = settings.router_xml_part_max_mb * 1024 * 1024
@@ -131,8 +231,12 @@ def inspect_office(path: Path, kind: str, settings: Settings) -> Inspection:
             ),
         }
         risks = []
-        if missing_external_assets(archive, root, limit):
+        missing, snapshot_count = external_asset_summary(archive, root, limit, saved_snapshot=True)
+        if missing:
             risks.append("EXTERNAL_ATTACHMENT_MISSING")
+        if snapshot_count:
+            signals["office_snapshot_rel_count"] = snapshot_count
+            risks.append("OFFICE_SAVED_SNAPSHOT")
         for field, code in (
             ("image_count", "HAS_EMBEDDED_IMAGE"),
             ("drawing_count", "HAS_DRAWING"),
@@ -412,7 +516,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
 
 
 def inspect_document(path: Path, kind: str, settings: Settings) -> Inspection:
-    """先验证真实容器再做只读预检，损坏输入安全失败而不是盲目消耗云端额度。"""
+    """先验证容器再冻结覆盖及保存快照范围；真正缺件/损坏仍拒绝，不访问外链。"""
 
     try:
         with path.open("rb") as stream:
@@ -421,8 +525,11 @@ def inspect_document(path: Path, kind: str, settings: Settings) -> Inspection:
             return inspect_office(path, kind, settings)
         if kind == "pptx":
             with ZipFile(path) as archive:
-                missing = missing_external_assets(archive, "ppt", settings.router_xml_part_max_mb * 1024**2)
-            return Inspection(risks=("EXTERNAL_ATTACHMENT_MISSING",) if missing else ())
+                missing, snapshot_count = external_asset_summary(
+                    archive, "ppt", settings.router_xml_part_max_mb * 1024**2, saved_snapshot=True)
+            return Inspection(signals=StructuralSignals(office_snapshot_rel_count=snapshot_count),
+                risks=tuple(code for code, enabled in (("EXTERNAL_ATTACHMENT_MISSING", missing),
+                    ("OFFICE_SAVED_SNAPSHOT", bool(snapshot_count))) if enabled))
         if kind == "pdf":
             return inspect_pdf(path, settings)
         if kind == "md":

@@ -410,7 +410,9 @@ Swagger 点击 Try it out，填写 kb_id，打开“选择文件”窗口单选�
 
 普通上传无需选择模式；**auto 可能外传原件/视觉内容并消耗 MinerU 额度**，部署者须先配置 Token、直连与预算并确认外传权限。复杂 XLSX 默认优先尝试 Hybrid；可结构化 Chart 零云调用，图片聚合为一个 Bundle。仅提交前发现可受整份云端处理的能力缺口时才转 Whole；损坏、缺外部附件、云端不支持或超限明确 FAILED，不要求普通用户选择解析器。云提交后失败不会追加 Whole 或降级 Native。
 
-DOCX的官方外部`attachedTemplate`仅是排版模板，预检不抓取它，也不将其当缺失正文附件；外部图片、OLE和工作簿依赖仍明确阻塞。Hybrid允许工作簿引用包内根目录`customXml`元数据，缺件/越界/视觉外链校验保留。Office部件超限可查`router.inspection_rejected / XML_PART_SIZE`的实际字节和限制；已有`ROUTER_XML_PART_MAX_MB`默认16，必要时由用户在启动进程前受控调到32（最大64）。路由配置参与解析缓存身份，应先完成原配置下的缓存Reindex，不在运行中改配置后盲目重试。
+DOCX的官方外部`attachedTemplate`仅是排版模板，预检不抓取它。Office外部关系须区分保存快照与真正缺件：图表更新源有可用保存数据、链接图片同元素有包内副本，或XLSX包含可保留原式的外部工作簿引用时，可处理已有内容；保留`EXTERNAL_SOURCE_UNVERIFIED`，完成索引后为`PARTIAL_READY`，不表示外部数据完整。XLSX此分支采用Whole并保留Native原式，不计算公式、不取缓存值替代；外链单独图片、未知内容关系、内部缺件仍失败。全程不抓外链，首次云解析仍可能收费，已有收费Job不自动重投。
+
+Hybrid允许工作簿引用包内根目录`customXml`元数据，缺件/越界/视觉外链校验保留。Office部件超限可查`router.inspection_rejected / XML_PART_SIZE`的实际字节和限制；已有`ROUTER_XML_PART_MAX_MB`默认16，必要时由用户在启动进程前受控调到32（最大64）。路由配置参与解析缓存身份，应先完成原配置下的缓存Reindex，不在运行中改配置后盲目重试。
 
 升级后队列中未带模式的旧消息也按 auto 处理；重启前请核对待处理文件的外传权限和预算。历史已完成结果不会自动重写。
 

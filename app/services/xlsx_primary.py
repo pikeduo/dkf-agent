@@ -57,7 +57,7 @@ def primary_result(document, signals: StructuralSignals) -> ParsedDocument:
 
 
 def prepare_primary(document, settings: Settings, decision: RouteDecision | None = None) -> dict:
-    """云申请前确认 Native 主结果可保留；无法保留原式时安全失败，不转半份云结果。"""
+    """云申请前验证Native原式；认可已证明的更新快照，真实外部缺件仍阻塞。"""
 
     try:
         inspection = inspect_document(source_path(document), "xlsx", settings)
@@ -65,7 +65,8 @@ def prepare_primary(document, settings: Settings, decision: RouteDecision | None
         raise MinerUError("XLSX_PRIMARY_INVALID", "XLSX 原件结构无法读取，未提交云任务") from None
     if inspection.uncertain:
         raise MinerUError("XLSX_PRIMARY_LIMIT", "XLSX 预检超限，未提交云任务")
-    if {"XLSX_HAS_EXTERNAL_LINK", "XLSX_EXTERNAL_ASSET_MISSING", "EXTERNAL_ATTACHMENT_MISSING"} & set(inspection.risks):
+    if ({"XLSX_EXTERNAL_ASSET_MISSING", "EXTERNAL_ATTACHMENT_MISSING"} & set(inspection.risks)
+        or ("XLSX_HAS_EXTERNAL_LINK" in inspection.risks and not inspection.signals.office_snapshot_rel_count)):
         raise MinerUError("XLSX_EXTERNAL_ASSET_MISSING", "XLSX 外部工作簿未随原件提供，不能完整解析")
     signals = inspection.signals
     if decision is not None and signals != decision.signals:

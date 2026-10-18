@@ -14,7 +14,7 @@ from app.models import Document, DocumentBlock
 from app.parsers.common import OCRRequiredError, ParserError
 from app.parsers.hybrid import HybridPreflightError, merge_hybrid
 from app.parsers.registry import get_parser
-from app.parsers.routing.contracts import ParseMode, RouteDecision
+from app.parsers.routing.contracts import OFFICE_SNAPSHOT_VERSION, ParseMode, RouteDecision
 from app.parsers.routing.guard import CompletenessError, guard_result
 from app.parsers.routing.inspector import inspect_document
 from app.parsers.routing.router import decide_route, fallback_route
@@ -33,7 +33,7 @@ from app.services.parse_cache import CacheError, ParseCache, recipe, guard_cache
 def log_decision(
     event: str, decision: RouteDecision, doc_id: UUID, task_id: UUID
 ) -> None:
-    """日志只记录白名单理由与计数，完整结构决策由任务结果和云任务参数保存。"""
+    """日志仅记录固定理由与安全计数，保存快照不输出外链地址或缓存值。"""
 
     log_event(
         event,
@@ -50,6 +50,8 @@ def log_decision(
         image_count=decision.signals.image_count,
         chart_count=decision.signals.chart_count,
         source_document_count=1,
+        **({"item_count": decision.signals.office_snapshot_rel_count}
+           if decision.signals.office_snapshot_rel_count else {}),
     )
 
 
@@ -57,7 +59,7 @@ def run_routed_step(
     session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings,
     *, force_reparse: bool = False, cache_only: bool = False,
 ) -> dict:
-    """复用缓存并优先报告Hybrid真实终止原因；Reindex不解析或发云，Reparse才绕过缓存。"""
+    """复用冻结缓存并隔离Office保存快照；Reindex不解析或发云，Reparse才绕过缓存。"""
 
     if mode not in {"auto", "native", "mineru"}:
         raise ParserError("解析模式仅允许 auto、native 或 mineru")
@@ -173,7 +175,9 @@ def run_routed_step(
     if decision.route_strategy == "native":
         try:
             identity = recipe(document, settings, "native",
-                              scope="explicit_native_scope" if mode == "native" else "complete")
+                              scope="explicit_native_scope" if mode == "native" else "complete",
+                              office_snapshot_version=(OFFICE_SNAPSHOT_VERSION
+                                  if decision.signals.office_snapshot_rel_count else None))
             cached = None if force_reparse else cache.document(document, identity)
             if cached is not None:
                 guard_cached(cached, decision)

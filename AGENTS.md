@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：10月18日23:45用户快照115 READY/72 PARTIAL_READY/13 FAILED。已定位剩余超Token表格的strong兼容缺口，补v5切片及回归用例，v1～v4冻结；测试/单文档缓存Reindex与真实GPU待用户执行。另1份XML预算、9份外部依赖、2份云失败及PARTIAL缺口仍待解决，不进入34，冻结数据不改。**
+当前阶段：**33全量导入排错中：用户报告上一轮已完成，未提供新总数。已核9份Office原件关系，修复保存图表/图片副本/外部公式更新源被一律拒绝的问题，保留外部源未核验的PARTIAL及隔离缓存，补固定九份串行首次解析命令。测试/真实恢复由用户执行，不能声称九份READY；原云失败及PARTIAL缺口仍待验收，不进入34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -58,7 +58,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 用户23:45快照115 READY/72 PARTIAL_READY/13 FAILED；efdf30a0缓存表含strong导致v4不能按行切片，已补v5待用户测试/Reindex；XML预算在缓存恢复后单独调整，其他依赖/云/PARTIAL仍待解决，保留200/4087及费用/来源保护 |
+| 33 | 用户报告上一轮完成；九份Office已核保存快照，补Whole路由、Native原式保护、PARTIAL及缓存版本隔离和专用恢复组；用例只编写，九份真实索引及外部源完整性未验收，保留200/4087和费用/来源保护 |
 | 34 及后续 | 未执行，等待用户确认 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
@@ -169,7 +169,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 ### 整份 Router v1
 
 - 外部仅 `auto / native / mineru`；上传 Form、重投 Query 省略默认 auto，普通用户不选模式；管理员可覆盖。Hybrid 是 XLSX 云增强的内部实现，不新增外部模式。默认云外传/费用须在 README 告知。
-- Worker 只读预检：可完整覆盖时 Native；复杂 DOCX/PDF、图片、旧 Office/PPT 整份 MinerU。复杂 XLSX 优先 Hybrid。MD 缺附件、XLSX 缺外部资源、云不支持、超限及坏原件明确失败；不抓 URL、不把 MD/CSV 发云、不要求普通用户选解析器。
+- Worker 只读预检：可完整覆盖时 Native；复杂 DOCX/PDF、图片、旧 Office/PPT 整份 MinerU。复杂 XLSX 优先 Hybrid。已证明保存图表、同元素图片副本、外部工作簿更新引用的Office快照走Whole，XLSX保留Native原式且标PARTIAL/EXTERNAL_SOURCE_UNVERIFIED；新快照配方按office-saved-snapshot-v1隔离，旧零信号不改序列化身份。真正缺附件、未知内容关系、云不支持、超限及坏原件仍失败；不抓URL、不计算外部公式、不把MD/CSV发云。
 - RouteDecision 版本固定，只含模式/格式/策略、白名单理由、结构计数、页摘要和回退次数，不含正文、地址、凭据或虚构置信度；任务结果与 job 的 `_route_decision` 保存，不参与供应商参数 Hash、不透传 API。
 - auto Native 仅明确 OCRRequiredError/CompletenessError 且受支持格式可回退一次；普通解析/编码/损坏错误不回退。所有云入口远端 failed 不自动追加批次，云失败不降 Native；PUT/GET/下载有限重试仍用同批次。
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。

@@ -9,7 +9,7 @@ WHOLE_TYPES = {"jpg", "jpeg", "png", "doc", "xls", "ppt", "pptx"}
 def decide_route(
     kind: FileType, mode: ParseMode, inspection: Inspection, *, hybrid_enabled: bool = True
 ) -> RouteDecision:
-    """生成固定理由；复杂 XLSX 优先预检 Hybrid，缺附件/资源超限直接失败。"""
+    """有保存快照的外部更新关系走Whole并保留质量缺口；真正缺件/超限仍拒绝。"""
 
     reasons = list(inspection.risks)
     if inspection.uncertain:
@@ -19,7 +19,8 @@ def decide_route(
     elif mode != "native" and "EXTERNAL_ATTACHMENT_MISSING" in reasons:
         strategy = "failed"
     elif kind == "xlsx" and mode != "native" and (
-        "XLSX_HAS_EXTERNAL_LINK" in reasons or "XLSX_EXTERNAL_ASSET_MISSING" in reasons
+        "XLSX_EXTERNAL_ASSET_MISSING" in reasons or (
+            "XLSX_HAS_EXTERNAL_LINK" in reasons and not inspection.signals.office_snapshot_rel_count)
     ):
         strategy = "failed"
         if "XLSX_EXTERNAL_ASSET_MISSING" not in reasons:
@@ -27,6 +28,10 @@ def decide_route(
     elif mode == "native":
         strategy = "native"
         reasons.insert(0, "EXPLICIT_NATIVE")
+    elif kind == "xlsx" and inspection.signals.office_snapshot_rel_count:
+        # Hybrid仍要求全部资源包内可用；外部更新快照整份渲染，Native主结果保留原公式。
+        strategy = "mineru_whole"
+        reasons.insert(0, "EXPLICIT_MINERU" if mode == "mineru" else "XLSX_WHOLE_WITH_NATIVE_PRIMARY")
     elif mode == "mineru":
         strategy = "mineru_whole" if kind in MINERU_TYPES else "failed"
         reasons.insert(

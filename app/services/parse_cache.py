@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.core.business_logging import log_event
 from app.core.config import PROJECT_ROOT, Settings
 from app.parsers.common import ParserError
+from app.parsers.routing.contracts import OFFICE_SNAPSHOT_VERSION
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.cache_files import cache_guard
 
@@ -76,8 +77,8 @@ def cloud_options(settings: Settings) -> dict:
 
 
 def recipe(document, settings: Settings, strategy: str, *, scope: str = "complete",
-           manifest=None, pdf_split_policy=None) -> dict:
-    """冻结原件/模型/本地策略；Native身份不变，云转换按内容策略修订隔离缓存。"""
+           manifest=None, pdf_split_policy=None, office_snapshot_version: str | None = None) -> dict:
+    """冻结原件/模型/策略；保存快照仅增加显式版本键，其他历史身份保持不变。"""
 
     if strategy not in {"native", "mineru_whole", "hybrid_bundle"} or scope not in {"complete", "explicit_native_scope"}:
         raise CacheError()
@@ -95,6 +96,11 @@ def recipe(document, settings: Settings, strategy: str, *, scope: str = "complet
         value["content_policy_version"] = CONTENT_POLICY_VERSION
     if document.file_type == "xlsx":
         value["native_primary_version"] = "xlsx-primary-v1"
+    if office_snapshot_version is not None:
+        if (office_snapshot_version != OFFICE_SNAPSHOT_VERSION
+            or document.file_type not in {"docx", "xlsx", "pptx"} or strategy == "hybrid_bundle"):
+            raise CacheError("CACHE_CONFIG_CHANGED")
+        value["office_snapshot_version"] = office_snapshot_version
     if pdf_split_policy is not None:
         from app.services.mineru.pdf_split import policy
         if document.file_type != "pdf" or strategy != "mineru_whole" or pdf_split_policy != policy():
@@ -135,11 +141,16 @@ def key_for(value: dict) -> str:
 
 
 def guard_cached(parsed: ParsedDocument, decision) -> None:
-    """命中仍验证覆盖语义；缓存 Guard 失败属于损坏，绝不能触发 Native→云收费回退。"""
+    """命中仍核对来源/覆盖；更新快照必须已保留PARTIAL，损坏不触发收费回退。"""
 
-    from app.parsers.routing.guard import guard_result
+    from app.parsers.routing.guard import guard_result, OFFICE_SNAPSHOT_WARNINGS
 
     try:
+        if decision.signals.office_snapshot_rel_count and (
+            parsed.quality is None or parsed.quality.content != "PARTIAL"
+            or not set(OFFICE_SNAPSHOT_WARNINGS).issubset(parsed.quality.warnings)
+        ):
+            raise CacheError()
         if decision.route_strategy == "hybrid_bundle":
             if any(b.page != 1 or b.bbox is not None or not b.section
                    or b.source not in {"native_parser", "mineru_cloud"} for b in parsed.blocks):
@@ -275,7 +286,7 @@ class ParseCache:
         return record
 
     def document(self, document, value: dict, record: ReadyRecord | None = None) -> ParsedDocument | None:
-        """复用全量标准化结果并重绑 doc_id/文件名；同文档 ID/正文顺序保持稳定。"""
+        """重绑身份但保持内容/质量；保存快照不能从完整结果冒充外部源已核验。"""
 
         loaded = self.load(value, record)
         if loaded is None:
@@ -286,6 +297,12 @@ class ParseCache:
             parsed = ParsedDocument.model_validate_json(files["normalized_document.json"])
             if parsed.file_type != document.file_type or not parsed.blocks or not any(b.text.strip() for b in parsed.blocks):
                 raise CacheError()
+            if "office_snapshot_version" in value:
+                from app.parsers.routing.guard import OFFICE_SNAPSHOT_WARNINGS
+                if (value["office_snapshot_version"] != OFFICE_SNAPSHOT_VERSION or parsed.quality is None
+                    or parsed.quality.content != "PARTIAL"
+                    or not set(OFFICE_SNAPSHOT_WARNINGS).issubset(parsed.quality.warnings)):
+                    raise CacheError()
             if parsed.doc_id != document.doc_id:
                 parsed = parsed.model_copy(update={"doc_id": document.doc_id,
                     "blocks": [block.model_copy(update={"block_id": uuid5(document.doc_id,
@@ -337,7 +354,7 @@ class ParseCache:
             raise CacheError() from None
 
     def replay(self, document, settings: Settings) -> ParsedDocument:
-        """Reindex 回放原件级完整缓存含分片策略；不重新生成分片或发起云请求。"""
+        """回放冻结代次及快照质量策略；旧配方不补键，不解析原件或发起云请求。"""
 
         pointer = self.path(str(document.doc_id), "latest.json")
         if not pointer.exists():
@@ -347,6 +364,7 @@ class ParseCache:
             current = recipe(document, settings, record.recipe["route_strategy"],
                              scope=record.recipe["coverage_scope"],
                              pdf_split_policy=record.recipe.get("pdf_split"),
+                             office_snapshot_version=record.recipe.get("office_snapshot_version"),
                              manifest=None) if record.recipe["route_strategy"] != "hybrid_bundle" else None
             if current is None:
                 # Hybrid 映射已冻结；此处只核对参数/配置，不能为了 Reindex 重跑 Extractor。

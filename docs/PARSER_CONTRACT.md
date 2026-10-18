@@ -145,6 +145,8 @@ data/parsed/
 
 每个文件有 Hash，先写不可变完整代次，再原子发布 READY/指针；不 extractall、不存签名链接。Markdown 不成为正文替代。ZIP/manifest 是首次云结果的来源归档，跨文档命中时不冒充新的云返回；标准化文档重绑新 doc_id/文件名/稳定 Block ID。Reindex 使用本文档冻结代次，不被其他文档或 Force 发布的新 READY 改换 ID。
 
+Office保存快照仅在受影响的配方增加`office_snapshot_version=office-saved-snapshot-v1`。图表更新源/图片包内副本/工作簿外部引用经预检确认后，Guard明确`PARTIAL / EXTERNAL_SOURCE_UNVERIFIED`；缓存命中及Reindex必须保留该质量，不能将旧COMPLETE结果静默套用新范围。无此分支的旧配方不追加键，Native主结果Hash和旧Job冻结语义不变。不会为缓存miss自动重新提交已有收费Job。
+
 新上传/首次无收费历史的 miss 仍正常解析；损坏缓存明确失败，不当成 miss。已有收费历史而缓存缺失/不确定，普通重投为 CACHE_REPARSE_REQUIRED，仅显式 Force Reparse 允许新调用。相同内容/缺失视觉对象由 PostgreSQL advisory 事务锁 + Job 私有摘要保护，活动 owner 为 CACHE_IN_PROGRESS，不并行重复付费；无自动续租/补投。
 
 完整结果已缓存但 SQL 临时失败，同 Job 重试重放不可变结果，不再 GET/下载/POST；文件与 SQL 非原子，cache.stored 不表示落库成功。失败不缓存成成功；已有成功缓存不因 Force 失败被删除。缓存包含原文，Hash 不是防御有目录写权限者篡改的签名，需要限制权限并备份整个目录（含隐藏元数据）。无自动 TTL/清理、多主机共享盘保证。
