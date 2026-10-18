@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pymupdf
@@ -15,7 +16,7 @@ from app.parsers.routing.contracts import PageSignals, RouteDecision, Structural
 from app.parsers.routing.guard import CompletenessError, guard_result
 from app.parsers.routing.pdf_coverage import margin_rule_only
 from app.parsers.routing.router import decide_route
-from app.schemas.parsed_document import ParsedDocument
+from app.schemas.parsed_document import ParsedDocument, ParseQuality
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.pdf_split_jobs import validate_piece
 
@@ -175,13 +176,81 @@ class DocumentStub:
         return iter(self.pages)
 
 
-def inspect_stub(monkeypatch, pages):
-    """替换 PDF 打开入口，复用正式预检而不读取本地样本。"""
+def inspect_stub(monkeypatch, pages, **configuration):
+    """替换 PDF 打开入口，传入受控配置复用正式预检，不读取本地样本。"""
     def open_stub(*args, **kwargs):
         """确保所有调用仅得到内存元数据。"""
         return DocumentStub(pages)
     monkeypatch.setattr(inspector.pymupdf, "open", open_stub)
-    return inspector.inspect_pdf(None, Settings(_env_file=None))
+    return inspector.inspect_pdf(None, Settings(_env_file=None, **configuration))
+
+
+def dense_drawing_page(*, number=0, count=9207, text=""):
+    """提供只能计数的密集绘图元数据，任何几何遍历立即使测试失败。"""
+    page = PageStub([], number=number, text=text)
+    page.paths = MagicMock()
+    page.paths.__len__.return_value = count
+    page.paths.__iter__.side_effect = AssertionError("密集绘图页不得继续遍历路径")
+    return page
+
+
+@pytest.mark.parametrize("count,image_count,drawing_threshold", [
+    (5001, 0, 6), (9207, 0, 1000), (4901, 100, 1000), (2, 4999, 1000)])
+@pytest.mark.parametrize("text", ["正文", ""])
+def test_dense_drawings_route_whole_without_losing_page_coverage(monkeypatch, count, image_count, drawing_threshold, text):
+    """密集及混合绘图有界判云，不能因调高绘图阈值或缺文字而细查、判装饰或漏后续页。"""
+    pages = [PageStub([], number=index, text="正文") for index in range(20)]
+    target = dense_drawing_page(number=13, count=count, text=text)
+    target.images = [{"bbox": (0, 0, 1, 1)}] * image_count
+    pages[13] = target
+    decoration = MagicMock(side_effect=AssertionError("密集绘图不能判定为装饰"))
+    monkeypatch.setattr(inspector, "margin_rule_only", decoration)
+
+    inspected = inspect_stub(monkeypatch, pages, router_pdf_drawing_count=drawing_threshold)
+    decision = decide_route("pdf", "auto", inspected)
+    assert not inspected.uncertain and decision.route_strategy == "mineru_whole"
+    assert "PDF_COMPLEX_DRAWING" in decision.reason_codes and "PREFLIGHT_LIMIT" not in decision.reason_codes
+    assert inspected.signals.page_count == 20 and len(inspected.signals.pages) == 20
+    assert [page.page for page in inspected.signals.pages] == list(range(1, 21))
+    assert all(page.required for page in inspected.signals.pages)
+    signal = inspected.signals.pages[13]
+    assert signal.drawing_count == count and signal.image_count == image_count
+    assert signal.text_chars == len(text) and signal.decorative_drawing_count == 0
+    assert signal.coverage_reason == "content_or_uncertain"
+    decoration.assert_not_called()
+    target.paths.__iter__.assert_not_called()
+
+
+@pytest.mark.parametrize("missing_page", [2, 3])
+def test_dense_drawings_preserve_guard_for_drawing_and_later_page(monkeypatch, missing_page):
+    """绘图页和其后正文页仍要求覆盖；云v4缺页保持PARTIAL，Native缺页仍拒绝。"""
+    inspected = inspect_stub(monkeypatch, [PageStub([], text="正文"), dense_drawing_page(number=1),
+        PageStub([], number=2, text="后续正文")])
+    identifier = uuid4()
+    parsed = ParsedDocument(doc_id=identifier, file_name="任意.pdf", file_type="pdf", quality=ParseQuality(), blocks=[
+        make_block(identifier, page, page=page, block_type="text", text="可靠内容").model_copy(
+            update={"source": "mineru_cloud"}) for page in range(1, 4)])
+    decision = decide_route("pdf", "auto", inspected)
+    guard_result(parsed, decision)
+    assert parsed.quality.content == "COMPLETE" and not parsed.quality.missing_pages
+
+    parsed.blocks = [block for block in parsed.blocks if block.page != missing_page]
+    guard_result(parsed, decision)
+    assert parsed.quality.content == "PARTIAL" and parsed.quality.missing_pages == [missing_page]
+    assert parsed.quality.required_pages == [1, 2, 3]
+    with pytest.raises(CompletenessError):
+        guard_result(parsed, decide_route("pdf", "native", inspected))
+
+
+def test_dense_drawings_do_not_hide_later_hard_budget_failure(monkeypatch):
+    """前页密集绘图不提前返回成功，后页文本行数超限仍拒绝整份预检。"""
+    later = PageStub([], number=1)
+    later.get_text = MagicMock(return_value={"blocks": [{"type": 0, "lines": [{}] * 2001}]})
+    inspected = inspect_stub(monkeypatch, [dense_drawing_page(), later])
+    decision = decide_route("pdf", "auto", inspected)
+    assert inspected.uncertain and decision.route_strategy == "failed"
+    assert decision.reason_codes == ("PREFLIGHT_LIMIT",)
+    assert not inspected.signals.pages
 
 
 def test_inspection_freezes_coverage_proof_and_guard_keeps_legacy_strict(monkeypatch):

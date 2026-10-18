@@ -18,6 +18,9 @@ from app.parsers.text import FENCE, read_text
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+# 图片面积仍需逐项计算；绘图细查超预算时只保留计数并要求云端覆盖。
+PDF_MAX_IMAGES_PER_PAGE = 5000
+PDF_GEOMETRY_DETAIL_LIMIT = 5000
 
 
 class InspectionLimitError(ParserError):
@@ -285,7 +288,7 @@ def has_columns(lines: list[tuple], width: float) -> bool:
 
 
 def inspect_pdf(path: Path, settings: Settings) -> Inspection:
-    """逐页冻结覆盖 v2；超预算记录实际计数和阈值，未知绘图仍保守要求覆盖。"""
+    """逐页冻结覆盖 v2；密集绘图改用计数判云，页数/行数/图片硬预算仍拒绝。"""
 
     pages, risks = [], []
     with pymupdf.open(path) as document:
@@ -316,7 +319,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
             ]
             if (
                 len(lines) > settings.router_pdf_max_lines_per_page
-                or len(images) + len(drawings) > 5000
+                or len(images) > PDF_MAX_IMAGES_PER_PAGE
             ):
                 log_event("router.preflight_rejected", stage="preflight.pdf",
                     step="PDF_LINE_LIMIT" if len(lines) > settings.router_pdf_max_lines_per_page else "PDF_OBJECT_LIMIT",
@@ -324,12 +327,19 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                     item_count=len(lines), line_count=len(lines), image_count=len(images),
                     drawing_count=len(drawings), object_count=len(images) + len(drawings),
                     limit_count=(settings.router_pdf_max_lines_per_page
-                                 if len(lines) > settings.router_pdf_max_lines_per_page else 5000))
+                                 if len(lines) > settings.router_pdf_max_lines_per_page else PDF_MAX_IMAGES_PER_PAGE))
                 return Inspection(
                     signals=StructuralSignals(page_count=document.page_count),
                     risks=("PREFLIGHT_LIMIT",),
                     uncertain=True,
                 )
+            geometry_limited = len(images) + len(drawings) > PDF_GEOMETRY_DETAIL_LIMIT
+            if geometry_limited:
+                # 已取到路径计数，不再遍历几何或判断装饰；仍扫描后续页并冻结完整覆盖要求。
+                log_event("router.preflight_geometry_limited", stage="preflight.pdf", step="PDF_DRAWING_DETAIL_LIMIT",
+                    page=page.number + 1, line_count=len(lines), image_count=len(images),
+                    drawing_count=len(drawings), object_count=len(images) + len(drawings),
+                    limit_count=PDF_GEOMETRY_DETAIL_LIMIT)
             spans = [span for line in lines for span in line["spans"]]
             text = "".join(span["text"] for span in spans).strip()
             ratio = min(
@@ -344,7 +354,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
             if not required:
                 # shading/不可提取的绘制可能不在 get_drawings 中，未知绘制不能冒充空白页。
                 required = bool(page.get_bboxlog())
-            decorative = (not (text or images or annotations) and bool(drawings)
+            decorative = (not geometry_limited and not (text or images or annotations) and bool(drawings)
                           and margin_rule_only(page, drawings))
             if decorative:
                 required = False
@@ -368,7 +378,7 @@ def inspect_pdf(path: Path, settings: Settings) -> Inspection:
                 risks.append("PDF_TEXT_IMAGE_MIXED")
             if visual and len(text) < settings.router_pdf_min_text_chars:
                 risks.append("PDF_INSUFFICIENT_TEXT")
-            if not decorative and (len(drawings) >= settings.router_pdf_drawing_count or any(
+            if not decorative and (geometry_limited or len(drawings) >= settings.router_pdf_drawing_count or any(
                 (pymupdf.Rect(item["rect"]) & page.rect).get_area() / area
                 >= settings.router_pdf_drawing_area_ratio
                 for item in drawings

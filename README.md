@@ -338,7 +338,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 
 API/Worker 业务日志为 UTF-8 中文可读摘要，共用 `LOG_DIR`，每天一份 `knowledge-service-YYYY-MM-DD.log`，重启继续追加；框架原始日志仍在终端。默认 INFO，记录接口、上传、解析、重试及结果数量，不记录正文或密钥；解析质量仍需对照原件。
 
-遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT`及触发页、文本行数、图片/绘图数、总对象数和限制数量。它表示本地预检资源拒绝；先核对具体计数，普通Retry不会解除相同限制。
+遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT`及触发页、文本行数、图片/绘图数、总对象数和限制数量。硬限制分别针对总页数、单页文本行数、单页图片数（5000）；普通Retry不会解除相同硬限制。图片与绘图合计超过5000、但图片数未超限时，记录`router.preflight_geometry_limited`，保留真实绘图数与必需覆盖页、停止几何细查，auto交给整份MinerU处理。更新后待队列任务安全结束，再手动重启CPU Worker使新规则生效；此前未创建云Job的文档可能因此产生首次云提交费用。
 
 调用接口生成日志后，查看当天文件：
 

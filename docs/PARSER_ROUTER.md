@@ -30,7 +30,9 @@
 
 预检禁止 XML DTD/实体和网络获取，先验证真实容器及 Hash。PDF 逐页检查，横向重叠只判断风险，不改阅读顺序。小 logo、绘图/文本量和预检规模阈值通过 `.env` 中 ROUTER_* 配置，见 README。
 
-`PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数，PDF_OBJECT_LIMIT为单页图片与绘图对象合计超过5000。日志保留触发页及实际计数/阈值，绘图数不能被日志白名单丢弃；不据通用错误码猜测云端失败，也不自动提高资源限制。
+`PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数；PDF_OBJECT_LIMIT保留步骤名称兼容，现仅针对单页图片数超过5000。日志保留触发页及实际计数/阈值，绘图数不能被日志白名单丢弃；不据通用错误码猜测云端失败。
+
+图片与绘图合计超过5000、但图片未超硬限制时，仅停止Python层的绘图几何/装饰细查，记录`router.preflight_geometry_limited / PDF_DRAWING_DETAIL_LIMIT`。保留真实数量、`required=true / content_or_uncertain`，增加既有`PDF_COMPLEX_DRAWING`理由，继续检查所有后续页；auto进入原MinerU Whole链路。总页数、单页文本行数、图片硬预算及原件/云端限制保持；PyMuPDF元数据提取仍执行，这不是进程级资源隔离。显式Native仍保留其对照范围，不能据此忽略覆盖或宣称视觉完整。该调整不改覆盖v2、Normalizer、Guard或缓存协议；从未创建云Job的失败文档经用户Retry可能首次提交收费任务。
 
 Guard 在最终 Block 替换前检查有效正文、非空 PDF 页面覆盖/范围、Native XLSX 有效 Sheet 数和章节、来源、逻辑页、Office 空 bbox。不改变 Block/ID/顺序、不拆表格公式、不补 OCR 字符。Native 解析/检查/整体替换/CHUNKING 同事务；失败回滚后独立记安全原因，旧结果不被半份新块覆盖。
 

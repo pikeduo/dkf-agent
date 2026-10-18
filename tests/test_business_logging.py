@@ -724,9 +724,9 @@ def test_preflight_counts_reject_non_integer_or_sensitive_values(events, field, 
     assert "SECRET" not in events.getvalue()
 
 
-@pytest.mark.parametrize("budget", ["pages", "lines", "objects", "mixed_objects"])
+@pytest.mark.parametrize("budget", ["pages", "lines", "images", "images_and_drawings"])
 def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, budget):
-    """用纯 Mock 核对真实预检到日志链路，明确拒绝页、总对象数和限制，不读取 PDF。"""
+    """纯 Mock 核对页数/行数/图片硬预算拒绝日志；密集绘图不再计入硬拒绝条件。"""
     from unittest.mock import MagicMock
 
     from app.parsers.routing import inspector
@@ -739,8 +739,8 @@ def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, 
     document.__iter__.return_value = [page]
     page.number, page.rect.width, page.rect.height = 13, 600, 800
     line_count = 2001 if budget == "lines" else 118
-    image_count = 100 if budget == "mixed_objects" else 0
-    drawing_count = 4901 if budget == "mixed_objects" else 5001 if budget == "objects" else 0
+    image_count = 5001 if budget in {"images", "images_and_drawings"} else 0
+    drawing_count = 9207 if budget == "images_and_drawings" else 0
     page.get_image_info.return_value = [{}] * image_count
     page.get_drawings.return_value = [{}] * drawing_count
     page.annots.return_value = []
@@ -764,6 +764,39 @@ def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, 
         assert record["limit_count"] == (2000 if budget == "lines" else 5000)
         assert "绘图数=" in events.getvalue() and "限制数量=" in events.getvalue()
     assert "SECRET" not in events.getvalue()
+
+
+def test_pdf_preflight_geometry_limited_records_safe_counts(events, monkeypatch):
+    """密集绘图记录细查降级而非失败，日志不泄漏正文或私有路径。"""
+    from unittest.mock import MagicMock
+
+    import pymupdf
+
+    from app.parsers.routing import inspector
+    from app.parsers.routing.router import decide_route
+
+    document, page = MagicMock(), MagicMock()
+    document.__enter__.return_value = document
+    document.needs_pass, document.is_repaired, document.page_count = False, False, 1
+    document.__iter__.return_value = [page]
+    page.number, page.rect = 0, pymupdf.Rect(0, 0, 600, 800)
+    page.get_image_info.return_value = []
+    page.get_drawings.return_value = [{}] * 9207
+    page.annots.return_value = []
+    page.get_text.return_value = {"blocks": [{"type": 0, "lines": [
+        {"bbox": (40, 100, 200, 115), "spans": [{"text": "SECRET_BODY"}]}] * 118}]}
+    monkeypatch.setattr(inspector.pymupdf, "open", MagicMock(return_value=document))
+
+    decision = decide_route("pdf", "auto", inspector.inspect_pdf(
+        Path("SECRET_PRIVATE.pdf"), Settings(_env_file=None)))
+    assert decision.route_strategy == "mineru_whole"
+    [record] = records(events)
+    assert record["event"] == "router.preflight_geometry_limited"
+    assert record["step"] == "PDF_DRAWING_DETAIL_LIMIT" and record["page"] == 1
+    assert record["drawing_count"] == record["object_count"] == 9207
+    assert record["line_count"] == 118 and record["image_count"] == 0 and record["limit_count"] == 5000
+    assert "error_code" not in record
+    assert "几何细查预算" in events.getvalue() and "SECRET" not in events.getvalue()
 
 
 def test_existing_json_history_is_preserved_in_same_daily_file(events, tmp_path):
