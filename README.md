@@ -4,6 +4,8 @@
 
 **新上传 → 自动解析 → Chunk → 本地 Embedding → pgvector → READY → 自动参与同库查询。** 每份文档独立增量处理，不重建整个知识库；READY表示所有Chunk向量已入库，不代表内容质量或问答准确。提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
+竞赛整合目前仅完成必要知识库修复与接口契约，`contest_backend`、Vue3及统一Agent HTTP尚未接入；当前仍按下文启动原知识库服务。进度与边界见[竞赛整合说明](docs/CONTEST_INTEGRATION.md)。
+
 ## 1. 环境与配置
 
 本地环境：Python 3.11、Windows 原生 PostgreSQL 17 + pgvector、Windows Redis 服务、FastAPI、Celery。当前不通过 Docker 或 WSL 部署 PostgreSQL/Redis；Docker Compose 保留为未来整体部署方案。
@@ -98,7 +100,7 @@ HYBRID_MAX_IMAGE_MB=16
 - API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
 - Native 解析/切片无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token。文档向量化需要本地 BGE-M3、CUDA GPU 和 GPU Worker；不需要 DeepSeek Key，不下载 Reranker。
 - API/GPU Worker 共用可读写的 EMBEDDINGS_DIR，默认 data/embeddings；向量文件含业务衍生数据，应限制访问并备份，不入仓库。每代次结果上限 512 MiB，无自动清理；模型和向量目录自定义到仓库内时需自行配置忽略规则。
-- 切片不读取原件、不调用MinerU或模型；CHUNK_SIZE允许400～700，CHUNK_OVERLAP允许50～100。新切片按完整HTML表格行分组，兼容同一Block中的表题/表下注释；rowspan关联行一起保留，原Block/页码/字符来源不变，附文不重复到每片。公式及无法安全拆分的结构保持完整。长度为本地估算，真实Tokenizer仍拒绝模型超限输入，详见[Chunk](docs/CHUNK.md)。
+- 切片不读取原件、不调用MinerU或模型；CHUNK_SIZE允许400～700，CHUNK_OVERLAP允许50～100。新v4切片支持Native XLSX/CSV的带引号TSV逻辑行及完整HTML表格行，字段内换行/制表符不误拆，兼容表题/表下注释与rowspan关联行；原Block/页码/字符来源不变。新版本源文本上限1600万字符，旧v1～v3仍为1000万；大表处理会增加CPU内存及Chunk/向量数量，应串行恢复。公式及无法安全拆分的单行保持完整，真实Tokenizer仍拒绝超限输入，详见[Chunk](docs/CHUNK.md)。
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
 
@@ -405,6 +407,8 @@ Swagger 点击 Try it out，填写 kb_id，打开“选择文件”窗口单选�
 | mineru | 强制云解析，仅 PDF、图片及六种 Office；不接受 TXT/MD/CSV |
 
 普通上传无需选择模式；**auto 可能外传原件/视觉内容并消耗 MinerU 额度**，部署者须先配置 Token、直连与预算并确认外传权限。复杂 XLSX 默认优先尝试 Hybrid；可结构化 Chart 零云调用，图片聚合为一个 Bundle。仅提交前发现可受整份云端处理的能力缺口时才转 Whole；损坏、缺外部附件、云端不支持或超限明确 FAILED，不要求普通用户选择解析器。云提交后失败不会追加 Whole 或降级 Native。
+
+DOCX的官方外部`attachedTemplate`仅是排版模板，预检不抓取它，也不将其当缺失正文附件；外部图片、OLE和工作簿依赖仍明确阻塞。Hybrid允许工作簿引用包内根目录`customXml`元数据，缺件/越界/视觉外链校验保留。Office部件超限可查`router.inspection_rejected / XML_PART_SIZE`的实际字节和限制；已有`ROUTER_XML_PART_MAX_MB`默认16，必要时由用户在启动进程前受控调到32（最大64）。路由配置参与解析缓存身份，应先完成原配置下的缓存Reindex，不在运行中改配置后盲目重试。
 
 升级后队列中未带模式的旧消息也按 auto 处理；重启前请核对待处理文件的外传权限和预算。历史已完成结果不会自动重写。
 

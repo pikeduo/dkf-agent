@@ -2,6 +2,21 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
+## 竞赛分支选择性移植（待人工验收）
+
+竞赛分支从`9522356`选择性移植Office预检兼容与长表恢复，不合并main、不带入补丁ZIP或特定文档的历史恢复清单，也不改变阶段32/33冻结数据与验收结论。DOCX仅放行官方外部attachedTemplate排版关系，不获取模板；XLSX仅兼容指向包内已存在customXml部件的官方关系，缺件、外链图片和越界仍拒绝。预检XML资源超限与Hybrid终止原因使用安全日志摘要。
+
+新切片检查点为`block-chunk-v4`：在保留表题/注释、原字符偏移和rowspan保护的基础上，支持Native XLSX/CSV的严格TSV逻辑行、单元格内无属性p及有限大表预算；v1～v3冻结行为和Adapter默认预算不变。大表仍可能出现不可拆超长行或真实Tokenizer超限，不能提前宣称GPU可编码。
+
+仅由用户在项目环境手动执行定向回归：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_stage33_office_recovery.py tests/test_chunk_table_rows.py tests/test_chunk_splitter.py tests/test_document_management.py tests/test_parser_router.py tests/test_hybrid.py tests/test_parse_cache.py tests/test_business_logging.py -q -ra
+```
+
+真实恢复先备份数据库与PARSED_DIR，并选择**一份已有成功Parse Cache且无活动任务**的文档，由用户按[文档管理](DOCUMENT_MANAGEMENT.md)调用`POST /api/admin/documents/{doc_id}/reindex`；缓存缺失即停止，不用Reparse/Force或新增云片。核对新v4检查点、原页码/source_spans、Chunk与已入库向量数量，以及原质量保持不变（PARTIAL最终仍为PARTIAL_READY）。普通Retry不会升级旧切片；Office首次解析可能外传/收费，不能与缓存Reindex混为同一操作。本轮未执行任何回归、回放、Reindex、GPU或云请求，全200文档/4087题仍未完成验收。
+
 ## v4原ZIP回放、质量报告与恢复
 
 MinerU v4先提取可靠内容，再尝试可选严格增强；MERGE_EVIDENCE不再自动等于整份FAILED。新增`0009_parse_quality`需由用户迁移。`PARTIAL_READY`表示可靠块及全部对应向量可用，不计入完整READY；缺页不删除、不伪造Block。当前代码/测试未由Codex运行，25份ZIP实际结果仍待用户执行。

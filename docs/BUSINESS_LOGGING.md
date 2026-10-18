@@ -78,6 +78,7 @@ MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹�
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
 | `router.preflight_rejected` | PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT分别为页数、单页文本行数、单页图片数硬限制；记录总页数或触发页、实际计数及阈值。计数只接受有界非负整数，不输出路径或内容 |
+| `router.inspection_rejected` | Office的XML_PART_SIZE：单部件实际size_bytes与limit_count；不记录XML内容或包内私有路径 |
 | `router.preflight_geometry_limited` | 图片与绘图合计超过5000且图片未超硬限制：PDF_DRAWING_DETAIL_LIMIT；停止绘图几何细查，保留真实数量与required页、继续后续页预检，由既有PDF_COMPLEX_DRAWING规则决定auto云路由。这不是失败或已提交云任务 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |
 | `router.cloud_submitted` | 已确认源文件 batch，云文件提交数=1；重复日志需按 job_id/batch_id 去重 |
@@ -91,7 +92,7 @@ MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹�
 | `cache.persisted / maintenance_requested` | 缓存已事务回放 / 显式 Reindex或Force Reparse 请求；固定操作、缓存键、命中和数量摘要 |
 | `chunk.dispatched / dispatch_failed / rejected` | 独立切片投递、确认失败及状态/检查点拒绝，不记录正文或配置原文 |
 | `chunk.started / persisted / skipped` | 按 Block 原序开始切片、事务提交成功及旧/已完成消息跳过；数量、估算长度参数、超目标数和耗时 |
-| `chunk.table_split / table_split_skipped` | 长HTML表按完整行/rowspan关联组分片，或无法证明边界而保留整表；只记block_id、页码、固定阶段及片数/安全原因，不含HTML或字符来源明细，尚未代表切片事务提交 |
+| `chunk.table_split / table_split_skipped` | HTML完整行/rowspan组或原生TSV逻辑记录分片；无法证明边界则整表保留。只记block_id、页码、阶段及片数/安全原因，不含单元格、HTML或字符来源明细，尚未代表切片事务提交 |
 | `chunk.retry / failed / error_record_failed` | 临时数据库有限重试、安全终止及错误未能写库，不输出异常原文 |
 | `embedding.model_loaded / encoded / encode_failed / encode_skipped` | 模型加载/统一编码/安全错误/空输入跳过；模型名、设备、维度、数量和耗时，不记录正文或向量 |
 | `embedding.dispatched / dispatch_failed / rejected / started` | GPU 任务投递/确认失败/拒绝/开始，独立 task_id 和 doc_id 关联 |

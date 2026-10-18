@@ -2,18 +2,30 @@
 
 from html import unescape
 from html.parser import HTMLParser
+from dataclasses import dataclass
 import re
 
 from app.services.mineru.adapter import merge_evidence_error
 
 
+@dataclass(frozen=True)
+class TableLimits:
+    """资源预算与网格正确性分离；Adapter默认旧预算，仅新切片显式扩大有限规模。"""
+
+    max_chars: int = 4 * 1024**2
+    max_rows: int = 4096
+    max_cells: int = 65536
+    max_grid_cells: int = 262144
+
+
 class TableHTML(HTMLParser):
     """仅接受表格网格及已验证的br/eq序列化；不推断或计算公式。"""
 
-    def __init__(self, text: str):
-        """有界解析原HTML并记录每行原字符区间、单元格内容与跨度。"""
+    def __init__(self, text: str, *, limits: TableLimits = TableLimits(), cell_paragraphs: bool = False):
+        """读取原行区间；仅v4切片显式接受单元格内p，默认Adapter/旧切片行为不变。"""
         super().__init__(convert_charrefs=False)
-        if not isinstance(text, str) or not 0 < len(text) <= 4 * 1024**2:
+        self.limits, self.cell_paragraphs = limits, cell_paragraphs
+        if not isinstance(text, str) or not 0 < len(text) <= limits.max_chars:
             raise merge_evidence_error("TABLE_HTML")
         self.text, self.rows, self.stack, self.cell = text, [], [], None
         self.starts = [0]
@@ -32,19 +44,19 @@ class TableHTML(HTMLParser):
         return self.starts[line - 1] + column
 
     def handle_starttag(self, tag, attrs):
-        """校验严格嵌套和跨度，记录原始tr边界；不忽略未知标签或属性。"""
+        """校验嵌套与跨度；显式允许时仅接纳单元格内无属性p，不忽略未知标签。"""
         if tag == "table" and not self.stack and not self.root_seen and not attrs:
             self.root_seen = True
         elif tag == "tbody" and self.stack == ["table"] and not self.rows and not self.tbody_seen and not attrs:
             self.tbody_seen = True
         elif tag == "tr" and self.stack in (["table"], ["table", "tbody"]) and not attrs:
-            if len(self.rows) >= 4096:
+            if len(self.rows) >= self.limits.max_rows:
                 raise merge_evidence_error("TABLE_LIMIT")
             self.rows.append({"start": self.source_offset(), "cells": []})
         elif tag in {"td", "th"} and self.stack and self.stack[-1] == "tr" and self.cell is None:
             values = dict(attrs)
             self.cell_count += 1
-            if self.cell_count > 65536:
+            if self.cell_count > self.limits.max_cells:
                 raise merge_evidence_error("TABLE_LIMIT")
             if len(values) != len(attrs) or set(values) - {"rowspan", "colspan"}:
                 raise merge_evidence_error("TABLE_HTML")
@@ -57,11 +69,17 @@ class TableHTML(HTMLParser):
                 spans[name] = int(raw)
             self.cell = {"tag": tag, "parts": [], "breaks": 0,
                          "content_start": self.text.find(">", self.source_offset()) + 1, **spans}
-        elif tag == "br" and self.cell is not None and self.stack[-1] in {"td", "th"} and not attrs:
+        elif (tag == "p" and self.cell_paragraphs and self.cell is not None
+              and self.stack[-1] in {"td", "th"} and not attrs):
+            # 段落边界只用于网格核对的文字摘要；实际Chunk始终引用原HTML，不改写字符。
+            self.cell["parts"].append(" ")
+        elif (tag == "br" and self.cell is not None
+              and self.stack[-1] in ({"td", "th", "p"} if self.cell_paragraphs else {"td", "th"}) and not attrs):
             self.cell["parts"].append(" ")
             self.cell["breaks"] += 1
             return
-        elif tag == "eq" and self.cell is not None and self.stack[-1] in {"td", "th"} and not attrs:
+        elif (tag == "eq" and self.cell is not None
+              and self.stack[-1] in ({"td", "th", "p"} if self.cell_paragraphs else {"td", "th"}) and not attrs):
             # layout 的 <eq>x</eq> 在 V1 中为 ` $x$ `；仅作为来源比较，不输出layout文字。
             self.cell["parts"].append(" $")
         else:
@@ -75,12 +93,14 @@ class TableHTML(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        """关闭当前结构并固定行区间；任何失配均拒绝，不自动修复HTML。"""
+        """关闭结构并固定原行区间；单元格p只保留摘要边界，失配仍拒绝不修复。"""
         if not self.stack or self.stack[-1] != tag:
             raise merge_evidence_error("TABLE_HTML")
         self.stack.pop()
         if tag == "eq":
             self.cell["parts"].append("$ ")
+        elif tag == "p":
+            self.cell["parts"].append(" ")
         elif tag in {"td", "th"}:
             self.cell["content_end"] = self.source_offset()
             self.cell["text"] = " ".join(unescape("".join(self.cell.pop("parts"))).split())
@@ -128,7 +148,7 @@ class TableHTML(HTMLParser):
         raise merge_evidence_error("TABLE_HTML")
 
     def validate_grid(self) -> int:
-        """展开有限行列占用图，拒绝重叠、缺口、越界rowspan及不完整行。"""
+        """在显式网格预算内核对占用，仍拒绝重叠、缺口、越界rowspan及不完整行。"""
         occupied, width, cell_count = set(), 0, 0
         for row_index, row in enumerate(self.rows):
             column = 0
@@ -137,12 +157,12 @@ class TableHTML(HTMLParser):
                 while (row_index, column) in occupied:
                     column += 1
                 bottom, right = row_index + cell["rowspan"], column + cell["colspan"]
-                if bottom > len(self.rows) or right > 1024 or cell_count > 65536:
+                if bottom > len(self.rows) or right > 1024 or cell_count > self.limits.max_cells:
                     raise merge_evidence_error("TABLE_GRID")
                 cell["column"], cell["right"] = column, right
                 for r in range(row_index, bottom):
                     for c in range(column, right):
-                        if (r, c) in occupied or len(occupied) >= 262144:
+                        if (r, c) in occupied or len(occupied) >= self.limits.max_grid_cells:
                             raise merge_evidence_error("TABLE_GRID")
                         occupied.add((r, c))
                 column, width = right, max(width, right)

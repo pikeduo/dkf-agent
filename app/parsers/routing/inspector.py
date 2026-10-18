@@ -18,6 +18,7 @@ from app.parsers.text import FENCE, read_text
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+RELATIONSHIP_ROOT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 # 图片面积仍需逐项计算；绘图细查超预算时只保留计数并要求云端覆盖。
 PDF_MAX_IMAGES_PER_PAGE = 5000
 PDF_GEOMETRY_DETAIL_LIMIT = 5000
@@ -28,7 +29,7 @@ class InspectionLimitError(ParserError):
 
 
 def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
-    """检查 Office 附件关系；外部视觉/对象资源不抓取，缺失内部部件视为损坏。"""
+    """检查内容附件；DOCX外部排版模板不当正文依赖，视觉/对象外链仍阻塞且不抓取。"""
 
     names = set(archive.namelist())
     parts = [name for name in names if name.startswith(root + "/") and name.endswith(".rels")]
@@ -50,6 +51,10 @@ def missing_external_assets(archive: ZipFile, root: str, limit: int) -> bool:
             if node.get("Type", "").rsplit("/", 1)[-1] == "hyperlink":
                 continue
             if node.get("TargetMode", "Internal") != "Internal":
+                if (root == "word" and node.get("TargetMode") == "External"
+                        and node.get("Type") == RELATIONSHIP_ROOT + "attachedTemplate"):
+                    # 模板只影响外部排版，不补正文；精确类型例外不放行图片/OLE或内部缺件。
+                    continue
                 external = True
                 continue
             target = node.get("Target", "")
@@ -65,6 +70,8 @@ def xml_part(archive: ZipFile, name: str, limit: int):
     """读取受限 OOXML 部件并禁止 DTD、实体与网络，错误只返回安全说明。"""
 
     if archive.getinfo(name).file_size > limit:
+        log_event("router.inspection_rejected", stage="router.xml_part", step="XML_PART_SIZE",
+                  size_bytes=archive.getinfo(name).file_size, limit_count=limit, error_code="PREFLIGHT_LIMIT")
         raise InspectionLimitError("文档结构部件超出预检安全限制")
     content = archive.read(name)
     if b"<!DOCTYPE" in content.upper() or b"<!ENTITY" in content.upper():

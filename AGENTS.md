@@ -18,13 +18,15 @@
 
 ## 1. 项目范围与当前阶段
 
-DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独立运行、测试和演示的非结构化 Knowledge Base Service。未经用户要求，不开发 NL2SQL、Schema Linking、Coordinator、Fusion 或其他成员模块。
+DKF-Agent（数知融问智能体）保留独立的`knowledge-service`；用户已授权在`feat/contest-integration`分支按方案B开展双FastAPI服务+Vue3同源代理竞赛整合。`app/`继续负责原知识库，后续`contest_backend/`负责NL2SQL/Schema Linking/意图与澄清，`frontend/`负责真实API交互；不复制知识库实现、不修改或合并到main。
+
+- 本次仅完成竞赛阶段1：从`9522356`选择性移植必要Office/长表修复，冻结统一请求/响应和四Tool接口；不整体cherry-pick、不引入补丁ZIP/数据/模型。后续实现与验收见[竞赛整合](docs/CONTEST_INTEGRATION.md)和[冻结契约](docs/CONTEST_API_CONTRACT.md)。统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent。阶段结束汇报并停止，测试/部署禁令保持不变。
 
 - 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.9）；历史计划仅供参考，不重新实现已有阶段。
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：70261c48原ZIP已实际READY。da426abd缓存102 Block/PARTIAL；18:28日志确认缓存回放无云请求、v2生成24 Chunk，但第17片8337 Token超过8192。只读原缓存证实4张大表有表题/注释，被v2的纯HTML入口漏拆；已补v3定位唯一表体、保留附文与原字符偏移及rowspan保护，v1/v2冻结策略不变。新回归仅编写未运行，需用户单文档Reindex验证GPU/索引；全200/4087未验收，不进入34，冻结数据不改。**
+当前阶段：**竞赛整合阶段1代码/契约已完成，待人工验收：已选择性移植Office预检兼容、v4长表/Native TSV切片及安全诊断，v1～v3冻结；契约与四Tool协议无运行入口，新增回归未执行。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原验收记录，本轮未查业务数据或重跑恢复。全200/4087未验收，不进入知识阶段34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -37,7 +39,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
-| 13 | 已实现标题/段落切片及稳定ID/字符证据；v3长表行策略兼容同Block表题/注释，rowspan关联行保护，v1/v2冻结策略保留；新增Mock及真实长表/GPU待用户验收 |
+| 13 | 已实现标题/段落切片及稳定ID/字符证据；v4保留表题/注释和rowspan保护，新增Native TSV逻辑行及有限大HTML表预算，v1～v3冻结；新增回归及真实长表/GPU待用户验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
@@ -58,8 +60,9 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 保留v4.1质量分层及70261c48真实READY；da426abd第17片8337/8192 Token，已定位v2漏拆带表题/注释的大表并补v3；仅写回归，需单文档缓存Reindex由用户验证，无新MinerU提交，全200/4087完整验收未完成 |
+| 33 | 保留v4.1质量分层及既有验收记录；竞赛分支补Office官方模板/customXml预检兼容、v4 TSV/长表切片和安全终止原因日志，仅写回归，需用户单文档缓存Reindex验证，无新MinerU提交，全200/4087完整验收未完成 |
 | 34 及后续 | 未执行，等待用户确认 |
+| 竞赛整合1 | 必要修复与contest-agent-v1/四Tool契约及设计已编写；未接入第二服务/前端/统一入口，测试未运行，阶段2及后续未开始 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
@@ -139,7 +142,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process`及旧嵌套维护接口保留历史逐阶段语义；新`/api/admin/documents`提供统一管理，Reindex仅缓存回放后自动Chunk/Embedding/Index至READY，Reparse仍须force=true。活动任务不能覆盖，数据库/文件/消息/云端非原子，无Outbox，不宣称exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
-- 新切片为block-chunk-v3：定位唯一HTML表体，原表题/注释仅一次content引用；原行及外壳使用精确source_spans，rowspan关联行不可拆，不改Block/原字符/页码。无法证明行边界、单个超长行组或公式保留完整并由真实Tokenizer判上限。v1/v2检查点保持旧策略；显式文档Reindex从原解析缓存创建v3，不因切片修复重新付费解析或改变原质量。
+- 新切片为block-chunk-v4：保留唯一HTML表体、表题/注释一次content引用、精确source_spans及rowspan关联行保护；只对native_parser的XLSX/CSV按严格TSV逻辑行切分，HTML显式使用有限大表预算及单元格无属性p兼容。Adapter默认预算和v1～v3检查点保持原行为，不改Block/原字符/页码。无法证明行边界、超长行组或公式保留完整，由真实Tokenizer判上限；文档Reindex从成功解析缓存创建v4，不重新付费解析或提升原质量。
 - Windows CPU threads 仅用于既有开发验证；Hybrid PDF Bundle、超限PDF分片处理均使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
 ### Parser、证据与质量
@@ -307,6 +310,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 修改范围 | 必须阅读 |
 |---|---|
 | 路线、阶段验收、最终协议 | [开发计划](docs/DEVELOPMENT_PLAN_CODEX.md) |
+| 双服务竞赛整合、选择性移植与统一Tool边界 | [竞赛整合](docs/CONTEST_INTEGRATION.md)、[冻结契约](docs/CONTEST_API_CONTRACT.md) |
 | Parser、页码/坐标、持久化与回归 | [Parser 契约](docs/PARSER_CONTRACT.md) |
 | 云接口、限流、检查点、顺序与真实验收 | [MinerU Cloud](docs/MINERU_CLOUD.md) |
 | 预检、决策、Guard、XLSX 对照 | [Parser Router](docs/PARSER_ROUTER.md) |

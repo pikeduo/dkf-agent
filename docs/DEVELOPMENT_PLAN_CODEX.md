@@ -1,5 +1,7 @@
 # DKF-Agent 非结构化知识问答开发文档（Codex 版 V0.9 · 人工文档验收优先 + 完整性优先 Router + Selective Hybrid Visual + LlamaIndex + LangGraph）
 
+> 本文继续约束原知识库路线；已授权的双服务竞赛整合另见[竞赛整合说明](CONTEST_INTEGRATION.md)及[冻结契约](CONTEST_API_CONTRACT.md)，不重做本文已实现能力，也不将知识阶段33标为已验收。
+
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
 > 使用对象：Codex / 开发人员  

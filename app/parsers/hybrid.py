@@ -134,7 +134,7 @@ def digest(value: bytes) -> str:
 
 
 def relationships(archive: ZipFile, owner: str, limit: int) -> dict[str, str]:
-    """解析包内关系；超链接不当附件抓取，视觉外链/缺部件/越界路径安全失败。"""
+    """解析包内关系；允许根customXml存储，视觉仍须在xl内，外链/缺件/越界拒绝。"""
 
     parent, name = posixpath.split(owner)
     rel_name = posixpath.join(parent, "_rels", name + ".rels")
@@ -155,7 +155,9 @@ def relationships(archive: ZipFile, owner: str, limit: int) -> dict[str, str]:
             raise HybridPreflightError("HYBRID_INVALID_PACKAGE")
         part = posixpath.normpath(target.lstrip("/") if target.startswith("/")
                                  else posixpath.join(parent, target))
-        if not part.startswith("xl/") or part not in archive.namelist():
+        # OOXML允许工作簿引用根级customXml；不能把此合法元数据误判为越界视觉资源。
+        custom_xml = node.get("Type") == R + "/customXml" and part.startswith("customXml/")
+        if (not part.startswith("xl/") and not custom_xml) or part not in archive.namelist():
             raise HybridPreflightError("HYBRID_INVALID_PACKAGE")
         result[identifier] = part
     return result

@@ -57,7 +57,7 @@ def run_routed_step(
     session: Session, doc_id: UUID, task_id: UUID, mode: ParseMode, settings: Settings,
     *, force_reparse: bool = False, cache_only: bool = False,
 ) -> dict:
-    """自动路由先复用缓存；Reindex 不解析或发云，强制 Reparse 才绕过结果/视觉缓存。"""
+    """复用缓存并优先报告Hybrid真实终止原因；Reindex不解析或发云，Reparse才绕过缓存。"""
 
     if mode not in {"auto", "native", "mineru"}:
         raise ParserError("解析模式仅允许 auto、native 或 mineru")
@@ -105,7 +105,8 @@ def run_routed_step(
             decision = decision.model_copy(update={
                 "route_strategy": "mineru_whole" if exc.whole_compatible else "failed",
                 "fallback_count": 1 if exc.whole_compatible else 0,
-                "reason_codes": tuple(dict.fromkeys(decision.reason_codes + (exc.code,) + (
+                # 终止原因优先，避免管理/阶段33把“Hybrid已启用”误显示成真实错误。
+                "reason_codes": tuple(dict.fromkeys((exc.code,) + decision.reason_codes + (
                     ("HYBRID_PREFLIGHT_WHOLE_FALLBACK", "XLSX_WHOLE_WITH_NATIVE_PRIMARY")
                     if exc.whole_compatible else ()
                 ))),
