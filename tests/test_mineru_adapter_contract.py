@@ -344,7 +344,7 @@ def test_caption_absent_from_original_v1_is_reported_not_invented_from_layout():
 
 
 def chained_table_case(*, count=3, second_join=False):
-    """构造多页重复表头和边界续接的内存元数据，不生成PDF或真实验收素材。"""
+    """构造始终为两列的多页续接元数据；追加合并行保持行/单元格层级，不生成原件。"""
     header = [["项目", "说明"]]
     rows = [header + [["甲", "前段"]], header + [["", "后段"], ["乙", "中段"]]]
     if second_join:
@@ -354,7 +354,8 @@ def chained_table_case(*, count=3, second_join=False):
     rows.extend(header + [[f"条目{index}", f"数值{index}"]] for index in range(3, count))
     combined = header + [["甲", "前段<br>后段"], ["乙", "中段<br>尾段" if second_join else "中段"],
                          ["丙", "末段"]]
-    combined.extend([[f"条目{index}", f"数值{index}"]] for index in range(3, count))
+    # extend逐项追加一行，不能再包一层列表，否则两列会被序列化成一个单元格。
+    combined.extend([f"条目{index}", f"数值{index}"] for index in range(3, count))
     items, pages = table_case(footnote=False)
     for index, source_rows in enumerate(rows):
         if index >= 2:
@@ -366,10 +367,13 @@ def chained_table_case(*, count=3, second_join=False):
     return items, pages
 
 
-@pytest.mark.parametrize("count,second_join", [(3, False), (3, True), (6, False)])
+@pytest.mark.parametrize("count,second_join", [(3, False), (3, True), (4, False), (6, False)])
 def test_chained_continuations_and_repeated_headers_keep_each_source_page(count, second_join):
-    """多页续接与重复表头可组合，完整Adapter保留页码/值/原项/稳定ID和所有源页。"""
+    """先确认夹具两列完整，再核对Adapter的多页恢复、原页/值/稳定ID和输入不变。"""
     items, pages = chained_table_case(count=count, second_join=second_join)
+    merged = TableHTML(items[0]["table_body"])
+    assert merged.width == 2 and len(merged.rows) == count + 1
+    assert all(len(row["cells"]) == 2 for row in merged.rows)
     snapshot, doc_id = (deepcopy(items), deepcopy(pages)), uuid4()
     restored, summary = restore_merged_tables(items, pages)
     positions = [index for index, value in enumerate(items) if value["type"] == "table"]
@@ -411,16 +415,22 @@ def test_continued_row_column_refinement_is_proved_by_complete_source_page():
         partition_rows(inconsistent, sources)
 
 
-@pytest.mark.parametrize("damage", ["value", "header", "row_order", "extra_row", "bbox", "deleted", "cross_rowspan"])
-def test_chained_mapping_never_repairs_missing_values_or_invalid_sources(damage):
-    """缺值、错表头、乱序、多行和坏来源仍失败；最终Adapter不返回半份Block。"""
+@pytest.mark.parametrize("damage,reason", [
+    ("value", "TABLE_ROWS"), ("header", "TABLE_ROWS"), ("row_order", "TABLE_ROWS"),
+    ("extra_row", "TABLE_ROWS"), ("bbox", "TABLE_MATCH"),
+    ("deleted", "TABLE_DELETED"), ("cross_rowspan", "TABLE_ROWS"),
+])
+def test_chained_mapping_never_repairs_missing_values_or_invalid_sources(damage, reason):
+    """先确认夹具合法，再按故障核对具体子原因，防止无关网格异常冒充来源校验通过。"""
     items, pages = chained_table_case(count=4)
+    merged = TableHTML(items[0]["table_body"])
+    assert merged.width == 2 and len(merged.rows) == 5
+    assert all(len(row["cells"]) == 2 for row in merged.rows)
     if damage in {"value", "header"}:
         span = pages[2]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]
         span["html"] = span["html"].replace("末段", "被改写") if damage == "value" else span["html"].replace("项目", "其他列")
     elif damage == "row_order":
-        rows = TableHTML(items[0]["table_body"])
-        fragments = [rows.text[row["start"]:row["end"]] for row in rows.rows]
+        fragments = [merged.text[row["start"]:row["end"]] for row in merged.rows]
         fragments[-2], fragments[-1] = fragments[-1], fragments[-2]
         set_merged(items, pages, "<table>" + "".join(fragments) + "</table>")
     elif damage == "extra_row":
@@ -435,7 +445,8 @@ def test_chained_mapping_never_repairs_missing_values_or_invalid_sources(damage)
     snapshot = deepcopy(items), deepcopy(pages)
     with pytest.raises(MinerUError) as error:
         normalize_case(items, {"pdf_info": list(pages.values())}, {page: (600, 800) for page in pages})
-    assert error.value.code in {"MERGE_EVIDENCE", "EMPTY_BLOCK"}
+    assert error.value.code == "MERGE_EVIDENCE"
+    assert error.value.diagnostic["reason"] == reason
     assert (items, pages) == snapshot
 
 
