@@ -202,7 +202,7 @@ def test_snapshot_quality_preserves_blocks_and_previous_gaps_idempotently():
 
 
 def test_snapshot_whole_keeps_external_formula_and_native_checkpoint(monkeypatch):
-    """Whole原式和云数值分别保留，Native Hash可复验，质量不得升级COMPLETE。"""
+    """保留原式/云值及稳定Hash；真实缺件按异常code断言，不与安全中文消息混淆。"""
     from io import BytesIO
 
     native = parsed_office("xlsx", "native_parser")
@@ -225,8 +225,9 @@ def test_snapshot_whole_keeps_external_formula_and_native_checkpoint(monkeypatch
     assert xlsx_primary.complete_primary(document, checkpoint, cloud, decision) == result
     monkeypatch.setattr(xlsx_primary, "inspect_document", lambda *args: Inspection(signals=signals,
         risks=inspection.risks + ("EXTERNAL_ATTACHMENT_MISSING",)))
-    with pytest.raises(xlsx_primary.MinerUError, match="XLSX_EXTERNAL_ASSET_MISSING"):
+    with pytest.raises(xlsx_primary.MinerUError) as error:
         xlsx_primary.prepare_primary(document, None, decision)
+    assert error.value.code == "XLSX_EXTERNAL_ASSET_MISSING"
 
 
 def test_snapshot_cache_isolated_and_replay_cannot_promote_complete(tmp_path):
