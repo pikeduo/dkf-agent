@@ -19,12 +19,14 @@ class TableLimits:
 
 
 class TableHTML(HTMLParser):
-    """仅接受表格网格及已验证的br/eq序列化；不推断或计算公式。"""
+    """校验表格网格及显式启用的行内标签；不推断或计算公式。"""
 
-    def __init__(self, text: str, *, limits: TableLimits = TableLimits(), cell_paragraphs: bool = False):
-        """读取原行区间；仅v4切片显式接受单元格内p，默认Adapter/旧切片行为不变。"""
+    def __init__(self, text: str, *, limits: TableLimits = TableLimits(), cell_paragraphs: bool = False,
+                 cell_strong: bool = False):
+        """读取原行区间；新切片显式接受单元格p/strong，默认Adapter与旧策略保持不变。"""
         super().__init__(convert_charrefs=False)
         self.limits, self.cell_paragraphs = limits, cell_paragraphs
+        self.cell_strong = cell_strong
         if not isinstance(text, str) or not 0 < len(text) <= limits.max_chars:
             raise merge_evidence_error("TABLE_HTML")
         self.text, self.rows, self.stack, self.cell = text, [], [], None
@@ -44,7 +46,7 @@ class TableHTML(HTMLParser):
         return self.starts[line - 1] + column
 
     def handle_starttag(self, tag, attrs):
-        """校验嵌套与跨度；显式允许时仅接纳单元格内无属性p，不忽略未知标签。"""
+        """校验嵌套/跨度；显式接纳单元格无属性strong，未知标签/属性与结构仍拒绝。"""
         if tag == "table" and not self.stack and not self.root_seen and not attrs:
             self.root_seen = True
         elif tag == "tbody" and self.stack == ["table"] and not self.rows and not self.tbody_seen and not attrs:
@@ -73,6 +75,10 @@ class TableHTML(HTMLParser):
               and self.stack[-1] in {"td", "th"} and not attrs):
             # 段落边界只用于网格核对的文字摘要；实际Chunk始终引用原HTML，不改写字符。
             self.cell["parts"].append(" ")
+        elif (tag == "strong" and self.cell_strong and self.cell is not None
+              and self.stack[-1] in {"td", "th", "p"} and not attrs):
+            # 加粗仅改变样式；摘要不添空格，Chunk仍按原字符区间保留标签及实体。
+            pass
         elif (tag == "br" and self.cell is not None
               and self.stack[-1] in ({"td", "th", "p"} if self.cell_paragraphs else {"td", "th"}) and not attrs):
             self.cell["parts"].append(" ")

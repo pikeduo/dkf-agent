@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：10月18日22:27用户快照112 READY/70 PARTIAL_READY/16 FAILED/2 EMBEDDING。只读确认两份大表的GPU准备被聚合字符上限拦截，非解析代次冲突；已补1600万文档预算、真实准备阶段/原因及本地Retry识别，单批/真实Token/来源保护保留。测试仅编写，未由Codex实际恢复/GPU/云；1份真实超Token、旧缓存/依赖/云失败及PARTIAL缺口仍待解决，不进入34，冻结数据不改。**
+当前阶段：**33全量导入排错中：10月18日23:45用户快照115 READY/72 PARTIAL_READY/13 FAILED。已定位剩余超Token表格的strong兼容缺口，补v5切片及回归用例，v1～v4冻结；测试/单文档缓存Reindex与真实GPU待用户执行。另1份XML预算、9份外部依赖、2份云失败及PARTIAL缺口仍待解决，不进入34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -37,7 +37,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
-| 13 | 已补v4原生XLSX/CSV带引号TSV逻辑行与有界大HTML表切片，原行/公式/字符来源保留；v1～v3冻结策略不变；新Mock及真实大表/GPU待用户验收 |
+| 13 | 已补v5单元格strong行切片兼容，继承v4原生TSV/有界大表；原行/公式/字符来源和v1～v4冻结策略保留；新Mock及目标单文档/GPU待用户验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
@@ -58,7 +58,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 用户22:27快照112 READY/70 PARTIAL_READY/16 FAILED/2 EMBEDDING；已定位两份聚合预算失败被误报CHECKPOINT，补文档预算、原阶段/原因及保留Chunk的Retry；新Mock/实际恢复待用户，保留全部200/4087及费用/来源保护 |
+| 33 | 用户23:45快照115 READY/72 PARTIAL_READY/13 FAILED；efdf30a0缓存表含strong导致v4不能按行切片，已补v5待用户测试/Reindex；XML预算在缓存恢复后单独调整，其他依赖/云/PARTIAL仍待解决，保留200/4087及费用/来源保护 |
 | 34 及后续 | 未执行，等待用户确认 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
@@ -139,7 +139,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process`及旧嵌套维护接口保留历史逐阶段语义；新`/api/admin/documents`提供统一管理，Reindex仅缓存回放后自动Chunk/Embedding/Index至READY，Reparse仍须force=true。活动任务不能覆盖，数据库/文件/消息/云端非原子，无Outbox，不宣称exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
-- 新切片为block-chunk-v3：定位唯一HTML表体，原表题/注释仅一次content引用；原行及外壳使用精确source_spans，rowspan关联行不可拆，不改Block/原字符/页码。无法证明行边界、单个超长行组或公式保留完整并由真实Tokenizer判上限。v1/v2检查点保持旧策略；显式文档Reindex从原解析缓存创建v3，不因切片修复重新付费解析或改变原质量。
+- 新切片为block-chunk-v5：继承v4原生TSV/大表/p段落，额外兼容单元格无属性strong；唯一HTML表体/表题/注释/原行及外壳保持精确source_spans，rowspan关联行不可拆，不改Block/原字符/页码。无法证明行边界、单个超长行组或公式保留完整并由真实Tokenizer判上限。v1～v4检查点冻结；显式文档Reindex从原解析缓存创建v5，不因切片修复重新付费解析或改变原质量。
 - Windows CPU threads 仅用于既有开发验证；Hybrid PDF Bundle、超限PDF分片处理均使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
 ### Parser、证据与质量

@@ -11,14 +11,15 @@ MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进
 - 按从 1 开始的连续 block_index 阅读；未知历史顺序安全失败，不按页码/bbox/UUID 排序。
 - 标题/section 边界优先，不把旧章节的正文重叠带入新章节。后续切片尽量带当前标题（最多估算 100 token）；长标题主内容仍完整保留。
 - 普通正文/image_text 优先空行段落，超长段落按字符/token 区间切分。段落拼接用两个换行；source_spans 精确标识哪些字符来自 Block，拼接分隔符不是原文。
-- 新检查点采用`block-chunk-v4`，保留v3的“表题+HTML表体+表下注释”和完整行/rowspan分组；v1～v3检查点保持原行为。新增仅对`native_parser`的XLSX/CSV table使用其已知TSV序列化契约：标准`csv.reader`严格读取逻辑记录，字段内引号、Tab和换行不误拆，直接引用原字符区间，不重新序列化、不复制表头。单列/列数不一致/无法读取的格式仍整块保留，不按任意换行猜表格。
-- v4的HTML切片显式使用有限预算：单表1600万字符、2万行、40万单元格、524288个展开网格位置；同时支持真实缓存中的单元格无属性`p`段落，保留原HTML字符，不按段落拆单元格。表外/嵌套p、未知属性、列宽/rowspan及网格完整性保护保留。Adapter严格增强及v1～v3继续使用`TableHTML`默认的4Mi字符、4096行、65536单元格和262144网格预算，不启用p兼容；不更改解析来源、Hash或质量。
+- 新检查点采用`block-chunk-v5`，继承v4的原生TSV/大表策略，额外接受单元格或其`p`内无属性的`strong`标签；摘要不额外插空格，Chunk仍引用原HTML字符。v1～v4检查点保持原行为，已有v4拒绝的加粗表格只有显式Reindex才会采用新策略，避免同版本不同算法混用身份。
+- v4/v5仅对`native_parser`的XLSX/CSV table使用其已知TSV序列化契约：标准`csv.reader`严格读取逻辑记录，字段内引号、Tab和换行不误拆，直接引用原字符区间，不重新序列化、不复制表头。单列/列数不一致/无法读取的格式仍整块保留，不按任意换行猜表格。
+- v4/v5的HTML切片显式使用有限预算：单表1600万字符、2万行、40万单元格、524288个展开网格位置；支持真实缓存中的单元格无属性`p`段落，保留原HTML字符，不按段落拆单元格。表外/嵌套p、未知属性、列宽/rowspan及网格完整性保护保留。Adapter严格增强及v1～v3继续使用`TableHTML`默认的4Mi字符、4096行、65536单元格和262144网格预算，不启用p/strong兼容；v4也不启用strong，不更改解析来源、Hash或质量。
 - 每组引用原HTML外壳和连续原行；首片的HTML前缀、末片的HTML后缀标content，其余重复外壳标context。表题和表下注释各自保留为一次content引用，不复制到每张子表；表体局部区间移回原Block字符偏移，所有原字符主内容恰好覆盖一次。表外纯空白归外壳，不产生空白Chunk；多个/不明表体保留全块。不补写表头/单元格，不改页码或来源。
 - 公式原样整体保留，与相邻同章节解释在预算内组成不可拆单元，过长解释不能保证同一Chunk，仍可通过相邻source block_index反查。XLSX原式不计算、不清洗、不被云计算值覆盖。
 - 默认目标600、重叠80；允许范围400～700 / 50～100。行组使用`size-100`估算token预算及其四倍字符目标，给标题上下文留空间；重叠只取同章节普通正文尾部，不重复表格行/公式。末尾/短章节可小于目标。不可拆长行/rowspan组/公式保留完整，估算超目标仍标metadata.oversized=true，由真实Tokenizer判定能否编码。
 - 无法证明行边界或网格的HTML（例如当前`TableHTML`不支持的属性/标签）保留整表，并记录`chunk.table_split_skipped`；不新增解析失败，不猜测或修补表格。安全拆分记录`chunk.table_split`，均不代表事务已提交。
 - `unicode-estimate-v1` 为确定性本地估算：中文/非 ASCII 字符逐字，ASCII 词每四字符估一 token，空白不计。不是 bge-m3 精确 tokenizer，也不能保证模型 token 上限；本轮无新依赖/模型部署。计量方式和参数写入 metadata，改变算法应升级 chunker_version。
-- 本地保护：v4源文本最多1600万字符，v1～v3最多1000万；SQL读取前与纯函数使用相同版本预算。10万Block、2万Chunk上限不变；超限固定CHUNK_LIMIT，不部分成功。大表网格和生成Chunk占用额外内存，建议CPU solo、单文档逐个恢复，真实GPU上限仍由Tokenizer检查。
+- 本地保护：v4/v5源文本最多1600万字符，v1～v3最多1000万；SQL读取前与纯函数使用相同版本预算。10万Block、2万Chunk上限不变；超限固定CHUNK_LIMIT，不部分成功。大表网格和生成Chunk占用额外内存，建议CPU solo、单文档逐个恢复，真实GPU上限仍由Tokenizer检查。
 
 ## 证据与稳定身份
 
@@ -36,7 +37,7 @@ Worker 持有文档行锁，检查切片代次和来源解析代次，全部切�
 
 成功重新解析/缓存回放替换 Block 时在同一事务清除旧 Chunk 和切片检查点，避免引用已删除 Block；失败保留旧 Block/Chunk，必须结合 Document 状态辨别旧结果。活动切片检查点未完成时不允许 Reindex/Reparse；切片成功后可 Reindex→缓存 Block→显式 Chunk。改变 CHUNK_SIZE/OVERLAP 不修改正在执行或已完成的冻结参数；用成功 Reindex 建立新的切片检查点，不需要 Force Reparse，不消耗云端。
 
-旧`block-chunk-v1`检查点继续整表策略；v2保留原有仅处理纯HTML表格的规则及原metadata/稳定ID，不随代码升级自动重建Chunk。旧整表导致`EMBEDDING_TOO_LONG`时，普通Retry仍消费旧Chunk；应待活动任务结束后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v3切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。
+旧v1～v4检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧整表导致`EMBEDDING_TOO_LONG`时，普通Retry仍消费旧Chunk；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v5切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，先完成缓存恢复，再受控调整XML预算。
 
 定向离线回归由用户手动执行（不需要数据库/模型或云端）：
 
@@ -44,7 +45,7 @@ Worker 持有文档行锁，检查切片代次和来源解析代次，全部切�
 python -m pytest tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_document_management.py tests/test_business_logging.py -q -ra
 ```
 
-新增用例覆盖完整行/传递rowspan、表题/脚注/表体偏移、纯空白与多表体边界、原字符全覆盖、版本隔离与稳定ID、不可拆结构保留、旧检查点复用、新Reindex代次、Stub长度检查及失败不发布向量。代码与用例已编写，未执行；真实表格、Tokenizer及GPU结果须由用户确认。
+新增用例覆盖p内strong/实体、完整行/传递rowspan、表题/脚注/表体偏移、纯空白与多表体边界、原字符全覆盖、v4冻结/v5身份隔离、坏嵌套/属性/网格保留原表、旧检查点复用、新Reindex代次、Stub长度检查及失败不发布向量。代码与用例已编写，未执行；真实表格、Tokenizer及GPU结果须由用户确认。
 
 ## 用户手动验收
 

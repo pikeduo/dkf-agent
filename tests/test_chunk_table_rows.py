@@ -6,7 +6,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.chunk import splitter
-from app.services.chunk.splitter import ChunkError, ChunkOptions, LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, VERSION
+from app.services.chunk.splitter import (
+    ChunkError, ChunkOptions, LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION,
+)
 from app.services.mineru.table_html import TableHTML
 from test_chunk_splitter import assert_evidence, block, chunks
 
@@ -112,9 +114,9 @@ def test_legacy_checkpoint_retains_whole_table_without_running_new_policy(monkey
     assert_evidence(drafts, [source])
 
 
-@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION])
+@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION])
 def test_completed_checkpoint_is_reused_without_upgrading_options(version):
-    """已切片文档重复请求沿用v1～v3检查点，不重建Chunk或使现有向量失效。"""
+    """已切片文档重复请求沿用v1～v4检查点，不重建Chunk或使现有向量失效。"""
     from types import SimpleNamespace
     from uuid import uuid4
 
@@ -321,3 +323,101 @@ def test_cell_paragraph_option_keeps_grid_nesting_and_attribute_guards(body):
 
     with pytest.raises(MinerUError):
         TableHTML('<table>' + body + '</table>', cell_paragraphs=True)
+
+
+def test_v5_cell_strong_splits_complete_rows_and_preserves_raw_source():
+    """复现云表格p内strong；原实体/标签/页码/Hash与主内容逐字保留，不增加摘要空格。"""
+    import hashlib
+    from dataclasses import replace
+    from uuid import uuid4
+    from app.services.mineru.errors import MinerUError
+
+    rows = ''.join(f'<tr><td><p>前<strong>项目{i} &amp; &#49;</strong>后</p></td>'
+                   '<td><p><strong>原值</strong></p></td></tr>' for i in range(80))
+    source = replace(block(1, '<table>' + rows + '</table>', 'table', page=4), source='mineru_cloud')
+    before, doc_id, kb_id = deepcopy(source), uuid4(), uuid4()
+    with pytest.raises(MinerUError):
+        TableHTML(source.text)
+    with pytest.raises(MinerUError):
+        TableHTML(source.text, cell_paragraphs=True)
+    previous = chunks([source], ChunkOptions(version=NATIVE_ROW_VERSION), doc_id=doc_id, kb_id=kb_id)
+    current = chunks([source], doc_id=doc_id, kb_id=kb_id)
+    assert len(previous) == 1 and previous[0].text == source.text and len(current) > 1
+    assert previous == chunks([source], ChunkOptions(version=NATIVE_ROW_VERSION), doc_id=doc_id, kb_id=kb_id)
+    assert current == chunks([source], doc_id=doc_id, kb_id=kb_id) and source == before
+    assert {draft.chunk_id for draft in previous}.isdisjoint(draft.chunk_id for draft in current)
+    expected = [cell['text'] for row in TableHTML(source.text, cell_paragraphs=True, cell_strong=True).rows
+                for cell in row['cells']]
+    observed = [cell['text'] for draft in current
+                for row in TableHTML(draft.text, cell_paragraphs=True, cell_strong=True).rows for cell in row['cells']]
+    assert observed == expected and expected[:2] == ['前项目0 & 1后', '原值']
+    assert sum(draft.text.count('<strong>') for draft in current) == rows.count('<strong>')
+    source_hash = hashlib.sha256(source.text.encode()).hexdigest()
+    assert all(draft.page_start == draft.page_end == 4 and draft.metadata['chunker_version'] == VERSION
+               for draft in current)
+    assert all(span['block_text_hash'] == source_hash and span['source'] == 'mineru_cloud'
+               for draft in current for span in draft.metadata['source_spans'])
+    assert_evidence(previous, [source])
+    assert_evidence(current, [source])
+
+
+def test_v5_strong_keeps_transitive_rowspan_groups_intact():
+    """加粗兼容不改变跨行组的传递闭包，超目标关联组仍整体保留。"""
+    rows = [
+        '<tr><td rowspan="2"><p><strong>跨行A</strong></p></td><td>' + '甲' * 240 + '</td></tr>',
+        '<tr><td rowspan="3"><strong>跨行B</strong></td></tr>',
+        '<tr><td>' + '乙' * 240 + '</td></tr>',
+        '<tr><td>' + '丙' * 240 + '</td></tr>',
+        '<tr><td colspan="2"><strong>独立行</strong></td></tr>',
+    ]
+    source = block(1, '<table>' + ''.join(rows) + '</table>', 'table')
+    drafts = chunks([source])
+    assert len(drafts) == 2 and drafts[0].metadata['oversized']
+    tables = [TableHTML(draft.text, cell_paragraphs=True, cell_strong=True) for draft in drafts]
+    assert [len(table.rows) for table in tables] == [4, 1]
+    assert tables[0].rows[0]['cells'][0]['rowspan'] == 2
+    assert tables[0].rows[1]['cells'][0]['rowspan'] == 3
+    assert_evidence(drafts, [source])
+
+
+@pytest.mark.parametrize('body', [
+    '<strong><tr><td>A</td><td>B</td></tr></strong>',
+    '<tr><td><strong onclick="hidden">A</strong></td><td>B</td></tr>',
+    '<tr><td><strong style="hidden">A</strong></td><td>B</td></tr>',
+    '<tr><td><p><strong>A</p></strong></td><td>B</td></tr>',
+    '<tr><td><strong>A</strong></td></tr>',
+    '<tr><td rowspan="99"><strong>A</strong></td><td>B</td></tr>',
+    '<tr><td><strong><table><tr><td>A</td></tr></table></strong></td><td>B</td></tr>',
+    '<tr><td><strong><unknown>A</unknown></strong></td><td>B</td></tr>',
+])
+def test_v5_strong_keeps_structure_and_attribute_checks_without_dropping_content(body):
+    """加粗仅是样式兼容；坏嵌套/属性/网格仍回退完整原表，不丢字或猜切。"""
+    from app.services.mineru.errors import MinerUError
+
+    text = '<table>' + body + ('<tr><td>' + '甲' * 40 + '</td><td>B</td></tr>') * 20 + '</table>'
+    with pytest.raises(MinerUError):
+        TableHTML(text, cell_paragraphs=True, cell_strong=True)
+    source = block(1, text, 'table')
+    drafts = chunks([source])
+    assert len(drafts) == 1 and drafts[0].text == text and drafts[0].metadata['oversized']
+    assert_evidence(drafts, [source])
+
+
+@pytest.mark.parametrize('kind', ['tsv', 'html_p'])
+def test_v4_existing_native_and_paragraph_boundaries_are_preserved_in_v5(kind):
+    """不含加粗的新旧配方具有相同行边界与证据，身份仍因版本变化而隔离。"""
+    from uuid import uuid4
+
+    text = '\n'.join(f'日期{i}\t数值{i}' for i in range(300)) if kind == 'tsv' else (
+        '<table>' + ''.join(f'<tr><td><p>项目{i}</p></td><td><p>原值 &amp; 公式</p></td></tr>'
+                            for i in range(80)) + '</table>')
+    sources, doc_id, kb_id = [block(1, text, 'table')], uuid4(), uuid4()
+    file_type = 'xlsx' if kind == 'tsv' else 'pdf'
+    previous = chunks(sources, ChunkOptions(version=NATIVE_ROW_VERSION), file_type=file_type, doc_id=doc_id, kb_id=kb_id)
+    current = chunks(sources, file_type=file_type, doc_id=doc_id, kb_id=kb_id)
+    assert len(previous) == len(current) > 1
+    assert [draft.text for draft in previous] == [draft.text for draft in current]
+    assert [draft.metadata['source_spans'] for draft in previous] == [draft.metadata['source_spans'] for draft in current]
+    assert {draft.chunk_id for draft in previous}.isdisjoint(draft.chunk_id for draft in current)
+    assert_evidence(previous, sources)
+    assert_evidence(current, sources)

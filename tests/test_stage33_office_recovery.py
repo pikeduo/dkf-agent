@@ -113,7 +113,9 @@ def test_xml_part_budget_reports_counts_before_reading_private_xml(monkeypatch):
                                   size_bytes=20_204_999, limit_count=16 * 1024**2, error_code="PREFLIGHT_LIMIT")
 
 
-@pytest.mark.parametrize("version,allowed", [("block-chunk-v3", False), ("block-chunk-v4", True)])
+@pytest.mark.parametrize("version,allowed", [
+    ("block-chunk-v3", False), ("block-chunk-v4", True), ("block-chunk-v5", True),
+])
 def test_sql_chunk_budget_matches_frozen_algorithm_before_fetching_body(monkeypatch, version, allowed):
     """SQL资源预检与纯切片共用版本预算；旧代次拒绝，新代次才允许拉取较大输入。"""
     from app.services.chunk import processing, splitter

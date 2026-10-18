@@ -69,7 +69,7 @@ function ConvertTo-Stage33Row {
             $State.management.cause_code -eq 'EMBEDDING_LIMIT') { $action = 'LOCAL_RETRY' }
     elseif ($Document.doc_id -eq 'efdf30a0-e412-4d28-8a3a-5257f2fe62a0' -and
             $State.status -eq 'FAILED' -and $State.management.cause_code -eq 'EMBEDDING_TOO_LONG') {
-        # 该文档已用v4重建且仍有12238真实Token长片；不反复Reindex消耗GPU。
+        # v4遗留12238真实Token长片；v5须单文档显式验收，不在全量脚本中盲重建。
         $action = 'TOKEN_SOURCE_REVIEW'
     }
     elseif ($State.status -eq 'FAILED') {
@@ -128,7 +128,7 @@ $rows = @(
             if ($operation -eq 'reindex' -and $state.chunk_count -gt 0 -and
                 ($state.status -in @('READY','PARTIAL_READY') -or $state.management.stage -in @('embed','index'))) {
                 $sample = Invoke-RestMethod "$apiRoot/documents/$($document.doc_id)/chunks?limit=1&offset=0" -TimeoutSec 30
-                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v4') {
+                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v5') {
                     throw '仍由旧Worker生成切片，停止后续恢复；先安全重启所有消费default_queue的旧Worker。'
                 }
             }

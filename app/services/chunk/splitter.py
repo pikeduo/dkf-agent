@@ -12,7 +12,8 @@ from uuid import UUID, uuid5
 
 from app.core.business_logging import log_event
 
-VERSION = "block-chunk-v4"
+VERSION = "block-chunk-v5"
+NATIVE_ROW_VERSION = "block-chunk-v4"
 CAPTION_VERSION = "block-chunk-v3"
 ROW_VERSION = "block-chunk-v2"
 LEGACY_VERSION = "block-chunk-v1"
@@ -38,11 +39,12 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """新切片使用v4原生TSV/大表行分组；已有v1～v3检查点保持冻结算法。"""
+        """新切片使用v5单元格加粗兼容；已有v1～v4检查点保持冻结算法。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, VERSION) or self.tokenizer != TOKENIZER):
+                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION)
+                or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
     def snapshot(self) -> dict:
@@ -184,7 +186,7 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
 
 def source_char_limit(version: str) -> int:
     """SQL预检和纯切片共用版本化字符预算，旧检查点不随新默认值扩大。"""
-    return MAX_V4_SOURCE_CHARS if version == VERSION else MAX_SOURCE_CHARS
+    return MAX_V4_SOURCE_CHARS if version in (NATIVE_ROW_VERSION, VERSION) else MAX_SOURCE_CHARS
 
 
 def native_table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
@@ -227,8 +229,8 @@ def native_table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
 
 
 def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = False,
-                large_tables: bool = False) -> list[list[Span]]:
-    """长HTML表按原行分组；v4支持单元格段落及有界大网格，旧版本入口不变。
+                large_tables: bool = False, cell_strong: bool = False) -> list[list[Span]]:
+    """长HTML表按原行分组；v5显式接受单元格strong，v4段落/规模与旧版本入口不变。
 
     原Block不变，外壳只在首/末片计为主内容，其他引用标context。无法证明行边界时
     保留原整表及oversized标记。表体外文字只引用一次，不重复到每片或猜切单元格。
@@ -261,7 +263,8 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
     try:
         limits = TableLimits(max_chars=16_000_000, max_rows=20_000, max_cells=400_000,
                              max_grid_cells=524_288) if large_tables else TableLimits()
-        table = TableHTML(block.text[table_start:table_end], limits=limits, cell_paragraphs=large_tables)
+        table = TableHTML(block.text[table_start:table_end], limits=limits,
+                          cell_paragraphs=large_tables, cell_strong=cell_strong)
     except MinerUError:
         log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
                   stage="chunk.table_rows", step="UNSUPPORTED_TABLE_ROWS")
@@ -307,7 +310,7 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
 
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """按冻结版本切片；v4新增原生TSV与有界大表行分组，不改原Block或字符证据。"""
+    """按冻结版本切片；仅v5增加单元格strong兼容，不改原Block、旧策略或字符证据。"""
 
     options = options or ChunkOptions()
     config = options.snapshot()
@@ -332,13 +335,14 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     atoms = []
     for block in blocks:
         if block.text.strip():
-            if (block.block_type == "table" and options.version == VERSION
+            if (block.block_type == "table" and options.version in (NATIVE_ROW_VERSION, VERSION)
                     and block.source == "native_parser" and file_type in {"xlsx", "csv"}):
                 atoms.extend(native_table_units(block, options.size - 100))
-            elif block.block_type == "table" and options.version in (ROW_VERSION, CAPTION_VERSION, VERSION):
+            elif block.block_type == "table" and options.version in (ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION):
                 atoms.extend(table_units(block, options.size - 100,
-                    allow_surrounding=options.version in (CAPTION_VERSION, VERSION),
-                    large_tables=options.version == VERSION))
+                    allow_surrounding=options.version in (CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION),
+                    large_tables=options.version in (NATIVE_ROW_VERSION, VERSION),
+                    cell_strong=options.version == VERSION))
             else:
                 atoms.extend([[span] for span in text_spans(block, options.size - 100)]
                              if block.block_type not in {"table", "formula"}

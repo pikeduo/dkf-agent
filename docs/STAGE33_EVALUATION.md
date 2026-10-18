@@ -2,7 +2,64 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 22:27恢复结果与Embedding聚合预算修复
+## 23:45快照与下一步单文档恢复
+
+10月18日23:42/23:45两份用户实时CSV均为115 READY、72 PARTIAL_READY、13 FAILED，全部200份均有记录；187份已索引文档的Chunk数与向量数一致、无无效向量。剩余13份为9份外部依赖、2份原云失败、1份真实Token超限、1份XML预算超限。PARTIAL_READY不是全量完整验收，其中10份记录required缺页。
+
+只读检查确认`efdf30a0-e412-4d28-8a3a-5257f2fe62a0`的第101片为12238真实Token，已使用v4切片仍失败。其现有成功解析缓存的三张HTML表包含单元格`p`内无属性的`strong`；v4行解析不接受该标签，记录`UNSUPPORTED_TABLE_ROWS`后保留整表。新v5仅增加这一样式兼容，原表/行/rowspan/实体/字符来源不变，Adapter默认行为及v1～v4冻结；不提高8192上限、不截断。尚未执行真实网格回放和Tokenizer，不能保证没有其他超长行或结构问题。
+
+先保持现有`ROUTER_XML_PART_MAX_MB=16`，由用户执行本轮定向回归，Codex未执行：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_chunk_table_rows.py tests/test_chunk_splitter.py tests/test_document_management.py tests/test_stage33_office_recovery.py tests/test_mineru_table_merge.py -q -ra
+```
+
+通过后暂停新投递，检查下列队列，待相关任务安全结束再正常停止并按README重启API/全部CPU/GPU Worker；不清队列、不强杀任务，无新迁移/依赖。只重启API不能更新CPU切片版本。
+
+```powershell
+python -m celery -A app.core.celery_app:celery_app inspect active
+python -m celery -A app.core.celery_app:celery_app inspect reserved
+python -m celery -A app.core.celery_app:celery_app inspect scheduled
+```
+
+**只对这一份执行一次Reindex**；普通Retry沿用旧Chunk，不能应用v5。现有成功缓存参与身份/Hash校验，命中后直接重建Chunk并接续GPU/Index；缺缓存会失败，不重新请求MinerU。保留原知识库、原run和所有其他READY向量。
+
+```powershell
+$base = 'http://127.0.0.1:8000/api/admin/documents/efdf30a0-e412-4d28-8a3a-5257f2fe62a0'
+Invoke-RestMethod -Method Post -Uri "$base/reindex" -TimeoutSec 120 -ErrorAction Stop
+# 受理不等于完成；后续用GET查询，不重复POST。
+Invoke-RestMethod -Uri "$base/status" -TimeoutSec 30 -ErrorAction Stop |
+    Select-Object status,block_count,chunk_count,vector_count,invalid_vector_count,error_message,management |
+    ConvertTo-Json -Depth 6
+# 新切片已经生成后检查实际版本；不是block-chunk-v5时先查旧Worker，不继续重投。
+$sample = Invoke-RestMethod -Uri "$base/chunks?limit=1&offset=0" -TimeoutSec 30 -ErrorAction Stop
+$sample.items[0].metadata | Select-Object chunker_version,source_parse_task_id
+```
+
+验收：`READY`或如实保留原质量的`PARTIAL_READY`、`chunk_count=vector_count>0`、`invalid_vector_count=0`、管理任务done。只有READY计完整验收；PARTIAL_READY表示本地入库完成但质量缺口仍在。若仍超Token，保留该次`embedding.chunk_rejected`的chunk_id、序号和真实Token数，停止重复GPU任务。全量脚本继续将该失败项列为`TOKEN_SOURCE_REVIEW`，避免未验收前自动批量Reindex。
+
+完成当前配置下的缓存操作后，再单独处理`082ebed3-a4e9-4b61-934b-4025b472192e`：已测单XML为20204999字节、Sheet总XML38016609字节，前者超过16MiB。由用户在`.env`将既有`ROUTER_XML_PART_MAX_MB`调至32，确认任务结束后重启API/CPU Worker；其他总XML/格式/实体/Hash校验不变。配置参与缓存身份，不能先改配置再恢复前一份缓存。
+
+```powershell
+# 修改已有配置项，不追加重复项；这是用户手动部署步骤。
+notepad .env
+# 保存ROUTER_XML_PART_MAX_MB=32并安全重启相关进程后核对：
+Select-String -LiteralPath .env -Pattern '^ROUTER_XML_PART_MAX_MB='
+# 仅确认可能首次提交MinerU及费用后执行；不是已证明的无云恢复。
+$xmlBase = 'http://127.0.0.1:8000/api/admin/documents/082ebed3-a4e9-4b61-934b-4025b472192e'
+Invoke-RestMethod -Method Post -Uri "$xmlBase/retry" -TimeoutSec 120 -ErrorAction Stop
+Invoke-RestMethod -Uri "$xmlBase/status" -TimeoutSec 30 -ErrorAction Stop |
+    Select-Object status,error_message,management | ConvertTo-Json -Depth 6
+```
+
+其余9份仍需原外部工作簿/图片/OLE依赖；2份远端failed需核对原Job/Batch的平台具体原因，不能用本地切片修复代替或自动申请新批次。72份PARTIAL_READY的缺页/视觉/空结构分别核对，不清警告改READY。完成上述单文档后用默认只读命令刷新全200份报告，不读旧checkpoint判断恢复结果：
+
+```powershell
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+```
+
+## 22:27恢复结果与Embedding聚合预算修复（历史）
 
 用户三份实时CSV分别为：22:11 READY102/PARTIAL_READY68/FAILED30；22:18 READY107/PARTIAL_READY68/FAILED24/EMBEDDING1；22:27 READY112/PARTIAL_READY70/FAILED16/EMBEDDING2，均登记200份。报告是逐文档读取快照，不保证同时刻状态；目前不宣称全部READY。
 
