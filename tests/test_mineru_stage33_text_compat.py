@@ -57,9 +57,10 @@ def test_reference_text_still_requires_real_text_page_and_geometry(damage, code)
 
 
 @pytest.mark.parametrize("retained", [False, True])
-def test_verified_cross_page_dehyphenation_preserves_exact_v1_and_source_identity(retained):
-    """已证明跨页的英文断词符可由V1省略或保留，所有原字符/页/bbox/ID稳定且不补字。"""
-    values, layout, geometry = merged_case(cross_page=True,
+@pytest.mark.parametrize("cross_page", [False, True])
+def test_verified_cross_page_dehyphenation_preserves_exact_v1_and_source_identity(retained, cross_page):
+    """同页分栏/跨页的已验证接缝可续词；V1字符、原页/bbox/ID均保留。"""
+    values, layout, geometry = merged_case(cross_page=cross_page,
         originals=("Reporting inter-", "national results"))
     values[0]["text"] = "Reporting inter-national results" if retained else "Reporting international results"
     original = deepcopy(values), deepcopy(layout)
@@ -68,9 +69,11 @@ def test_verified_cross_page_dehyphenation_preserves_exact_v1_and_source_identit
     assert "".join(b.text for b in parsed.blocks) == values[0]["text"]
     assert parsed.blocks[0].text == ("Reporting inter-" if retained else "Reporting inter")
     assert parsed.blocks[1].text == "national results"
-    assert [b.page for b in parsed.blocks] == [1, 2]
-    assert parsed.blocks[1].bbox == [72., 96., 378., 192.]
-    assert parsed.blocks[1].block_id == uuid5(doc_id, "mineru-v1:frozen-input:2:1:text")
+    assert [b.page for b in parsed.blocks] == [1, 2 if cross_page else 1]
+    size = geometry[values[1]["page_idx"]]
+    assert parsed.blocks[1].bbox == [number * size[index % 2] / 1000
+                                     for index, number in enumerate(values[1]["bbox"])]
+    assert parsed.blocks[1].block_id == uuid5(doc_id, f"mineru-v1:frozen-input:2:{1 if cross_page else 0}:text")
     assert normalize_case(values, layout, geometry, doc_id=doc_id) == parsed
     assert (values, layout) == original
 
@@ -95,12 +98,12 @@ def test_dehyphenation_does_not_hide_numbers_changes_or_unmatched_v1(left, right
 
 
 @pytest.mark.parametrize("damage,reason", [
-    ("same_page", "TEXT_CHARACTER"), ("cross_page", "MOVED_CROSS_PAGE"),
+    ("cross_page", "MOVED_CROSS_PAGE"),
     ("bbox", "MOVED_BBOX"), ("moved_text", "MOVED_TEXT"), ("source_page", "SOURCE_PAGE"),
 ])
 def test_dehyphenation_requires_all_original_source_checks(damage, reason):
     """逐项验证原来源子码；bbox故障只改目标Span，不污染共享坐标的占位父块。"""
-    values, layout, geometry = merged_case(cross_page=damage != "same_page",
+    values, layout, geometry = merged_case(cross_page=True,
         originals=("Reporting inter-", "national results"))
     values[0]["text"] = "Reporting international results"
     moved = layout["pdf_info"][0]["para_blocks"][0]["lines"][1]["spans"][0]

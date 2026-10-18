@@ -341,7 +341,7 @@ MERGE_REASONS = {
     **{name: "restore_merged_tables" for name in (
         "TABLE_HTML", "TABLE_GRID", "TABLE_LIMIT", "TABLE_ROWS", "TABLE_CELLS",
         "TABLE_LAYOUT", "TABLE_MATCH", "TABLE_INDEX", "TABLE_DELETED", "TABLE_PAGES",
-        "TABLE_BODY", "TABLE_EXTRAS", "TABLE_IMAGES", "TABLE_AMBIGUOUS")},
+        "TABLE_BODY", "TABLE_EXTRAS", "TABLE_IMAGES", "TABLE_AMBIGUOUS", "TABLE_ROW_MAPPING_AMBIGUOUS")},
 }
 
 
@@ -436,7 +436,7 @@ def matched_text_layout(item: dict, pages: dict[int, dict]) -> tuple[dict, dict,
 
 
 def plain_layout_spans(block: dict, *, allow_empty=False) -> list[dict]:
-    """读取逐行纯文本；空Span仅供严格核对原本为空的页边界，不用于正文恢复。"""
+    """按出现位置读取多Span纯文本；空Span仅供核对原本为空的页边界。"""
 
     lines = block.get("lines")
     if not isinstance(lines, list) or not lines:
@@ -445,44 +445,39 @@ def plain_layout_spans(block: dict, *, allow_empty=False) -> list[dict]:
     for line in lines:
         if not isinstance(line, dict) or not isinstance(line.get("spans"), list):
             raise merge_evidence_error("LINE_SCHEMA")
-        if len(line["spans"]) != 1:
-            raise merge_evidence_error("LINE_SPAN_COUNT", observed=len(line["spans"]), expected=1)
-        span = line["spans"][0]
-        if not isinstance(span, dict) or span.get("type") != "text":
-            raise merge_evidence_error("SPAN_TYPE")
-        if not isinstance(span.get("content"), str) or (not span["content"].strip()
-                and not (allow_empty and span["content"] == "")):
-            raise merge_evidence_error("SPAN_TEXT")
-        spans.append(span)
+        if not line["spans"] or len(spans) + len(line["spans"]) > 2048:
+            raise merge_evidence_error("LINE_SPAN_COUNT", observed=len(line["spans"]))
+        for span in line["spans"]:
+            if not isinstance(span, dict) or span.get("type") != "text":
+                raise merge_evidence_error("SPAN_TYPE")
+            if not isinstance(span.get("content"), str) or (not span["content"].strip()
+                    and not (allow_empty and span["content"] == "")):
+                raise merge_evidence_error("SPAN_TEXT")
+            spans.append(span)
     return spans
 
 
 def paragraph_spans(block: dict) -> list[dict]:
-    """有界读取文字/行内公式的真实Span序列；重复来源和未知Span仍拒绝。"""
+    """按行和出现位置读取Span；重复公式不是重复来源，不按内容或坐标去重。
+
+    来源唯一性由父块身份保证，Span由序号对应，并在恢复时核对目标数量、原文、
+    坐标和跨页标记；仅来源单侧多出重复项仍会被目标序列或完整V1检查拒绝。
+    """
     lines = block.get("lines")
     if not isinstance(lines, list) or not lines:
         raise merge_evidence_error("LINES_MISSING")
-    result, seen = [], set()
+    result = []
     for line in lines:
         if not isinstance(line, dict) or not isinstance(line.get("spans"), list):
             raise merge_evidence_error("LINE_SCHEMA")
         if not line["spans"] or len(result) + len(line["spans"]) > 2048:
             raise merge_evidence_error("LINE_SPAN_COUNT", observed=len(line["spans"]))
-        in_line = set()
         for span in line["spans"]:
             if not isinstance(span, dict) or span.get("type") not in {"text", "inline_equation"}:
                 raise merge_evidence_error("SPAN_TYPE")
             if not isinstance(span.get("content"), str) or not span["content"].strip():
                 raise merge_evidence_error("SPAN_TEXT")
-            # 不把重复坐标/文字猜成两个来源；坏bbox由后续来源几何检查明确拒绝。
-            signature = (span["type"], span["content"], repr(span.get("bbox")), repr(span.get("cross_page", False)))
-            if signature in in_line:
-                raise merge_evidence_error("LINE_SPAN_COUNT", observed=len(line["spans"]), expected=1)
-            if signature in seen:
-                raise merge_evidence_error("SOURCE_SPAN_COUNT", observed=len(result) + 1, expected=1)
-            in_line.add(signature)
             result.append(span)
-        seen.update(in_line)
     return result
 
 
@@ -492,7 +487,7 @@ def span_reference_text(span: dict) -> str:
 
 
 def merged_text_slices(text: str, originals: list[str], *, dehyphenate=frozenset()) -> list[str]:
-    """核对完整V1并返回原始切片；允许转义、空白及已证明跨页边界的断词连字符省略。
+    """核对完整V1并返回原始切片；允许转义、空白及已证明父块接缝的断词连字符省略。
 
     dehyphenate只接收调用方完成来源/相邻页/cross_page校验的Span边界；仅当V1
     实际直接续接ASCII字母时忽略layout的末尾断词符。不增删V1任何字符，不模糊匹配。
@@ -571,7 +566,7 @@ def merge_group_indices(items: list[dict], offset: int, *, pages=None) -> tuple[
     return [target, *placeholders], sorted(boundaries)
 
 
-PRESERVED_GAP_TYPES = frozenset({"image", "chart", "table", "aside_text", "page_footnote"})
+PRESERVED_GAP_TYPES = frozenset({"image", "chart", "table", "code", "aside_text", "page_footnote"})
 
 
 def matched_preserved_gap(item: dict, pages: dict[int, dict], allowed_pages: set[int]) -> tuple[int, int]:
@@ -609,6 +604,10 @@ def matched_preserved_gap(item: dict, pages: dict[int, dict], allowed_pages: set
             and all(abs(a - c) <= 2 for a, c in zip(box, candidate))]
         if (len(matches) != 1 or matches[0].get("index") != parent["index"]
                 or matches[0].get("lines_deleted", False) is not False):
+            raise merge_evidence_error("BOUNDARY_MATCH", page_idx=page_idx)
+        if kind == "code" and (not isinstance(parent.get("blocks"), list)
+                or not parent["blocks"] or matches[0].get("blocks") != parent["blocks"]):
+            # 代码可处于跨页正文之间，但必须有未改变的前后子结构，不能吞掉代码正文。
             raise merge_evidence_error("BOUNDARY_MATCH", page_idx=page_idx)
     return page_idx, parent["index"]
 
@@ -683,7 +682,8 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
 
     支持原序文字/行内公式Span，最多64个占位与64个经核对的原样间隔。必须有
     lines_deleted=true、空后处理lines、完整前处理来源及逐Span目标顺序证据；
-    跨页要求cross_page=true且相邻后一页；仅该已核对边界允许V1省略英文断词符。
+    跨页要求cross_page=true且相邻后一页；同页分栏或跨页的已核对父块接缝均允许
+    V1省略英文断词符，不把物理换页作为英文续词的必要条件。
     歧义安全失败，不跳过真空正文，不从layout补回V1没有的字符。
     """
 
@@ -809,10 +809,9 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             if moved_box is None or any(abs(a - b) > 2 for a, b in zip(moved_box, original_box)):
                 raise merge_evidence_error("MOVED_BBOX", **location)
         try:
-            # 只在两个不同原父块的相邻物理页接缝启用；同页/行内公式/普通减号不适用。
+            # 仅两个已核对父块的接缝；同页分栏与跨页使用同一规则，行内减号不适用。
             dehyphenate = frozenset(i for i in range(len(source_spans) - 1)
                 if span_sources[i][0] != span_sources[i + 1][0]
-                and span_sources[i + 1][1]["page_idx"] == span_sources[i][1]["page_idx"] + 1
                 and source_spans[i]["type"] == source_spans[i + 1]["type"] == "text")
             span_parts = merged_text_slices(target["text"], [span_reference_text(s) for s in source_spans],
                                             dehyphenate=dehyphenate)

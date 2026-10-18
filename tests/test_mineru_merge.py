@@ -195,7 +195,7 @@ def test_uncertain_merge_fails_atomically_with_safe_reason(damage):
         "different_index": "PARENT_INDEX_MISMATCH", "ambiguous_bbox": "PARENT_MATCH",
         "wrong_bbox": "MOVED_BBOX", "undeleted_lines": "SOURCE_NOT_DELETED",
         "empty_original": "SPAN_TEXT", "mixed_span": "SPAN_TYPE",
-        "multiple_source_spans": "LINE_SPAN_COUNT", "reversed_spans": "MOVED_TEXT",
+        "multiple_source_spans": "TARGET_SPAN_COUNT", "reversed_spans": "MOVED_TEXT",
         "changed_span": "MOVED_TEXT", "extra_v1_text": "TEXT_TRAILING",
         "missing_v1_text": "TEXT_CHARACTER", "missing_cross_page": "MOVED_CROSS_PAGE",
         "bool_page": "LAYOUT_PAGE", "nonadjacent_page": "SOURCE_PAGE",
@@ -245,7 +245,7 @@ def test_merge_limits_and_missing_characters_are_not_relaxed():
 
 @pytest.mark.parametrize("change,reason", [
     ("source_lines", "LINES_MISSING"), ("line_schema", "LINE_SCHEMA"),
-    ("source_multiline", "SOURCE_SPAN_COUNT"), ("source_span_bbox", "SOURCE_SPAN_BBOX"),
+    ("source_multiline", "TARGET_SPAN_COUNT"), ("source_span_bbox", "SOURCE_SPAN_BBOX"),
     ("source_bbox_coverage", "SOURCE_BBOX_COVERAGE"), ("target_span_count", "TARGET_SPAN_COUNT"),
     ("original_cross_page", "SOURCE_CROSS_PAGE"), ("parent_limit", "PARENT_LIMIT"),
     ("page_parent_limit", "PAGE_PARENT_LIMIT"), ("placeholder_match", "PLACEHOLDER_MATCH"),
@@ -253,7 +253,7 @@ def test_merge_limits_and_missing_characters_are_not_relaxed():
     ("target_text", "TARGET_TEXT"),
 ])
 def test_merge_structural_subreasons_remain_strict_and_distinct(change, reason):
-    """多行Span、父块预算和占位结构继续拒绝，诊断区分具体条件而不放宽证据要求。"""
+    """单侧多出Span、父块预算和占位冲突继续拒绝；合法重复不再按值误判。"""
     from app.services.mineru.adapter import restore_merged_text
     values, layout, _ = merged_case()
     page = layout["pdf_info"][0]
@@ -315,5 +315,5 @@ def test_group_diagnostic_keeps_original_array_position_on_later_physical_page()
     prefix = [{"type": "text", "text": "非合并元数据", "page_idx": index} for index in range(199)]
     with pytest.raises(MinerUError) as error:
         restore_merged_text(prefix + values, {199: page})
-    assert error.value.diagnostic == {"reason": "LINE_SPAN_COUNT", "stage": "adapter.plain_layout_spans",
-        "observed": 2, "expected": 1, "page_idx": 199, "item_index": 201, "span_role": "source"}
+    assert error.value.diagnostic == {"reason": "TARGET_SPAN_COUNT", "stage": "adapter.restore_merged_text",
+        "observed": 2, "expected": 3, "page_idx": 199, "item_index": 200}

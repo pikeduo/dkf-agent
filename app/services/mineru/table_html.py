@@ -155,6 +155,21 @@ class TableHTML(HTMLParser):
         return (self.text[:self.rows[0]["start"]] + self.text[self.rows[start]["start"]:stop]
                 + self.text[self.rows[-1]["end"]:])
 
+    def select_rows(self, indices: list[int]) -> str:
+        """按已证明的来源映射取V1原行；可复用真实重复页首行，不生成单元格文字。
+
+        调用方须证明重复行确实存在于各原页。返回HTML仍需重新校验网格，禁止跨
+        rowspan断开；索引必须严格递增，不能把任意行复制成一个新表格。
+        """
+        if (not indices or any(type(index) is not int or not 0 <= index < len(self.rows) for index in indices)
+                or any(left >= right for left, right in zip(indices, indices[1:]))):
+            raise merge_evidence_error("TABLE_ROWS")
+        fragments = []
+        for index in indices:
+            end = self.rows[index + 1]["start"] if index + 1 < len(self.rows) else self.rows[index]["end"]
+            fragments.append(self.text[self.rows[index]["start"]:end])
+        return self.text[:self.rows[0]["start"]] + "".join(fragments) + self.text[self.rows[-1]["end"]:]
+
 
 def verify_projection(source: TableHTML, piece: TableHTML) -> None:
     """证明单元格及rowspan逐项一致，列网格只允许一致的严格单调细化映射。
@@ -162,14 +177,15 @@ def verify_projection(source: TableHTML, piece: TableHTML) -> None:
     例如4列网格可映射为[0,3,6,9,10]，但任何单元格合并/交换/数值变化、
     不一致的列边界或跨分片rowspan均拒绝；验证不会改写V1的colspan。
     """
-    if len(source.rows) != len(piece.rows) or source.tbody_seen != piece.tbody_seen:
+    # tbody只是可选HTML包装，不改变行列；br与空白的序列化差异由单元格文字核对。
+    if len(source.rows) != len(piece.rows):
         raise merge_evidence_error("TABLE_ROWS")
     edges = {}
     for before, after in zip(source.rows, piece.rows):
         if len(before["cells"]) != len(after["cells"]):
             raise merge_evidence_error("TABLE_CELLS")
         for a, b in zip(before["cells"], after["cells"]):
-            if any(a[key] != b[key] for key in ("tag", "text", "rowspan", "breaks")):
+            if any(a[key] != b[key] for key in ("tag", "text", "rowspan")):
                 raise merge_evidence_error("TABLE_CELLS")
             for key in ("column", "right"):
                 if a[key] in edges and edges[a[key]] != b[key]:

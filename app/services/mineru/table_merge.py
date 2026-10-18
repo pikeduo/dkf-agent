@@ -2,10 +2,14 @@
 
 from pathlib import PurePosixPath
 
-from app.services.mineru.adapter import (MERGE_BOUNDARY_TYPES, MergeEvidenceError, convert_bbox,
-    layout_bbox, matched_merge_boundary, merge_evidence_error, merged_text_slices,
+from app.services.mineru.adapter import (MERGE_BOUNDARY_TYPES, PRESERVED_GAP_TYPES, MergeEvidenceError, convert_bbox,
+    layout_bbox, matched_preserved_gap, merge_evidence_error, merged_text_slices,
     paragraph_spans, span_reference_text)
 from app.services.mineru.table_html import TableHTML, verify_projection
+
+# 共享文本恢复的原样结构验证，不再把旁注/页下注释/代码当作合并链的终点。
+# 另一张表不是间隔，普通Text/Title和未知结构也绝不能跳过。
+TABLE_GAP_TYPES = MERGE_BOUNDARY_TYPES | (PRESERVED_GAP_TYPES - {"table"})
 
 
 def matched_table(item, pages, items):
@@ -231,12 +235,70 @@ def verify_images(group, originals, target, members):
         raise merge_evidence_error("TABLE_IMAGES")
 
 
+def partition_rows(merged, sources):
+    """按完整网格投影分配V1行，兼容云端去除跨页重复页首行，不猜任意缺行。
+
+    原行数相等时保留原切片行为。行数减少时，只允许后一页的连续前缀与前页
+    已验证前缀一致，并复用对应V1原行；其他行逐一消耗，最终必须用尽全部V1。
+    页首复用最多64行，任一来源有多个可行映射或跨rowspan切口均安全拒绝。
+    """
+    pieces, refinements, reused, previous = [], [], [], []
+    cursor = 0
+    if sum(len(source.rows) for source in sources) == len(merged.rows):
+        # 已接受的连续映射保留原错误分类和字节切片，不因新策略改变成功缓存语义。
+        for source in sources:
+            stop = cursor + len(source.rows)
+            piece = merged.slice_rows(cursor, stop)
+            shape = TableHTML(piece)
+            verify_projection(source, shape)
+            pieces.append(piece)
+            refinements.append(source.width != shape.width)
+            reused.append(0)
+            cursor = stop
+        return pieces, refinements, reused
+    for ordinal, source in enumerate(sources):
+        choices = []
+        limit = min(64, len(previous), len(source.rows))
+        for prefix in range(limit + 1):
+            stop = cursor + len(source.rows) - prefix
+            if stop > len(merged.rows) or ordinal + 1 == len(sources) and stop != len(merged.rows):
+                continue
+            indices = previous[:prefix] + list(range(cursor, stop))
+            try:
+                if prefix:
+                    verify_projection(TableHTML(source.slice_rows(0, prefix)),
+                                      TableHTML(merged.select_rows(previous[:prefix])))
+                # 无重复前缀时仍使用旧的连续原字节切片，已接受结果不变。
+                piece = (merged.slice_rows(cursor, stop) if not prefix
+                         else merged.select_rows(indices))
+                shape = TableHTML(piece)
+                verify_projection(source, shape)
+            except MergeEvidenceError as error:
+                if error.diagnostic["reason"] not in {"TABLE_ROWS", "TABLE_CELLS", "TABLE_GRID"}:
+                    raise
+                continue
+            choices.append((piece, shape, prefix, stop, indices))
+            if len(choices) > 1:
+                raise merge_evidence_error("TABLE_ROW_MAPPING_AMBIGUOUS")
+        if not choices:
+            raise merge_evidence_error("TABLE_ROWS", observed=len(merged.rows),
+                                       expected=sum(len(value.rows) for value in sources))
+        piece, shape, prefix, cursor, previous = choices[0]
+        pieces.append(piece)
+        refinements.append(source.width != shape.width)
+        reused.append(prefix)
+    if cursor != len(merged.rows):
+        raise merge_evidence_error("TABLE_ROWS", observed=cursor, expected=len(merged.rows))
+    return pieces, refinements, reused
+
+
 def restore_merged_tables(items, pages, *, archive_members=None):
     """恢复连续物理页的已证实合并表格；只以V1原行/附属文本构造非连续原项。
 
     每组最多200页/512个已验证边界；仍受HTML/网格/总字节预算约束。
     所有组先在内存完成核对，异常不返回部分结果。
-    附注可保留为经过唯一来源证明的独立Text；不处理跨分片表格或忽略真缺失来源。
+    允许原样旁注等非连续间隔和已验证的重复页首行；附注可保留为独立Text。
+    不处理跨分片表格，不忽略真缺失来源或以layout补写V1没有的文字。
     """
     restored, summaries, consumed = list(items), [], set()
     for offset, item in enumerate(items):
@@ -265,7 +327,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
             if marker.get("lines_deleted") is not True:
                 continue
             start, gaps = offset - 1, []
-            while start >= 0 and items[start].get("type") in MERGE_BOUNDARY_TYPES:
+            while start >= 0 and items[start].get("type") in TABLE_GAP_TYPES:
                 gaps.append(start)
                 start -= 1
                 if len(gaps) > 512:
@@ -275,7 +337,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
             indices, cursor = [start, offset], offset + 1
             while cursor < len(items):
                 boundary = cursor
-                while boundary < len(items) and items[boundary].get("type") in MERGE_BOUNDARY_TYPES and boundary - cursor < 64:
+                while boundary < len(items) and items[boundary].get("type") in TABLE_GAP_TYPES and boundary - cursor < 64:
                     boundary += 1
                 if (boundary >= len(items) or items[boundary].get("type") != "table"
                         or items[boundary].get("table_body")):
@@ -291,7 +353,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
                 raise merge_evidence_error("TABLE_PAGES")
             used = set()
             for index in gaps:
-                identity = matched_merge_boundary(items[index], pages, {v["page_idx"] for v in group})
+                identity = matched_preserved_gap(items[index], pages, {v["page_idx"] for v in group})
                 if identity in used:
                     raise merge_evidence_error("TABLE_AMBIGUOUS")
                 used.add(identity)
@@ -315,16 +377,8 @@ def restore_merged_tables(items, pages, *, archive_members=None):
             # 不再要求两种官方序列化的HTML逐字相同；未知标签或文字差异仍失败。
             verify_projection(TableHTML(target["html"]), merged)
             sources = [TableHTML(span["html"]) for span in originals]
-            if sum(len(value.rows) for value in sources) != len(merged.rows):
-                raise merge_evidence_error("TABLE_ROWS")
-            extras, pieces, refinements, row = restore_extras(group, evidence, items=items, pages=pages), [], [], 0
-            for source in sources:
-                piece = merged.slice_rows(row, row + len(source.rows))
-                piece_shape = TableHTML(piece)
-                verify_projection(source, piece_shape)
-                refinements.append(source.width != piece_shape.width)
-                pieces.append(piece)
-                row += len(source.rows)
+            pieces, refinements, reused = partition_rows(merged, sources)
+            extras = restore_extras(group, evidence, items=items, pages=pages)
             for index, value, piece, extra in zip(indices, group, pieces, extras):
                 restored[index] = value | {"table_body": piece} | extra
                 consumed.add(index)
@@ -332,6 +386,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
                 "pages": [v["page_idx"] + 1 for v in group], "rows": [len(s.rows) for s in sources],
                 "merged_rows": len(merged.rows), "cells": [sum(len(r["cells"]) for r in s.rows) for s in sources],
                 "column_refinement": refinements,
+                "reused_prefix_rows": reused,
                 "caption_counts": [len(e["table_caption"]) for e in extras],
                 "footnote_counts": [len(e["table_footnote"]) for e in extras],
                 "image_references_verified": True})
