@@ -13,7 +13,7 @@ from app.services.cache_claims import lock_keys
 from app.services.document_processing import check_source_hash, source_path
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.pdf_split import (checked_manifest, prepare_manifest, part_path,
-    file_digest, piece_recipe, load_piece, merge_parts)
+    file_digest, piece_recipe, load_piece, merge_parts, result_prefix)
 from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.parse_cache import CacheError, ParseCache, atomic_write, canonical, archive_artifacts, key_for
 
@@ -137,7 +137,7 @@ def complete_cached_piece(session, document, job, settings):
     if part is None:
         return finalize_split(session, document, job, settings, manifest)
     # 有 Batch 的结果先写缓存再提交 SQL，回滚时以本片独立指针恢复，不重复 GET/POST。
-    prefix = "result-v4" if "_adapter_recipe" in job.parse_options else "result"
+    prefix = result_prefix(job)
     pointer = part_path(ParseCache(settings), document.doc_id, job.job_id, part.ordinal).parent / f"{prefix}-{part.ordinal:04d}.json"
     if pointer.exists():
         import json
@@ -185,7 +185,7 @@ def complete_piece(session, document, job, settings, parsed, archive):
     cache = ParseCache(settings)
     record = cache.save(piece_recipe(job, part), archive_artifacts(archive) | {
         "normalized_document.json": parsed.model_dump_json().encode()})
-    prefix = "result-v4" if "_adapter_recipe" in job.parse_options else "result"
+    prefix = result_prefix(job)
     pointer = part_path(cache, document.doc_id, job.job_id, part.ordinal).parent / f"{prefix}-{part.ordinal:04d}.json"
     atomic_write(pointer, record.model_dump_json().encode())
     part.result = record.model_dump(mode="json")
@@ -195,13 +195,18 @@ def complete_piece(session, document, job, settings, parsed, archive):
 
 
 def advance_piece(session, document, job, settings, manifest, *, cache_hit):
-    """仅推进分片游标；本地重放只投递本地检查，不自动转成下一片的收费提交。"""
+    """推进原游标；默认只读本地，仅显式授权清单内从未提交的片可以转为收费提交。"""
     completed = sum(p.state == "done" for p in manifest.parts)
     part = current_part(manifest)
     if part is None:
         return finalize_split(session, document, job, settings, manifest)
     # 后续片可能早已有Batch/原ZIP，不能清空它的收费身份后再尝试提交。
-    if job.parse_options.get("_local_replay_only") is True:
+    restricted = job.parse_options.get("_local_replay_only") is True or "_authorized_new_split_parts" in job.parse_options
+    allowed = job.parse_options.get("_authorized_new_split_parts", [])
+    new_submission = (part.ordinal in allowed and not part.submission_attempted
+                      and not part.batch_id and not part.upload_complete and part.result is None)
+    if restricted and not new_submission:
+        job.parse_options = job.parse_options | {"_local_replay_only": True}
         job.data_id, job.batch_id = part.data_id, part.batch_id
         job.submission_attempted, job.upload_complete = part.submission_attempted, part.upload_complete
         job.submitted_at = datetime.fromisoformat(part.submitted_at) if part.submitted_at else None
@@ -209,6 +214,11 @@ def advance_piece(session, document, job, settings, manifest, *, cache_hit):
         job.state, job.upload_url, job.upload_expires_at = "pending", None, None
         job.error_code = job.error_message = None
     else:
+        if restricted:
+            job.parse_options = job.parse_options | {"_local_replay_only": False,
+                "_authorized_new_split_parts": [ordinal for ordinal in allowed if ordinal != part.ordinal]}
+            log_event("mineru.split_continuation_authorized", doc_id=document.doc_id, job_id=job.job_id,
+                      file_index=part.ordinal, file_count=len(allowed), stage="submit")
         activate_part(job, part)
     save_manifest(job, manifest, settings)
     config = getattr(document, "management_config", None)
@@ -220,6 +230,23 @@ def advance_piece(session, document, job, settings, manifest, *, cache_hit):
     log_event("mineru.split_piece_done", doc_id=document.doc_id, job_id=job.job_id,
               accepted_count=completed, file_count=len(manifest.parts), parse_cache_hit=cache_hit)
     return ("check" if job.parse_options.get("_local_replay_only") is True else "submit"), 0
+
+
+def authorize_split_continuation(document, job, settings):
+    """管理员显式确认剩余新片费用；只授权冻结清单中的未提交片，绝不重投有收费历史的片。"""
+    manifest = checked_manifest(document, job)
+    current = current_part(manifest)
+    if current is None or (current.data_id != job.data_id or current.batch_id != job.batch_id
+            or current.submission_attempted != job.submission_attempted
+            or current.upload_complete != job.upload_complete):
+        raise MinerUError("PDF_SPLIT_CHECKPOINT", "当前分片与原Job不一致，未授权新增提交")
+    allowed = [part.ordinal for part in manifest.parts if part.state != "done" and part.result is None
+               and not part.batch_id and not part.submission_attempted and not part.upload_complete]
+    if not allowed:
+        raise MinerUError("PDF_SPLIT_CHECKPOINT", "没有可授权的未提交分片，未重新解析已有Batch")
+    source_for_part(document, job, settings)
+    job.parse_options = job.parse_options | {"_authorized_new_split_parts": allowed}
+    return current.ordinal in allowed
 
 
 def finalize_split(session, document, job, settings, manifest):

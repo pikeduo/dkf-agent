@@ -104,8 +104,8 @@ def active_job(session, document):
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
 
 
-def retry_cloud_job(session, document, settings):
-    """显式Retry恢复原Job；本地适配失败强制离线重放，缺ZIP不能转云或新建Job。"""
+def retry_cloud_job(session, document, settings, *, allow_new_split_parts=False):
+    """原ZIP默认离线恢复；管理员可另行授权冻结PDF清单中从未提交的剩余片费用。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
@@ -137,9 +137,21 @@ def retry_cloud_job(session, document, settings):
                 raise ManagementError("MANAGEMENT_CHECKPOINT")
             job, rebind_local = candidates[0], True
         try:
+            if not allow_new_split_parts and "_authorized_new_split_parts" in job.parse_options:
+                # 新一次普通Retry不继承上次尚未使用的收费许可。
+                # 保留空的受限标记：同Batch网络恢复后也不能掉回默认自动提交后续片。
+                job.parse_options = job.parse_options | {"_authorized_new_split_parts": []}
             split_resume = resumable_split(document, job)
             local_replay = False
-            if job.error_code in LOCAL_ADAPTER_ERROR_CODES or job.parse_options.get("_local_replay_only") is True:
+            fresh_part = False
+            if allow_new_split_parts:
+                from app.services.mineru.pdf_split_jobs import authorize_split_continuation
+                fresh_part = authorize_split_continuation(document, job, settings)
+                if fresh_part:
+                    from app.services.mineru.jobs import upgrade_local_adapter
+                    upgrade_local_adapter(job)
+                    job.parse_options = job.parse_options | {"_local_replay_only": False}
+            if not fresh_part and (job.error_code in LOCAL_ADAPTER_ERROR_CODES or job.parse_options.get("_local_replay_only") is True):
                 from app.services.mineru.jobs import check_normalizer_recipe, local_file
                 from app.services.mineru.provider import validate_local_file
                 from app.services.mineru.raw_results import load_raw_result
@@ -170,13 +182,13 @@ def retry_cloud_job(session, document, settings):
                     # 仅在原件/分片/ZIP/Batch全部通过后，由正常管理事务重新绑定原付费Job。
                     document.processing_task_id = job.task_id
                     job.parse_options = job.parse_options | {"_local_resume_previous_task": str(previous_parse_task)}
-            permitted = job.error_code == "JOB_TIMEOUT" or split_resume or local_replay
+            permitted = job.error_code == "JOB_TIMEOUT" or split_resume or local_replay or fresh_part
         except MinerUError:
             raise ManagementError("MANAGEMENT_CHECKPOINT") from None
         if (job.doc_id != document.doc_id or job.task_id != document.processing_task_id
                 or job.is_active or job.state != "failed" or not permitted
                 or job.file_hash != document.file_hash
-                or not (job.batch_id and job.upload_complete or split_resume)
+                or not (job.batch_id and job.upload_complete or split_resume or fresh_part)
                 or job.provider != "mineru_cloud"):
             raise ManagementError("MANAGEMENT_CHECKPOINT")
         # 明确绑定本次恢复为纯本地；后续所有分片和迟到submit消息都继承禁止云访问的边界。
@@ -191,6 +203,8 @@ def retry_cloud_job(session, document, settings):
         document.status = "PARSING"
         sync_current(document, job, settings)
     elif job is not None:
+        if allow_new_split_parts:
+            raise ManagementError("MANAGEMENT_BUSY")
         try:
             renew_local_wait(job, settings)
         except MinerUError:
@@ -295,8 +309,11 @@ def publish_ingestion(session, doc_id: UUID, manager_id: UUID) -> None:
     log_event("management.requested", doc_id=doc_id, task_id=manager_id, operation="ingest")
 
 
-def prepare_management(session, document, settings, operation: str, *, parse_mode="auto") -> tuple[UUID, bool]:
-    """在调用方行锁中建立/恢复检查点；新维护换解析代次，Retry只复用现有业务代次。"""
+def prepare_management(session, document, settings, operation: str, *, parse_mode="auto",
+                       allow_new_split_parts=False) -> tuple[UUID, bool]:
+    """行锁内维护原代次；只有Retry显式许可才允许继续尚未提交的PDF片，不覆盖原Batch。"""
+    if allow_new_split_parts and operation != "retry":
+        raise ManagementError("MANAGEMENT_STATE")
     previous = config_for(document)
     if previous and previous["state"] == "running" and datetime.now(UTC) >= datetime.fromisoformat(previous["expires_at"]):
         # 显式恢复时允许换编排代次；不取消仍在后台运行的业务任务或改变其冻结参数。
@@ -305,6 +322,8 @@ def prepare_management(session, document, settings, operation: str, *, parse_mod
     if operation not in {"retry", "reindex", "reparse", "delete"}:
         raise ManagementError("MANAGEMENT_STATE")
     if previous and previous["state"] == "running":
+        if allow_new_split_parts:
+            raise ManagementError("MANAGEMENT_BUSY")
         if operation == "retry" or operation == previous["operation"]:
             if operation == "reparse" and parse_mode != previous["parse_mode"]:
                 raise ManagementError("MANAGEMENT_BUSY")
@@ -329,7 +348,10 @@ def prepare_management(session, document, settings, operation: str, *, parse_mod
                 session.flush()
                 return document.management_task_id, False
             raise ManagementError("MANAGEMENT_STATE")
-        job = retry_cloud_job(session, document, settings)
+        job = (retry_cloud_job(session, document, settings, allow_new_split_parts=True)
+               if allow_new_split_parts else retry_cloud_job(session, document, settings))
+        if allow_new_split_parts and job is None:
+            raise ManagementError("MANAGEMENT_STATE")  # 新片许可不能变成Whole/Native重新处理授权。
         if job is not None:
             if job.task_id != document.processing_task_id or job.file_hash != document.file_hash or job.state == "failed":
                 raise ManagementError("MANAGEMENT_CHECKPOINT")

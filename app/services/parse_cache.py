@@ -21,6 +21,7 @@ from app.services.cache_files import cache_guard
 VERSION = "parse-cache-v1"
 # v4基础来源/质量分层改变转换语义，隔离旧成功缓存；原ZIP/云参数不改、不自动收费。
 NORMALIZER_VERSION = "mineru-adapter-v4"
+CONTENT_POLICY_VERSION = "mineru-content-v4.1"
 NATIVE_VERSION = "native-v1"
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACTS = frozenset({"normalized_document.json", "raw/mineru_result.zip",
@@ -76,7 +77,7 @@ def cloud_options(settings: Settings) -> dict:
 
 def recipe(document, settings: Settings, strategy: str, *, scope: str = "complete",
            manifest=None, pdf_split_policy=None) -> dict:
-    """按原件/模型/覆盖生成身份；超限 PDF 另冻结分片策略，普通旧缓存身份不变。"""
+    """冻结原件/模型/本地策略；Native身份不变，云转换按内容策略修订隔离缓存。"""
 
     if strategy not in {"native", "mineru_whole", "hybrid_bundle"} or scope not in {"complete", "explicit_native_scope"}:
         raise CacheError()
@@ -90,6 +91,8 @@ def recipe(document, settings: Settings, strategy: str, *, scope: str = "complet
              "routing_config_hash": digest(canonical(config)),
              **({"model_version": NATIVE_VERSION, "language": "", "is_ocr": False,
                  "enable_table": True, "enable_formula": True} if native else cloud_options(settings))}
+    if not native:
+        value["content_policy_version"] = CONTENT_POLICY_VERSION
     if document.file_type == "xlsx":
         value["native_primary_version"] = "xlsx-primary-v1"
     if pdf_split_policy is not None:
@@ -121,6 +124,7 @@ def visual_recipe(content_hash: str, options: dict, extractor_version: str) -> d
     return {"version": VERSION, "provider": "mineru_cloud", "route_strategy": "hybrid_visual",
             "visual_content_hash": content_hash, "visual_extractor_version": extractor_version,
             "normalizer_version": NORMALIZER_VERSION,
+            "content_policy_version": CONTENT_POLICY_VERSION,
             **{name: options[name] for name in OPTION_NAMES}}
 
 

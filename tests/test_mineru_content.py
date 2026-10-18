@@ -206,3 +206,121 @@ def test_business_logs_never_include_base_text_formula_or_private_paths(monkeypa
     convert([{"type": "text", "page_idx": 0, "text": "PRIVATE_BODY $PRIVATE_FORMULA$"}])
     assert "mineru.adapter_content" in output.getvalue()
     assert "PRIVATE" not in output.getvalue()
+
+
+def visual_archive(values, *, layout=None, members=None):
+    """为Mock增加可核对字节的原图成员；不生成真实图片、不执行OCR或联网。"""
+    stream = BytesIO()
+    with ZipFile(BytesIO(result_zip(values, layout=layout))) as source, ZipFile(stream, "w") as target:
+        for info in source.infolist():
+            target.writestr(info, source.read(info))
+        for name, content in (members or {}).items():
+            target.writestr("result/" + name, content)
+    return stream.getvalue()
+
+
+@pytest.mark.parametrize("kind,expected", [("image", "COMPLETE"), ("chart", "PARTIAL")])
+def test_archived_visual_on_text_page_distinguishes_image_from_unread_chart(kind, expected):
+    """普通原图保全不等于缺文；图表无结构化文字仍待审，不把图注冒充图表正文。"""
+    import hashlib
+    values = [{"type": "text", "page_idx": 0, "text": "可靠正文"},
+              {"type": kind, "page_idx": 0, "img_path": "images/source.jpg", "image_caption": ["原始图注"]}]
+    raw = b"mock-visual-bytes-not-decoded"
+    parsed = MinerUResultAdapter().normalize(visual_archive(values, members={"images/source.jpg": raw}),
+        doc_id=uuid4(), file_name="case.pdf", file_type="pdf", geometry={0: (600, 800)}, identity="mock")
+    assert parsed.quality.content == expected and parsed.quality.visual_review_pages == [1]
+    assert parsed.quality.visual_assets[0].sha256 == hashlib.sha256(raw).hexdigest()
+    assert parsed.quality.visual_assets[0].kind == kind
+    assert [block.text for block in parsed.blocks] == ["可靠正文", "原始图注"]
+    assert all("source.jpg" not in block.text for block in parsed.blocks)
+
+
+@pytest.mark.parametrize("reference", ["images/missing.jpg", "../source.jpg", "https://private/source.jpg"])
+def test_missing_or_unsafe_visual_asset_stays_partial(reference):
+    """未保全原图及外部/越界引用不能借同页文字冒充完整，也不自动抓取图片。"""
+    parsed = convert([{"type": "text", "page_idx": 0, "text": "可靠正文"},
+                      {"type": "image", "page_idx": 0, "img_path": reference}])
+    assert parsed.quality.content == "PARTIAL" and parsed.quality.visual_assets == []
+    assert "VISUAL_ASSET_UNAVAILABLE" in parsed.quality.warnings
+
+
+def test_ambiguous_image_reference_is_not_matched_by_basename():
+    """两个精确候选都存在时拒绝选择，不凭同名图片猜测来源或宣布完整。"""
+    values = [{"type": "text", "page_idx": 0, "text": "正文"},
+              {"type": "image", "page_idx": 0, "img_path": "source.jpg"}]
+    parsed = MinerUResultAdapter().normalize(visual_archive(values,
+        members={"source.jpg": b"first", "images/source.jpg": b"second"}),
+        doc_id=uuid4(), file_name="case.pdf", file_type="pdf", geometry={0: (600, 800)}, identity="mock")
+    assert parsed.quality.content == "PARTIAL" and parsed.quality.visual_assets == []
+
+
+def test_visual_only_page_keeps_original_asset_but_never_creates_text_or_page_hit():
+    """整页原图可定位回原ZIP，仍明确缺少可检索文字，不造Block或解除required。"""
+    from app.parsers.routing.contracts import PageSignals, RouteDecision, StructuralSignals
+    from app.parsers.routing.guard import guard_result
+    from scripts.mineru_merge_diagnostic import content_summary
+    values = [{"type": "text", "page_idx": 0, "text": "第一页"},
+              {"type": "image", "page_idx": 1, "img_path": "images/source.jpg"}]
+    parsed = MinerUResultAdapter().normalize(visual_archive(values, members={"images/source.jpg": b"mock"}),
+        doc_id=uuid4(), file_name="case.pdf", file_type="pdf",
+        geometry={0: (600, 800), 1: (600, 800)}, identity="mock")
+    route = RouteDecision(parse_mode="mineru", file_type="pdf", route_strategy="mineru_whole",
+        reason_codes=("EXPLICIT_MINERU",), signals=StructuralSignals(page_count=2, pages=tuple(
+            PageSignals(page=page, text_chars=10, image_count=0, image_area_ratio=0, drawing_count=0,
+                        annotation_count=0, required=True) for page in (1, 2))))
+    guard_result(parsed, route)
+    assert parsed.quality.content == "PARTIAL" and parsed.quality.missing_pages == [2]
+    assert [block.page for block in parsed.blocks] == [1]
+    assert parsed.quality.visual_assets[0].page == 2
+    assert content_summary(parsed)["coverage_gaps"] == [{"page": 2, "reason": "VISUAL_ONLY_PAGE",
+        "archived_visual_count": 1, "text_recoverable_from_current_zip": False, "manual_review_required": True}]
+
+
+@pytest.mark.parametrize("layer,origin", [("base", "layout_discarded"), ("enhanced", "verified_enhancement")])
+def test_discarded_text_is_retained_when_page_has_no_preproc_body(layer, origin):
+    """分别核对基础及增强来源；空preproc不丢discarded文字，增强成功后保留真实来源类型。"""
+    from app.services.mineru.content import BasicContent, canonical_hash
+    import hashlib
+
+    block = {"type": "header", "index": 0, "bbox": [10, 10, 100, 30],
+             "lines": [{"spans": [{"type": "text", "content": "保留原始页眉"}]}]}
+    values = [{"type": "text", "page_idx": 0, "text": "保留原始页眉"}]
+    layout = {"pdf_info": [{"page_idx": 0, "page_size": [600, 800],
+        "preproc_blocks": [], "discarded_blocks": [block], "para_blocks": []}]}
+    archive, doc_id, geometry = result_zip(values, layout=layout), uuid4(), {0: (600, 800)}
+    if layer == "base":
+        parsed = BasicContent(archive, doc_id, "case.pdf", "pdf", geometry, "v4-mock").extract()
+    else:
+        parsed = MinerUResultAdapter().normalize(archive, doc_id=doc_id, file_name="case.pdf",
+            file_type="pdf", geometry=geometry, identity="v4-mock")
+    assert [b.text for b in parsed.blocks] == ["保留原始页眉"]
+    assert parsed.blocks[0].page == 1 and parsed.blocks[0].provenance.origin == origin
+    assert parsed.quality.enhanced is (layer == "enhanced")
+    assert parsed.blocks[0].provenance.pointer == (
+        "layout/page/0/discarded_blocks/0" if layer == "base" else "enhanced/0")
+    assert parsed.blocks[0].provenance.raw_sha256 == (
+        canonical_hash(block) if layer == "base" else hashlib.sha256(archive).hexdigest())
+
+
+def test_nested_visual_span_keeps_exact_pointer_and_original_page():
+    """layout纯图片名按唯一images成员核对，保留原Span指针而非按文件名猜测页面。"""
+    layout = {"pdf_info": [{"page_idx": 0, "page_size": [600, 800], "preproc_blocks": [
+        {"type": "text", "index": 0, "lines": [{"spans": [{"type": "text", "content": "正文"}]}]},
+        {"type": "image", "index": 1, "blocks": [{"type": "image_body", "lines": [
+            {"spans": [{"type": "image", "image_path": "source.jpg"}]}]}]}]}]}
+    parsed = MinerUResultAdapter().normalize(visual_archive(
+        [{"type": "text", "page_idx": 0, "text": "正文"}], layout=layout,
+        members={"images/source.jpg": b"mock"}), doc_id=uuid4(), file_name="case.pdf", file_type="pdf",
+        geometry={0: (600, 800)}, identity="mock")
+    assert parsed.quality.content == "COMPLETE" and parsed.quality.visual_only_count == 1
+    assert parsed.quality.visual_assets[0].pointer.endswith("preproc_blocks/1/blocks/0/lines/0/spans/0")
+
+
+@pytest.mark.parametrize("kind", ["header", "footer", "page_number", "title"])
+def test_page_chrome_does_not_make_full_page_visual_semantically_complete(kind):
+    """页眉/页脚/页码或标题不等于图片正文，防止扫描页仅识别页码便被升级READY。"""
+    values = [{"type": kind, "page_idx": 0, "text": "原始页面标识"},
+              {"type": "image", "page_idx": 0, "img_path": "images/source.jpg"}]
+    parsed = MinerUResultAdapter().normalize(visual_archive(values, members={"images/source.jpg": b"mock"}),
+        doc_id=uuid4(), file_name="case.pdf", file_type="pdf", geometry={0: (600, 800)}, identity="mock")
+    assert parsed.quality.content == "PARTIAL" and "VISUAL_ONLY_PAGES" in parsed.quality.warnings

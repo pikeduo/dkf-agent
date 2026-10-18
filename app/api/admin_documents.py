@@ -115,11 +115,13 @@ def list_document_chunks(doc_id: UUID, session: AdminSession, limit: PageLimit =
     return PageResponse(items=[ChunkResponse.model_validate(row) for row in rows], total=total, limit=limit, offset=offset)
 
 
-def submit_management(session, doc_id: UUID, operation: str, parse_mode="auto") -> ManagementResponse:
-    """提交管理检查点后投递；失败保留原件/证据/可恢复检查点，不在API执行清理或推理。"""
+def submit_management(session, doc_id: UUID, operation: str, parse_mode="auto", *,
+                      allow_new_split_parts=False) -> ManagementResponse:
+    """提交管理检查点后投递；仅将管理员显式新片费用许可传入原编排，不在API解析或推理。"""
     document = require_document(session, doc_id, lock=True)
     try:
-        task_id, dispatch = prepare_management(session, document, get_settings(), operation, parse_mode=parse_mode)
+        options = {"allow_new_split_parts": True} if allow_new_split_parts else {}
+        task_id, dispatch = prepare_management(session, document, get_settings(), operation, parse_mode=parse_mode, **options)
         result = public_management(document)
         session.commit()
     except ManagementError as exc:
@@ -135,10 +137,12 @@ def submit_management(session, doc_id: UUID, operation: str, parse_mode="auto") 
 
 
 @router.post("/{doc_id}/retry", response_model=ManagementResponse, status_code=202,
-             summary="恢复失败阶段或同一活动云批次，不重新付费解析")
-def retry_document(doc_id: UUID, session: AdminSession, parse_mode: Mode = "auto"):
-    """按既有解析/切片/GPU/入库检查点恢复；普通Retry不继承Force或创建第二批收费任务。"""
-    return submit_management(session, doc_id, "retry", parse_mode)
+             summary="恢复失败阶段或原批次；仅显式许可才续交从未提交的PDF片")
+def retry_document(doc_id: UUID, session: AdminSession, parse_mode: Mode = "auto",
+    allow_new_split_parts: Annotated[bool, Query(description="显式确认剩余从未提交PDF分片的云外传及新增费用；不重投已有Batch")] = False):
+    """默认原ZIP离线重放；新片费用必须显式授权，绝不Force或再次解析已有Batch。"""
+    options = {"allow_new_split_parts": True} if allow_new_split_parts else {}
+    return submit_management(session, doc_id, "retry", parse_mode, **options)
 
 
 @router.post("/{doc_id}/reindex", response_model=ManagementResponse, status_code=202,

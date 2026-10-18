@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 
 from app.core.config import Settings
-from app.models import Document
+from app.models import Document, DocumentParseJob
 from app.services import document_management as tool
 from app.services.embedding.service import EmbeddingError
 
@@ -20,12 +20,31 @@ class SessionStub:
         self.document, self.flushes = document, 0
 
     def scalar(self, statement):
-        """故障记录只返回指定文档，不执行SQL。"""
-        return self.document
+        """按查询实体返回文档或不存在的Job，避免把Document错误当作云任务。"""
+        entity = statement.column_descriptions[0].get("entity")
+        if entity is Document:
+            return self.document
+        assert entity is DocumentParseJob, "测试未配置此查询实体"
+        return None
+
+    def scalars(self, statement):
+        """模拟历史失败Job查询为空；只提供迭代接口，不连接数据库。"""
+        assert statement.column_descriptions[0].get("entity") is DocumentParseJob
+        return iter(())
 
     def flush(self):
         """记录本地检查点需要flush，不执行数据库提交。"""
         self.flushes += 1
+
+
+def test_session_stub_distinguishes_document_and_missing_parse_jobs():
+    """Stub保持SQLAlchemy实体查询语义，缺历史Job不能误返回Document或触发真实SQL。"""
+    from sqlalchemy import select
+    document = Document(doc_id=uuid4())
+    session = SessionStub(document)
+    assert session.scalar(select(Document)) is document
+    assert session.scalar(select(DocumentParseJob)) is None
+    assert list(session.scalars(select(DocumentParseJob))) == []
 
 
 def test_stage_failed_keeps_underlying_router_reason(context):
@@ -39,6 +58,16 @@ def test_stage_failed_keeps_underlying_router_reason(context):
     assert document.management_config["error_code"] == "MANAGEMENT_STAGE_FAILED"
     assert document.management_config["cause_code"] == "PREFLIGHT_LIMIT"
     assert document.error_message == "ROUTER_FAILED[PREFLIGHT_LIMIT]：原始安全说明"
+
+
+def test_new_split_permission_cannot_start_non_split_processing(context, monkeypatch):
+    """未发现原分片Job时显式许可必须拒绝，不回落到新解析/上传或其他阶段。"""
+    document, session, settings = context
+    document.status = "FAILED"
+    monkeypatch.setattr(tool, "retry_cloud_job", lambda *args, **kwargs: None)
+    with pytest.raises(tool.ManagementError) as error:
+        tool.prepare_management(session, document, settings, "retry", allow_new_split_parts=True)
+    assert error.value.code == "MANAGEMENT_STATE"
 
 
 @pytest.fixture

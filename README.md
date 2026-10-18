@@ -470,6 +470,10 @@ POST 返回 202 及独立的 `chunk_task_id`，用 `/tasks/{chunk_task_id}` 查�
 
 `MERGE_EVIDENCE / EMPTY_BLOCK / CONTENT_TYPE / COMPLETENESS`等本地适配失败不等于MinerU云端失败。修复Adapter后，普通`/retry`复用同Job/Batch的已归档原ZIP，**强制本地重放，不需要有效MinerU Token，不查询、上传或下载云结果**；分片后续缺ZIP也明确停止，绝不自动转成收费任务。归档/来源Hash损坏仍拒绝，不以Force代替修Adapter；全部适配及完整性通过才继续正常入库。Whole/分片只读诊断均自动读取原归档，无需重新下载，见[阶段33故障排查](docs/STAGE33_EVALUATION.md#失败定位与原知识库恢复)。
 
+仅当确实还有**从未提交**的PDF片，且管理员确认剩余原件外传及新增费用后，可手动调用`POST /api/admin/documents/{doc_id}/retry?allow_new_split_parts=true`。原已收费片仍先复用本地结果；仅冻结清单中的新片允许申请Batch，已有Batch不重投，缺失旧ZIP不因此转云。活动任务返回409，不在运行中改许可；不带该参数的新一次Retry撤销未使用的新片许可。
+
+v4.1将普通已归档图片的语义待审与文字缺失分开记录，不再一张图片就将整份判为PARTIAL；未识别图表、原图缺失、纯图片页或真实缺页仍保留PARTIAL。质量中的`visual_assets`可追溯原ZIP成员/Hash，`visual_review_pages`须人工核对；COMPLETE不表示图像语义或问答准确率通过。
+
 阶段33仅恢复原失败文档时使用`--step import --resume --retry-failed-only`；该模式不上传未尝试文件、不重建READY文档，仍保留全部200份的报告与未完成状态。确认外传及潜在后续分片费用后才加`--execute --allow-cloud`，具体命令见上述手册。普通`--retry-failed`不限制新文件调度，二者不要混淆。
 
 `DELETE`返回202，先令文档退出检索，CPU再清理自有上传副本、Block/Chunk/向量、文档解析/Hybrid/GPU目录和Job指针；活动任务409。无其他文档引用的整份缓存会清理，跨文档共享及无法确认独占的视觉缓存保留，不删除正式preset、模型、日志或全局索引。清理失败保留删除检查点供Retry，成功后详情404；文件/数据库非原子，删除前备份并仅用可丢弃文档验证。此接口无鉴权，仅可信内网使用。

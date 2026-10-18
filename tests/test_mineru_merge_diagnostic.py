@@ -106,6 +106,46 @@ def test_missing_zip_is_blocked_and_does_not_revive_failed_job(context):
     assert (vars(document), vars(job)) == snapshot
 
 
+def test_completed_split_batch_can_be_diagnosed_without_a_pending_cursor(context, monkeypatch):
+    """所有片done后仍按指定Batch检查本地ZIP，不再将正常空游标误判身份错误。"""
+    from app.services.mineru import raw_results
+    document, job, settings, _ = context
+    manifest = split.checked_manifest(document, job)
+    manifest.parts[0].state, manifest.parts[0].result = "done", {}
+    job.parse_options = job.parse_options | {"_pdf_split": manifest.model_dump(mode="json")}
+    job.state, document.status = "done", "READY"
+    archive = result_zip([{"type": "text", "page_idx": 0, "text": "原始可靠正文"}])
+    monkeypatch.setattr(raw_results, "load_raw_result", lambda *args, **kw: (archive, {
+        "sha256": hashlib.sha256(archive).hexdigest(), "size_bytes": len(archive)}))
+    snapshot = deepcopy(vars(job)), deepcopy(vars(document))
+    report = tool.inspect_job(document, job, settings, job.batch_id, None)
+    assert report["adapter_normalize"] == "PASS" and report["all_parts_done"]
+    assert report["completed_part_count"] == 1 and report["unsubmitted_part_count"] == 0
+    assert report["document_status"] == "READY" and not report["database_modified"]
+    assert (vars(job), vars(document)) == snapshot
+
+
+@pytest.mark.parametrize("damage,check", [("batch", "batch_unique"), ("generation", "generation"),
+                                         ("data", "job_data"), ("upload", "part_uploaded")])
+def test_identity_failure_names_fixed_check_without_exposing_private_values(context, damage, check):
+    """真正的身份错误仍拒绝，并准确报告失败条件而非统一黑盒错误。"""
+    document, job, settings, _ = context
+    batch = job.batch_id
+    if damage == "batch":
+        batch = "PRIVATE_WRONG_BATCH"
+    elif damage == "generation":
+        document.processing_task_id = uuid4()
+    elif damage == "data":
+        job.data_id = "PRIVATE_WRONG_DATA"
+    else:
+        job.parse_options["_pdf_split"]["parts"][0]["upload_complete"] = False
+    with pytest.raises(MinerUError) as error:
+        tool.inspect_job(document, job, settings, batch, None)
+    assert error.value.code == "DIAGNOSTIC_IDENTITY"
+    assert check in error.value.diagnostic["failed_checks"]
+    assert "PRIVATE" not in json.dumps(error.value.diagnostic)
+
+
 def test_existing_zip_reproduces_safe_subreason_without_exporting_text_or_bbox(context, tmp_path):
     """来源多Span按原序保留基础内容并报告增强拒绝；不导出原文、坐标或私有路径。"""
     document, job, settings, _ = context

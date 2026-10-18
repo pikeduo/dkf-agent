@@ -181,6 +181,53 @@ def submit(c):
     return jobs.submit_step(c.session, c.job.job_id, c.provider, c.settings)
 
 
+def test_explicit_continuation_replays_paid_part_then_submits_only_new_part(context):
+    """原片本地复用，新片仅POST一次并按配置延迟检查；全片合并保持连续原页。"""
+    from app.services.mineru.raw_results import obtain_raw_result
+    c = context
+    assert submit(c)[0] == "check"
+    part = workflow.current_part(split.checked_manifest(c.document, c.job))
+    original_batch = c.job.batch_id
+    obtain_raw_result(c.provider, "mock-download", c.settings, doc_id=c.document.doc_id,
+        job_id=c.job.job_id, ordinal=part.ordinal, batch_id=part.batch_id,
+        data_id=part.data_id, file_hash=part.file_hash)
+    assert workflow.authorize_split_continuation(c.document, c.job, c.settings) is False
+    c.job.parse_options = c.job.parse_options | {"_local_replay_only": True}
+    assert c.job.parse_options["_authorized_new_split_parts"] == [2]
+    assert jobs.check_step(c.session, c.job.job_id, None, c.settings) == ("submit", 0)
+    assert len(c.provider.posts) == 1 and not c.provider.gets
+    assert c.job.parse_options["_local_replay_only"] is False and c.job.batch_id is None
+    assert submit(c) == ("check", c.settings.mineru_poll_interval_seconds)
+    assert len(c.provider.posts) == 2
+    assert not c.provider.gets and c.job.batch_id != original_batch
+    assert check(c) == ("done", 257)
+    manifest = split.checked_manifest(c.document, c.job)
+    assert manifest.parts[0].batch_id == original_batch
+    assert all(part.state == "done" for part in manifest.parts)
+    assert [block.page for block in c.session.blocks] == list(range(1, 258))
+
+
+def test_explicit_continuation_never_resubmits_an_existing_batch(context):
+    """即使授权列表包含后片，也不能清空其Batch后重新POST；缺ZIP仍只读失败。"""
+    from app.services.mineru.raw_results import obtain_raw_result
+    c = context
+    submit(c)
+    manifest = split.checked_manifest(c.document, c.job)
+    first, second = manifest.parts
+    second.batch_id, second.submission_attempted, second.upload_complete = "already-paid", True, True
+    second.state = "running"
+    workflow.save_manifest(c.job, manifest, c.settings)
+    obtain_raw_result(c.provider, "mock-download", c.settings, doc_id=c.document.doc_id,
+        job_id=c.job.job_id, ordinal=first.ordinal, batch_id=first.batch_id,
+        data_id=first.data_id, file_hash=first.file_hash)
+    c.job.parse_options = c.job.parse_options | {"_local_replay_only": True, "_authorized_new_split_parts": [2]}
+    assert jobs.check_step(c.session, c.job.job_id, None, c.settings) == ("check", 0)
+    assert c.job.batch_id == "already-paid" and c.job.parse_options["_local_replay_only"] is True
+    with pytest.raises(MinerUError) as error:
+        jobs.check_step(c.session, c.job.job_id, None, c.settings)
+    assert error.value.code == "LOCAL_RESULT_REQUIRED" and len(c.provider.posts) == 1
+
+
 def check(c):
     """执行一次被测检查短步骤，不连接任何外部服务。"""
     return jobs.check_step(c.session, c.job.job_id, c.provider, c.settings)

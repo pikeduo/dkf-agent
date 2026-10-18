@@ -191,6 +191,7 @@ EVENT_LABELS = {
     "mineru.blocks_persisted": "MinerU 解析结果已落库",
     "mineru.split_planned": "超限 PDF 连续分片计划已保存，尚未提交云任务",
     "mineru.split_piece_done": "PDF 分片结果已缓存，原文档尚未整体落库",
+    "mineru.split_continuation_authorized": "仅继续管理员显式授权的未提交PDF分片，可能产生新增费用",
     "mineru.split_manifest_failed": "PDF 分片磁盘副本写入失败，数据库检查点仍保留",
     "mineru.split_checkpoint_invalid": "PDF 分片检查点无效，保留原账本并停止处理",
     "mineru.split_io_failed": "PDF 分片本地文件操作失败，未提交云任务",

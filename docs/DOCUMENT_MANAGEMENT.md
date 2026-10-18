@@ -52,6 +52,8 @@
 
 其他远端失败、未知POST及坏ZIP终态不因本地重放扩大恢复范围。失败Reparse的Retry改为普通ingest并复用业务代次；只有再次显式Force Reparse允许绕过收费历史，但不得把Force当成Adapter问题的解决方案。
 
+管理员可另行显式调用`/retry?allow_new_split_parts=true`，确认冻结PDF账本中从未提交的剩余片外传与新增费用。当前已收费片仍本地重放；只有没有Batch/提交意图/上传完成/结果的片可续交，不能重投旧Batch。默认false，普通新一次Retry撤销未使用许可；活动任务409，不运行中换许可。不适用于Whole/Office，也不允许因缺旧ZIP再收费。该可选参数不改变原有不带参数的API行为。
+
 MANAGEMENT_STAGE_FAILED保留原外部错误码；若原文档错误具有合法ROUTER_FAILED前缀，cause_code另保留注册Router原因（如PREFLIGHT_LIMIT），不覆盖原文档错误。历史记录不批量回填；阶段33只读快照也能从原有安全前缀恢复原因。新增PDF预检拒绝事件只记资源限制种类、页和计数，不放宽预检预算。
 
 Reindex缓存缺失/损坏/原件Hash/配置/版本改变明确FAILED，不运行Router预检/Parser或MinerU，不自动Force。成功回放保持原Block身份与阅读顺序，再按当前配置建立新切片/GPU/入库检查点。改变Embedding冻结参数后应使用Reindex，不用重复/embed期待新参数生效。

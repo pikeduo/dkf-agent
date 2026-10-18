@@ -643,6 +643,9 @@ def merge_hybrid(plan: HybridPlan, visual: ParsedDocument | None) -> ParsedDocum
     if quality:
         # 对外沿用原XLSX逻辑页，不能把Bundle中间页当成原件页码。
         quality.covered_pages, quality.required_pages, quality.missing_pages = [1], [1], []
+        quality.visual_review_pages = [1] if quality.visual_review_pages else []
+        quality.visual_assets = [asset.model_copy(update={"page": 1,
+            "pointer": f"bundle/page/{asset.page}/" + asset.pointer}) for asset in quality.visual_assets]
         if missing_visuals and "MISSING_VISUAL_PAGES" not in quality.warnings and len(quality.warnings) < 128:
             quality.warnings.append("MISSING_VISUAL_PAGES")
     return ParsedDocument(doc_id=native.doc_id, file_name=native.file_name, file_type="xlsx",

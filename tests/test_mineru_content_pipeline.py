@@ -202,3 +202,31 @@ def test_normalizer_upgrade_cannot_hide_paid_identical_pdf_piece():
             workflow.claim_piece(session, SimpleNamespace(doc_id=uuid4()), job)
     assert error.value.code == "CACHE_REPARSE_REQUIRED"
     assert [{"file_hash": part.file_hash}] in statements[0].compile().params.values()
+
+
+def test_visual_quality_revision_uses_new_local_recipe_and_keeps_original_cache():
+    """v4.1不能覆写旧v4质量语义；原云配方/Batch不改，转换缓存身份必须不同。"""
+    from app.services.mineru.jobs import check_normalizer_recipe
+    from app.services.mineru.pdf_split import result_prefix
+    from app.services.parse_cache import CONTENT_POLICY_VERSION, key_for
+    old = {"normalizer_version": "mineru-adapter-v4", "file_hash": "a" * 64}
+    job = SimpleNamespace(parse_options={"_cache_recipe": deepcopy(old)}, batch_id="original-paid-batch")
+    check_normalizer_recipe(job)
+    assert job.parse_options["_cache_recipe"] == old
+    assert job.parse_options["_adapter_recipe"]["content_policy_version"] == CONTENT_POLICY_VERSION
+    assert key_for(old) != key_for(job.parse_options["_adapter_recipe"])
+    assert result_prefix(job) == "result-v4.1" and job.batch_id == "original-paid-batch"
+
+
+def test_bulk_replay_preserves_safe_identity_failure_details():
+    """单项身份失败的准确条件必须进入批量报告，不输出用户正文或上游内容。"""
+    from scripts.mineru_merge_diagnostic import require_identity
+    records = [{"file_id": "fixed", "job_id": str(uuid4()), "batch_id": "original"}]
+
+    def inspect(*args, **kwargs):
+        """只注入固定布尔诊断，不读取数据库或任何原件。"""
+        require_identity({"batch_unique": False})
+
+    result = batch.replay_records(records, object(), inspect=inspect)
+    assert result["failed_or_blocked_count"] == 1
+    assert result["documents"][0]["identity_diagnostic"]["failed_checks"] == ["batch_unique"]

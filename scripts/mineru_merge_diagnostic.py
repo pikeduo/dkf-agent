@@ -17,7 +17,16 @@ if str(ROOT) not in sys.path:
 from app.services.mineru.adapter import (MinerUResultAdapter, MergeEvidenceError, EmptyBlockError,
     page_geometry, read_content_list, read_layout_pages, restore_merged_text)
 from app.services.mineru.errors import MinerUError
-from app.services.parse_cache import NORMALIZER_VERSION, ParseCache, canonical, key_for
+from app.services.parse_cache import CONTENT_POLICY_VERSION, NORMALIZER_VERSION, ParseCache, canonical, key_for
+
+
+def require_identity(checks):
+    """只导出固定检查名及布尔结果，准确区分身份失败步骤，不泄漏路径/正文/凭据。"""
+    failed = [name for name, valid in checks.items() if not valid]
+    if failed:
+        error = MinerUError("DIAGNOSTIC_IDENTITY", "原件、分片或Batch身份无法核对，未转换")
+        error.diagnostic = {"stage": "diagnostic.identity", "failed_checks": failed, "checks": checks}
+        raise error
 
 
 def regular_path(path: Path) -> Path:
@@ -115,12 +124,17 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         return inspect_whole_job(document, job, settings, batch_id, archive_path,
                                  allow_normalizer_upgrade=allow_normalizer_upgrade)
     manifest = checked_manifest(document, job)
-    part = current_part(manifest)
-    if (job.provider != "mineru_cloud" or document.file_type != "pdf"
-            or document.processing_task_id != job.task_id or part is None
-            or part.batch_id != batch_id or job.batch_id != batch_id or job.data_id != part.data_id
-            or not part.upload_complete or not job.upload_complete or not part.submission_attempted):
-        raise MinerUError("DIAGNOSTIC_IDENTITY", "原文档、当前片或原Batch身份无法核对")
+    # 诊断指定原Batch，而非只诊断未完成游标；全片done时current_part为None是正常状态。
+    matches = [part for part in manifest.parts if part.batch_id == batch_id]
+    require_identity({"provider": job.provider == "mineru_cloud", "pdf_type": document.file_type == "pdf",
+        "document_job": getattr(job, "doc_id", document.doc_id) == document.doc_id,
+        "generation": document.processing_task_id == job.task_id,
+        "batch_unique": len(matches) == 1})
+    part = matches[0]
+    require_identity({"part_uploaded": part.upload_complete, "part_submitted": part.submission_attempted,
+        "job_batch": part.state == "done" or job.batch_id == batch_id,
+        "job_data": part.state == "done" or job.data_id == part.data_id,
+        "job_uploaded": part.state == "done" or job.upload_complete})
     frozen = job.parse_options.get("_cache_recipe")
     if not isinstance(frozen, dict):
         raise MinerUError("CACHE_CONFIG_CHANGED", "缺少一致的冻结归一化版本，未恢复任务")
@@ -146,7 +160,8 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
             or path.stat().st_size != part.size_bytes or file_hash(path) != part.file_hash):
         raise MinerUError("PDF_SPLIT_CHANGED", "原件或分片Hash不一致，未恢复任务")
     old_recipe = piece_recipe(job, part)
-    identity = key_for(old_recipe | {"normalizer_version": NORMALIZER_VERSION})
+    identity = key_for(old_recipe | {"normalizer_version": NORMALIZER_VERSION,
+                                   "content_policy_version": CONTENT_POLICY_VERSION})
     report = {"doc_id": str(document.doc_id), "job_id": str(job.job_id), "batch_id": batch_id,
         "data_id": part.data_id, "document_status": document.status, "job_state": job.state,
         "part_state": part.state, "part_ordinal": part.ordinal,
@@ -159,7 +174,13 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
         "frozen_options_verified": True,
         "adapter_identity": identity, "source_hashes_verified": True,
         "part_result_cached": part.result is not None,
-        "unsubmitted_part_count": sum(not p.submission_attempted for p in manifest.parts),
+        "unsubmitted_part_count": sum(p.state != "done" and not p.submission_attempted
+                                      and not p.batch_id and p.result is None for p in manifest.parts),
+        "completed_part_count": sum(p.state == "done" for p in manifest.parts),
+        "part_count": len(manifest.parts), "all_parts_done": all(p.state == "done" for p in manifest.parts),
+        "unsubmitted_parts": [{"ordinal": p.ordinal, "page_start": p.page_start, "page_end": p.page_end}
+            for p in manifest.parts if p.state != "done" and not p.submission_attempted
+            and not p.batch_id and p.result is None],
         "status": "BLOCKED", "error_code": "ZIP_REQUIRED",
         "zip_batch_provenance": "manual_confirmation_required",
         "database_modified": False, "cache_published": False, "cloud_submitted": False}
@@ -358,6 +379,14 @@ def content_summary(parsed, kb_id=None):
                "reliable_page_block_count": len(parsed.blocks),
                "located_block_count": sum(block.bbox is not None for block in parsed.blocks),
                "enhancement_status": parsed.quality.structure if parsed.quality else "LEGACY"}
+    if parsed.quality:
+        assets = parsed.quality.visual_assets
+        summary["coverage_gaps"] = [{"page": page,
+            "reason": "VISUAL_ONLY_PAGE" if any(a.page == page for a in assets) else "NO_STRUCTURED_CONTENT",
+            "archived_visual_count": sum(a.page == page for a in assets),
+            "text_recoverable_from_current_zip": False if any(a.page == page for a in assets) else None,
+            "manual_review_required": True}
+            for page in parsed.quality.missing_pages]
     if kb_id is None:
         return summary | {"chunk_preview_count": None, "chunk_preview_status": "KB_ID_UNAVAILABLE"}
     if not parsed.blocks:
@@ -448,6 +477,8 @@ def main(argv=None) -> int:
     except MinerUError as error:
         report = {"status": "BLOCKED", "error_code": error.code,
                   "cloud_submitted": False, "database_modified": False, "cache_published": False}
+        if error.code == "DIAGNOSTIC_IDENTITY" and getattr(error, "diagnostic", None):
+            report["identity_diagnostic"] = error.diagnostic
     except Exception:
         # 配置/驱动/文件异常可能带密码或路径；不打印异常原文或SQL。
         report = {"status": "BLOCKED", "error_code": "DIAGNOSTIC_IO_OR_DB",

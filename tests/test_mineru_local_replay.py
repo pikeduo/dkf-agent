@@ -58,6 +58,58 @@ def test_adapter_retry_is_local_for_every_supported_adapter_error(context, monke
     assert document.status == "CHUNKING"
 
 
+def test_explicit_new_part_permission_keeps_paid_batch_in_local_replay(context, monkeypatch):
+    """管理员许可只冻结未提交序号，当前已收费片仍无Provider地本地重放。"""
+    from app.services.mineru import pdf_split_jobs
+    settings, document, job, session = context
+    stub_local_conversion(monkeypatch, document, job)
+    job.parse_options = {"_cache_recipe": {"normalizer_version": NORMALIZER_VERSION}}
+    job.state, job.error_code, job.is_active, document.status = "failed", "MERGE_EVIDENCE", False, "FAILED"
+    identity = job.job_id, job.batch_id, job.data_id
+
+    def authorize(doc, current, config):
+        """替代分片文件核对边界，不生成PDF；真实序号/Hash分支由分片用例覆盖。"""
+        assert (doc, current, config) == (document, job, settings)
+        current.parse_options = current.parse_options | {"_authorized_new_split_parts": [2]}
+        return False
+
+    monkeypatch.setattr(pdf_split_jobs, "authorize_split_continuation", authorize)
+    assert management.retry_cloud_job(session, document, settings, allow_new_split_parts=True) is job
+    assert job.parse_options["_local_replay_only"] and job.parse_options["_authorized_new_split_parts"] == [2]
+    assert identity == (job.job_id, job.batch_id, job.data_id)
+
+
+def test_new_plain_retry_revokes_unused_new_part_permission(context, monkeypatch):
+    """新一次普通Retry不继承上一轮尚未使用的收费许可。"""
+    settings, document, job, session = context
+    stub_local_conversion(monkeypatch, document, job)
+    job.parse_options = {"_cache_recipe": {"normalizer_version": NORMALIZER_VERSION},
+                         "_authorized_new_split_parts": [2]}
+    job.state, job.error_code, job.is_active, document.status = "failed", "MERGE_EVIDENCE", False, "FAILED"
+    assert management.retry_cloud_job(session, document, settings) is job
+    assert job.parse_options["_authorized_new_split_parts"] == [] and job.parse_options["_local_replay_only"]
+
+
+def test_explicit_new_part_can_resume_after_local_replay_stopped_before_submission(context, monkeypatch):
+    """LOCAL_RESULT_REQUIRED停在未提交片后，可显式续交该片，不要求它先有不存在的ZIP。"""
+    from app.services.mineru import pdf_split_jobs
+    settings, document, job, session = context
+    stub_local_conversion(monkeypatch, document, job)
+    job.parse_options = {"_cache_recipe": {"normalizer_version": NORMALIZER_VERSION}, "_local_replay_only": True}
+    job.state, job.error_code, job.is_active, document.status = "failed", "LOCAL_RESULT_REQUIRED", False, "FAILED"
+    job.batch_id, job.upload_complete, job.submission_attempted = None, False, False
+
+    def authorize(doc, current, config):
+        """只模拟冻结未提交序号核对，禁止生成PDF或请求Provider。"""
+        current.parse_options = current.parse_options | {"_authorized_new_split_parts": [2]}
+        return True
+
+    monkeypatch.setattr(pdf_split_jobs, "authorize_split_continuation", authorize)
+    assert management.retry_cloud_job(session, document, settings, allow_new_split_parts=True) is job
+    assert not job.parse_options["_local_replay_only"] and job.state == "pending"
+    assert job.batch_id is None and not job.submission_attempted and document.status == "PARSING"
+
+
 @pytest.mark.parametrize("marked", [False, True])
 def test_worker_with_saved_zip_never_initializes_cloud_client(context, monkeypatch, marked):
     """真实任务入口在空Token配置下消费已存ZIP，连Provider构造及Redis限流初始化都禁止。"""

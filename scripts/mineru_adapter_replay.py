@@ -30,6 +30,8 @@ def replay_records(records, settings, *, inspect=inspect_database, timeout=600):
                                       allow_normalizer_upgrade=True))
             except MinerUError as error:
                 report["error_code"] = error.code
+                if error.code == "DIAGNOSTIC_IDENTITY" and getattr(error, "diagnostic", None):
+                    report["identity_diagnostic"] = error.diagnostic
             except Exception:
                 report["error_code"] = "DIAGNOSTIC_IO_OR_DB"
         results.append(report)

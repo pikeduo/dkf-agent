@@ -19,11 +19,22 @@ from app.core.file_formats import FileType
 BlockType = Literal["title", "text", "table", "formula", "image_text"]
 
 
+class VisualAsset(BaseModel):
+    """已保全的原ZIP视觉原件；仅保存来源，不把图片路径当作可检索正文。"""
+
+    model_config = ConfigDict(extra="forbid")
+    page: int = Field(ge=1)
+    kind: Literal["image", "chart"]
+    pointer: str
+    member: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ParseQuality(BaseModel):
     """解析质量与安全覆盖摘要；部分内容不冒充完整READY，不包含正文或私有路径。"""
 
     model_config = ConfigDict(extra="forbid")
-    policy: Literal["mineru-content-v4"] = "mineru-content-v4"
+    policy: Literal["mineru-content-v4", "mineru-content-v4.1"] = "mineru-content-v4.1"
     content: Literal["COMPLETE", "PARTIAL"] = "COMPLETE"
     structure: Literal["BASE", "ENHANCED", "DEGRADED"] = "BASE"
     evidence: Literal["VERIFIED", "PARTIAL"] = "VERIFIED"
@@ -34,6 +45,9 @@ class ParseQuality(BaseModel):
     missing_pages: list[int] = Field(default_factory=list)
     quarantined_count: int = Field(default=0, ge=0)
     visual_only_count: int = Field(default=0, ge=0)
+    # COMPLETE仅表示结构化文字/表格覆盖，不宣称图片语义已理解。
+    visual_review_pages: list[int] = Field(default_factory=list)
+    visual_assets: list[VisualAsset] = Field(default_factory=list, max_length=100000)
     base_block_count: int = Field(default=0, ge=0)
     enhanced: bool = False
 

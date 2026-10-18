@@ -10,11 +10,36 @@
 
 - **仍致命**：ZIP路径/符号链接/CRC/解压预算、原件/分片Hash或Job/Batch身份错误、全局结构无效、整份没有来源可确认的内容。失败不删除原ZIP、不发布业务成功。
 - **可降级**：TARGET_TEXT、BOUNDARY_TEXT、LINE_SPAN_COUNT、TABLE_ROWS/EXTRAS/LIMIT等增强错误。基础层优先读取同ZIP逐页`preproc_blocks`及`discarded_blocks`的原始Span/HTML/公式，按可信index或原数组顺序保留；不按bbox猜阅读顺序。无可用原始布局的页使用V1独立项；跨页合并正文无法定位则隔离，不把整段错算到第一页。V2/full.md不补正文，不执行HTML或公式。
-- **三维质量**：内容COMPLETE/PARTIAL，结构BASE/ENHANCED/DEGRADED，证据VERIFIED/PARTIAL。记录固定子原因、位置和计数；缺bbox设NULL，未知页码文字仅在本地normalized_document隔离。仅增强降级且内容完整可READY；缺页/未识别视觉/隔离内容只能PARTIAL_READY。COMPLETE不是OCR/语义准确率。
+- **三维质量**：内容COMPLETE/PARTIAL，结构BASE/ENHANCED/DEGRADED，证据VERIFIED/PARTIAL。记录固定子原因、位置和计数；缺bbox设NULL，未知页码文字仅在本地normalized_document隔离。v4.1中，同页有可靠正文且普通原图已唯一核对同ZIP成员/Hash，只记视觉语义待审，不再一律判缺文；无结构化正文的chart、原图缺失、纯图片页及真实缺页仍PARTIAL。页眉/页码/图注不能替代图片正文。`visual_assets`保留原图指针，`visual_review_pages`保留待审页；不造图片文字Block。COMPLETE不是OCR/图像语义/问答准确率。
 - 原ZIP/回执独立保全，v4结果使用新缓存身份。原v3失败Job的显式Retry核对原件、分片及原Batch ZIP后，新增`_adapter_recipe`并强制`_local_replay_only`，不更改原云配方/Batch，不调用Provider/限流/HTTP。历史Retry误换代次时，仅允许同Hash且唯一可验证的原付费Job通过正常管理事务重新绑定；不是SQL改状态或新增恢复框架。
 - 全部必要分片必须有本地可验证结果。无文字的中间片可记录PARTIAL，但整份仍须存在可靠块；缺ZIP停止LOCAL_RESULT_REQUIRED，不自动发云。合并沿用原物理页，缺页及来源指针带分片序号。XLSX Native整表/公式不改，缺失视觉页只记PARTIAL且不发布共享视觉缓存，Bundle页不冒充Excel页。
 
-已获用户确认编写`0009_parse_quality`迁移，**未执行迁移、pytest、25份真实ZIP回放或单文档恢复**。下面旧v3严格规则保留为`normalize_strict()`可选增强和历史验收依据，不再作为v4基础内容的入库门槛。
+已获用户确认编写`0009_parse_quality`迁移，Codex未执行。用户提供的25项v4回放报告为2完整、21部分、2身份阻塞；本轮v4.1修复及新增Mock尚待用户复测，不能据此宣布业务恢复。旧v3严格规则保留为`normalize_strict()`可选增强和历史验收依据，不再作为基础内容的入库门槛。
+
+### v4.1回放、缺页与未提交片
+
+- 两项身份阻塞的本地分片账本全部done；旧诊断只找`current_part()`，空游标被误当成身份错误。现在按指定Batch唯一定位账本片，即使done也只读验证其原件/片/ZIP/回执；真正身份错误输出固定`identity_diagnostic.failed_checks`。`all_parts_done`只表示账本状态，报告转换范围仍是指定Batch，未恢复数据库。
+- 原ZIP元数据表明`1d4ee624…`第12页仅chart原图，`fdcfaeff…`第2/59/61页仅image原图，没有可恢复文字。保留可核对的原图成员/Hash，`coverage_gaps`明确标记`VISUAL_ONLY_PAGE`，不得改成已识别文字或虚构页证据；可靠其余内容可继续PARTIAL_READY。是否需要额外OCR/视觉理解由用户另行决定，本轮不触发。
+- 保持Normalizer v4，新增`content_policy_version=mineru-content-v4.1`隔离转换缓存；旧云配方/Batch不改，旧成功产物不覆盖。升级转换使用独立`result-v4.1`指针；旧已完成片按原recipe核对复用。JSON质量字段扩展，无新迁移/依赖。
+- `d8087523…`原账本第一片1～200页已收费，第二片201～217页未提交。默认Retry仍只本地恢复，缺第二片结果停止；显式`allow_new_split_parts=true`才许可原账本中的新片。已收费片不重新POST；已有Batch却缺ZIP仍拒绝。许可不能用于Whole重解析/未知POST，普通新一次Retry撤销未使用额度。新片仍沿原Provider/限流/Hash/提交意图，所有片完成后才整体入库。
+
+由用户执行（不覆盖旧报告）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_content.py tests/test_mineru_content_pipeline.py tests/test_mineru_local_replay.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_split_continuation_api.py tests/test_document_management.py tests/test_parse_cache.py tests/test_business_logging.py -q -ra
+python scripts/mineru_adapter_replay.py --checkpoint results/stage33/stage33_run_01/import_checkpoint.json --kb-id 158030a1-42d6-42ee-835d-02fdbff23f81 --output "results/stage33_v41_replay_$(Get-Date -Format yyyyMMdd_HHmmss).json" --timeout 600
+```
+
+先确认0009已迁移并重启API及CPU/GPU Worker加载新代码。下面命令仅供用户在确认**新增1个文件提交、201～217页外传及费用**后执行；Codex未执行：
+
+```powershell
+$base = "http://127.0.0.1:8000/api/admin/documents/d8087523-0aa7-4f4a-8a85-8e055710f0fd"
+Invoke-RestMethod -Method Post -Uri "$base/retry?allow_new_split_parts=true" -TimeoutSec 120
+Invoke-RestMethod -Uri "$base/status" | ConvertTo-Json -Depth 8
+```
+
+预期第一片复用原Batch/ZIP，不再收费；第二片独立新增Batch。未确认费用则仅调用`$base/retry`，不加参数；READY/PARTIAL_READY文档不因离线报告而重投。若返回409，先读状态核对是否仍在处理，不盲目重复请求。
 
 用户手动验证（无MinerU请求）：
 

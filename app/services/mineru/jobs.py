@@ -349,13 +349,21 @@ def renew_local_wait(job: DocumentParseJob, settings: Settings) -> None:
 
 
 def check_normalizer_recipe(job: DocumentParseJob) -> None:
-    """新转换使用冻结归一化/分片生成器；旧已验证结果可回放，不悄悄更换收费输入。"""
+    """校验冻结云身份；v4质量策略修订另建本地配方，不覆写旧缓存或更换收费输入。"""
 
     frozen = job.parse_options.get("_adapter_recipe") or job.parse_options.get("_cache_recipe")
     if frozen is not None and (
         not isinstance(frozen, dict) or frozen.get("normalizer_version") != NORMALIZER_VERSION
     ):
         raise MinerUError("CACHE_CONFIG_CHANGED", "MinerU 归一化版本已变化，旧任务未重新解析或提交云批次")
+    if isinstance(frozen, dict):
+        from app.services.parse_cache import CONTENT_POLICY_VERSION
+        policy_version = frozen.get("content_policy_version")
+        if policy_version not in {None, CONTENT_POLICY_VERSION}:
+            raise MinerUError("CACHE_CONFIG_CHANGED", "本地内容策略版本不兼容，未复用错误质量缓存")
+        if policy_version is None:
+            job.parse_options = job.parse_options | {"_adapter_recipe": frozen | {
+                "content_policy_version": CONTENT_POLICY_VERSION}}
     if "_pdf_split_request" in job.parse_options:
         from app.services.mineru.pdf_split import policy
         if job.parse_options["_pdf_split_request"].get("policy") != policy():
@@ -367,7 +375,9 @@ def upgrade_local_adapter(job):
     frozen = job.parse_options.get("_cache_recipe")
     if not isinstance(frozen, dict) or frozen.get("normalizer_version") not in {"mineru-adapter-v3", NORMALIZER_VERSION}:
         raise MinerUError("CACHE_CONFIG_CHANGED", "原Job本地转换版本不受支持，未访问云端")
-    job.parse_options = job.parse_options | {"_adapter_recipe": frozen | {"normalizer_version": NORMALIZER_VERSION}}
+    from app.services.parse_cache import CONTENT_POLICY_VERSION
+    job.parse_options = job.parse_options | {"_adapter_recipe": frozen | {
+        "normalizer_version": NORMALIZER_VERSION, "content_policy_version": CONTENT_POLICY_VERSION}}
     job.parse_options = job.parse_options | {"_local_replay_only": True}
 
 

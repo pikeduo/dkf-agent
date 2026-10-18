@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import posixpath
 from collections import Counter, defaultdict
 from io import BytesIO
 from uuid import uuid5
@@ -11,7 +12,7 @@ from zipfile import ZipFile
 
 from app.core.business_logging import log_event
 from app.core.file_formats import OFFICE_TYPES
-from app.schemas.parsed_document import BlockProvenance, ParsedBlock, ParsedDocument, ParseQuality
+from app.schemas.parsed_document import BlockProvenance, ParsedBlock, ParsedDocument, ParseQuality, VisualAsset
 from app.services.mineru.errors import MinerUError
 
 NONFATAL = frozenset({"MERGE_EVIDENCE", "EMPTY_BLOCK", "CONTENT_TYPE", "CONTENT_LIST", "BBOX", "PAGE", "NO_TEXT"})
@@ -40,6 +41,12 @@ class BasicContent:
         self.blocks, self.quarantine, self.pages_used = [], [], set()
         self.quality, self.characters = ParseQuality(), 0
         self.headings, self.title = {}, ""
+        self.visual_seen, self.visual_hashes, self.body_pages = set(), {}, set()
+        with ZipFile(BytesIO(archive)) as zipped:
+            self.members = {info.filename: info for info in zipped.infolist() if not info.is_dir()}
+            self.result_roots = {posixpath.dirname(name) for name in self.members
+                                 if posixpath.basename(name) == "layout.json"
+                                 or name.endswith("content_list.json")}
         self.uncertain_targets = set()
         previous = None
         for position, value in enumerate(self.items):
@@ -113,15 +120,70 @@ class BasicContent:
                 if kind not in {"text", "table", "image", "chart", "inline_equation", "interline_equation", "equation", "formula"}:
                     self.warn("UNKNOWN_SPAN_TYPE")
                 content = self.text(span.get("html") if kind == "table" else span.get("content"))
-                if kind in {"image", "chart"} and not content.strip():
-                    self.quality.visual_only_count += 1
-                    self.warn("VISUAL_WITHOUT_TEXT", partial=True)
                 if kind in {"inline_equation", "interline_equation", "equation", "formula"} and content:
                     content = "$" + content + "$" if kind == "inline_equation" else content
                 if content:
                     parts.append(content)
             result.append("".join(parts))
         return "\n".join(result)
+
+    def record_visuals(self, raw, page_idx, pointer):
+        """核对同ZIP原图并记录语义待审页；普通图片不再自动判缺文，图表/缺原图仍保守处理。"""
+        candidates = []
+        pending = [(raw, 0, pointer)]
+        while pending:
+            node, depth, node_pointer = pending.pop()
+            if not isinstance(node, dict) or depth > 16:
+                continue
+            kind = node.get("type") if isinstance(node.get("type"), str) else "unknown"
+            if kind in {"image", "chart"}:
+                ref = node.get("image_path") or node.get("img_path")
+                if ref:
+                    candidates.append((kind, ref, node, node_pointer))
+            children = node.get("blocks", [])
+            if isinstance(children, list):
+                pending.extend((child, depth + 1, f"{node_pointer}/blocks/{i}")
+                               for i, child in reversed(list(enumerate(children))))
+            lines = node.get("lines", [])
+            if isinstance(lines, list):
+                for i, line in reversed(list(enumerate(lines))):
+                    spans = line.get("spans", []) if isinstance(line, dict) else []
+                    if isinstance(spans, list):
+                        pending.extend((span, depth + 1, f"{node_pointer}/lines/{i}/spans/{j}")
+                                       for j, span in reversed(list(enumerate(spans))))
+        if not candidates and isinstance(raw.get("type"), str) and raw["type"] in {"image", "chart"}:
+            candidates.append((raw["type"], None, raw, pointer))
+        for kind, ref, node, visual_pointer in candidates:
+            if isinstance(node.get("content"), str) and node["content"].strip():
+                continue
+            marker = (page_idx if type(page_idx) is int else None, visual_pointer)
+            if marker in self.visual_seen:
+                continue
+            self.visual_seen.add(marker)
+            self.quality.visual_only_count += 1
+            valid_page = type(page_idx) is int and page_idx >= 0 and (
+                page_idx < 200 if self.office else isinstance(self.geometry, dict) and page_idx in self.geometry)
+            if valid_page and page_idx + 1 not in self.quality.visual_review_pages:
+                self.quality.visual_review_pages.append(page_idx + 1)
+            matches = set()
+            if isinstance(ref, str) and ref and not any(c in ref for c in ("\\", ":", "\x00")):
+                if not ref.startswith("/") and ".." not in ref.split("/"):
+                    for root in self.result_roots:
+                        # layout常用纯图片名，V1常用images/路径；不按任意目录basename模糊匹配。
+                        for relative in (ref, "images/" + ref if "/" not in ref else ref):
+                            member = posixpath.join(root, relative)
+                            if member in self.members:
+                                matches.add(member)
+            member = next(iter(matches)) if len(matches) == 1 else None
+            if member is not None and valid_page and 0 < self.members[member].file_size <= 64 * 1024**2:
+                if member not in self.visual_hashes:
+                    with ZipFile(BytesIO(self.archive)) as zipped:
+                        self.visual_hashes[member] = hashlib.sha256(zipped.read(member)).hexdigest()
+                self.quality.visual_assets.append(VisualAsset(page=page_idx + 1, kind=kind,
+                    pointer=visual_pointer, member=member, sha256=self.visual_hashes[member]))
+                self.warn("VISUAL_SEMANTICS_NOT_EVALUATED", partial=kind == "chart")
+            else:
+                self.warn("VISUAL_ASSET_UNAVAILABLE", partial=True)
 
     def v1_text(self, item):
         """按V1已知正文键保留原HTML、公式、附注，不依赖类型枚举完美覆盖。"""
@@ -140,17 +202,12 @@ class BasicContent:
 
     def emit(self, raw, page_idx, pointer, origin, *, layout=False, size=None):
         """只发布页码可确认的块；局部页码异常隔离，坐标异常设NULL并保留可靠正文。"""
-        visual_before = self.quality.visual_only_count
         content = self.layout_text(raw) if layout else self.v1_text(raw)
         kind = raw.get("type") if isinstance(raw.get("type"), str) else "unknown"
-        if not layout and kind in {"image", "chart"} and content.strip() and not self.text(raw.get("content")).strip():
-            self.quality.visual_only_count += 1
-            self.warn("VISUAL_WITHOUT_TEXT", partial=True)  # 图注可保留，但不能据图注宣称视觉正文完整。
+        self.record_visuals(raw, page_idx, pointer)
         if not content.strip():
             if kind in {"image", "chart"}:
-                if self.quality.visual_only_count == visual_before:
-                    self.quality.visual_only_count += 1
-                self.warn("VISUAL_WITHOUT_TEXT", partial=True)
+                self.warn("VISUAL_WITHOUT_TEXT")  # 不生成假文字；整页缺正文在extract/Guard中单独判定。
             elif not (raw.get("lines_deleted") is True or layout and raw.get("lines") == []):
                 self.warn("EMPTY_LOCAL_CONTENT", partial=kind in {"table", "equation", "formula", "interline_equation"})
             return
@@ -210,6 +267,10 @@ class BasicContent:
             section=" / ".join(self.headings[key] for key in sorted(self.headings)),
             provenance=BlockProvenance(origin=origin, pointer=pointer, raw_sha256=canonical_hash(raw),
                                        bbox_reliable=bbox is not None)))
+        if kind in {"text", "table", "equation", "formula", "interline_equation", "code", "list", "image_text"}:
+            self.body_pages.add(page_idx + 1)
+        elif kind in {"image", "chart"} and isinstance(raw.get("content"), str) and raw["content"].strip():
+            self.body_pages.add(page_idx + 1)
 
     def extract(self, *, allow_empty_part=False):
         """优先逐页preproc，缺页使用V1；只允许PDF中间片保留无可靠块的部分结果。"""
@@ -235,7 +296,7 @@ class BasicContent:
                         self.warn("LOCAL_LAYOUT_SCHEMA", partial=True)
                         continue
                     idx, body = page.get("page_idx"), page.get("preproc_blocks")
-                    if type(idx) is not int or idx in duplicates or not isinstance(body, list) or not body:
+                    if type(idx) is not int or idx in duplicates or not isinstance(body, list):
                         if body or type(idx) is not int:
                             self.warn("LAYOUT_PAGE_UNAVAILABLE")
                         continue
@@ -279,6 +340,14 @@ class BasicContent:
                 (self.quarantine or self.quality.visual_only_count)):
             raise MinerUError("PAGE" if self.quarantine else "NO_TEXT", "没有来源可确认的基础内容，未伪造页码或发布空结果")
         self.quality.covered_pages = sorted({b.page for b in self.blocks})
+        self.quality.visual_review_pages.sort()
+        # 页码/页眉/图注不能替整页图片证明文字已识别；只有可靠正文页可仅记视觉待审。
+        visual_only_pages = sorted(set(self.quality.visual_review_pages) - self.body_pages)
+        if visual_only_pages:
+            self.warn("VISUAL_ONLY_PAGES", partial=True)
+            for page in visual_only_pages[:128]:
+                if len(self.quality.diagnostics) < 128:
+                    self.quality.diagnostics.append({"reason": "VISUAL_ONLY_PAGE", "stage": "adapter.v4", "page": page})
         self.quality.base_block_count, self.quality.quarantined_count = len(self.blocks), len(self.quarantine)
         return ParsedDocument(doc_id=self.doc_id, file_name=self.file_name, file_type=self.file_type,
             title=self.title, blocks=self.blocks, quality=self.quality, quarantined_content=self.quarantine)

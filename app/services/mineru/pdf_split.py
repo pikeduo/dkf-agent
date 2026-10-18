@@ -250,13 +250,23 @@ def piece_recipe(job, part: PDFPart) -> dict:
     return value
 
 
+def result_prefix(job):
+    """转换策略变更使用独立片指针，旧成功产物保留，不覆盖旧v4质量语义。"""
+    local = job.parse_options.get("_adapter_recipe")
+    if isinstance(local, dict):
+        return "result-v4.1" if local.get("content_policy_version") else "result-v4"
+    return "result"
+
+
 def load_piece(cache: ParseCache, job, part: PDFPart) -> ParsedDocument | None:
     """按不可变代次核对片结果；已成功片缺失/损坏绝不当作新收费 miss。"""
     try:
         record = ReadyRecord.model_validate(part.result) if part.result is not None else None
         value = piece_recipe(job, part)
-        if record is not None and record.recipe.get("normalizer_version") == "mineru-adapter-v3" and part.state == "done":
-            legacy = value | {"normalizer_version": "mineru-adapter-v3"}
+        if record is not None and record.recipe.get("normalizer_version") in {"mineru-adapter-v3", "mineru-adapter-v4"} and part.state == "done":
+            legacy = value | {"normalizer_version": record.recipe["normalizer_version"]}
+            if "content_policy_version" not in record.recipe:
+                legacy.pop("content_policy_version", None)
             if record.recipe != legacy:
                 raise ValueError
             value = legacy  # 已完成且来源有效的旧片不重算，也不把旧结果冒称为v4。
@@ -313,6 +323,13 @@ def merge_parts(document, manifest: SplitManifest, parsed_parts: list[ParsedDocu
                 if parsed.quality for p in parsed.quality.missing_pages}),
             covered_pages=sorted({b.page for b in blocks}), quarantined_count=sum(q.quarantined_count for q in qualities),
             visual_only_count=sum(q.visual_only_count for q in qualities), base_block_count=len(blocks))
+        quality.visual_review_pages = sorted({part.page_start + page - 1
+            for part, parsed in zip(manifest.parts, parsed_parts) if parsed.quality
+            for page in parsed.quality.visual_review_pages})
+        quality.visual_assets = [asset.model_copy(update={"page": part.page_start + asset.page - 1,
+            "pointer": f"part/{part.ordinal}/" + asset.pointer})
+            for part, parsed in zip(manifest.parts, parsed_parts) if parsed.quality
+            for asset in parsed.quality.visual_assets]
     quarantine = [value | {"part_ordinal": part.ordinal} for part, parsed in zip(manifest.parts, parsed_parts)
                   for value in parsed.quarantined_content]
     return ParsedDocument(doc_id=document.doc_id, file_name=document.file_name, file_type="pdf",
