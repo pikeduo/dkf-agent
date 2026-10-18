@@ -98,7 +98,7 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 - 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，可跨已验证的页边界及原样旁注/页下注释/代码等间隔，最多200页和512个间隔，并受下述HTML预算约束。
 - V1合并HTML必须与目标para的网格/单元格投影完全等价；preproc仅证明各源表行/单元格和归属。受限HTMLParser不渲染/执行，只接受表格结构、br与受检行内eq比较；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。输出始终切取原V1 HTML，不重新序列化layout。
 - 行数相同时沿用已通过的连续V1原字符切片。云端省略重复页首行时，允许后一页连续前缀与前页已验证前缀逐格一致，再复用对应V1原行；其余行必须按原序消耗且最终用尽全部V1行。每页最多核对64个前缀候选，多解拒绝；不拿任意缺行冒充重复表头。输出始终来自V1，每个复用行须在该页preproc中真实存在，报告保留`reused_prefix_rows`。
-- 逐行核对单元格数、td/th、原序、空白标准化后的文字及rowspan；tbody/br包装不改变单元格关系。切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，不改V1的colspan。两页恰有一行被续接时，先尝试旧路径，仅其拒绝后逐格证明前页末行/后页首行的非空白字符拼接完全等于V1，再切取原单元格字符；列边界/标签须一致、rowspan必须为1，不能在实体或公式标签内部切割。原标签、空白、实体和数字不重写；其余行仍严格投影，报告保留`continued_row_count`。不从layout拷正文，不处理任意多页/复杂跨度续接。
+- 逐行核对单元格数、td/th、原序、空白标准化后的文字及rowspan；tbody/br包装不改变单元格关系。切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，不改V1的colspan。旧完整行/重复表头/两页续接路径优先；仅其拒绝后有界证明多页重复表头与相邻页续接的组合。每个续接单元格的前后非空白字符必须完整拼回V1，标签相同、rowspan=1，不能在实体或公式标签内部切割。细化列边界必须由两份完整源页共同通过各自一致的网格投影，不能仅凭一行文字相同接受。每一V1行必须用尽；复用仅限已证明的页首前缀；每条续接行最多属于相邻两页。多解/4096次候选或累计64MiB处理预算超限安全失败，不选首个解释冒充唯一。原标签、行间空白、实体和数字不重写，报告保留`continued_row_count/reused_prefix_rows`。不从layout拷正文，不处理跨三页的单行或复杂rowspan续接。
 - Caption/footnote必须由preproc唯一Span及para/V1去向共同证明：仍挂表的移动结果与后页删除标记按原规则核对；已转为同页独立Text时，必须有唯一原子块、相同index/bbox、逐Span类型/原文/坐标、非跨页标记及唯一同框V1全文对应，才保留其现有Text，不重复挂回表格。未知/缺失/重复/乱序来源拒绝，不从layout补写标题或附注；不能仅凭文字相同或index相同推断。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
 - 恢复按原数组索引写回，保留原page/bbox/类型；新版本/同一拟用身份下Block ID稳定，图像/原ZIP不改写。真正空table即使有caption也不能冒充表体，EMPTY_BLOCK诊断给固定子原因、1-based page/item_index及结构类型；恢复日志不等于持久化成功。
 
@@ -180,6 +180,32 @@ Get-ChildItem "results/stage33_adapter_20261018_095528300/*.json" | ForEach-Obje
 ```
 
 本轮字段调查确认：3份TABLE_EXTRAS均有后页caption在V1中找不到对应原文，不能从layout补造；还须核对其他附注，不能把它们宣布已修复。`d8087523-0aa7-4f4a-8a85-8e055710f0fd`的旧报告另有`unsubmitted_part_count=1`，即使首片本地通过，另一片也不是已付费结果回放；未单独授权前不得提交。Whole的COMPLETENESS保留失败，利用新缺页信号继续只读定位，不自动解除required。
+
+#### 最新剩余11份：区分兼容缺口与V1缺文
+
+用户执行的`results/stage33_current_20261018_105135319/`共10份诊断，另1份没有云Job；这些报告保留不覆盖。这里只读核对已存JSON/HTML结构，没有执行Adapter、pytest或业务恢复。
+
+| 范围 | 真实原因与下一步 |
+|---|---|
+| `ded9c2db…` | 用户报告Adapter/Guard均PASS；仍需原管理Retry才能落库，不等于READY |
+| `6565c738…`、`70261c48…` | 分别3页/6页表格，存在边界单元格续接；6页表同时省略5次重复表头。续接行逐格非空白字符能拼回原V1，现补组合恢复及网格细化证明；完整ZIP是否通过待用户执行 |
+| `5cbbfce1…`、`d8087523…` | 两页各31行合并为60行；后页第二行表头与前页不同，在V1缺失。不能把不同表头当作重复行复制，仍阻塞；后者另有1片未提交，不承诺全本地恢复 |
+| `127c5887…`、`52d0fe1d…`、`cd994345…` | 后页caption在V1各字段中无匹配；最后一份另有footnote缺项。原layout虽保留来源，但当前契约禁止从layout补正文，不能伪称已完整恢复 |
+| `1d4ee624…`、`fdcfaeff…` | 已通过Adapter；缺页分别12及2/59/61。V1和layout保留无文字chart/image，并非装饰横线，不能解除Guard、造OCR文字或把图片路径当可检索正文 |
+| `da426abd…` | 日志确认原件约3.54MB/20页，在Router预检失败、没有云Job，并非200页或200MB平台超限；旧日志未记录具体行数/对象限制，需用户只读预检进一步区分，不自动放大预算或新建云任务 |
+
+先由用户执行Mock回归；本次组合路径只扩展旧版拒绝输入，Normalizer仍v3，旧成功正文/页/ID及缓存不改，无数据库迁移、配置项或新增依赖。对两份组合表格复用原ZIP生成新报告：
+
+```powershell
+python -m pytest tests/test_mineru_adapter_contract.py tests/test_mineru_table_merge.py tests/test_mineru_merge_diagnostic.py tests/test_mineru_local_replay.py -q -ra
+$audit = "results/stage33_chained_$(Get-Date -Format yyyyMMdd_HHmmssfff)"
+foreach ($id in @("6565c738-cbf9-4122-88d4-6cdcb49c93c6", "70261c48-1389-48ae-b9ec-a13b5614cdca")) {
+    $r = Get-Content "results/stage33_current_20261018_105135319/$id.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+    python scripts/mineru_merge_diagnostic.py --job-id $r.job_id --batch-id $r.batch_id --output "$audit/$id.json"
+}
+```
+
+本命令只回放原ZIP，不上传、不发布缓存、不恢复Job。通过后由用户重启原CPU Worker加载新代码，再沿用上述同Hash/同Job/同Batch的管理Retry；不能对仍FAIL或缺片文件盲目重试。若要利用同ZIP的layout补回V1缺失正文，需要先取得用户对正文来源契约及版本变更的明确批准，本轮不擅自实施；无文字图像的OCR补救也须另行授权，不发起新收费任务。
 
 **历史报告03的Guard失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，当时尚未核对原页，报告为`FAIL / COMPLETENESS`。该报告保留不改写；后续只读原页调查及新规则见下节，旧冻结Job默认仍失败，不能直接删除required页、伪造Block或修改SQL。
 

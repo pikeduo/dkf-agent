@@ -173,17 +173,22 @@ class TableHTML(HTMLParser):
             fragments.append(self.text[self.rows[index]["start"]:end])
         return self.text[:self.rows[0]["start"]] + "".join(fragments) + self.text[self.rows[-1]["end"]:]
 
-    def split_boundary_row(self, index: int, left: dict, right: dict) -> tuple[str, str]:
-        """切分已证明跨页续接的原V1行；仅非跨行单元格，原标签和数字均不重写。"""
+    def split_boundary_row(self, index: int, left: dict, right: dict, *,
+                           allow_column_refinement=False) -> tuple[str, str]:
+        """切分V1续接行；网格细化仅供后续整页投影核对，原标签和数字不重写。
+
+        默认仍要求列边界完全相同。显式细化时只推迟列边界检查，调用方必须对
+        两份完整输出执行verify_projection，不能仅凭本行文字相同接受列归属。
+        """
         row = self.rows[index]
         if len(left["cells"]) != len(right["cells"]) or len(left["cells"]) != len(row["cells"]):
             raise merge_evidence_error("TABLE_CELLS")
         fragments = [[], []]
         cursor = row["start"]
         for a, b, target in zip(left["cells"], right["cells"], row["cells"]):
+            keys = ("tag",) if allow_column_refinement else ("tag", "column", "right")
             if (any(cell["rowspan"] != 1 for cell in (a, b, target))
-                    or any(a[key] != b[key] or a[key] != target[key]
-                           for key in ("tag", "column", "right"))):
+                    or any(a[key] != b[key] or a[key] != target[key] for key in keys)):
                 raise merge_evidence_error("TABLE_GRID")
             start, end = target["content_start"], target["content_end"]
             raw = self.text[start:end]

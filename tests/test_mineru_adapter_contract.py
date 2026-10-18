@@ -9,6 +9,7 @@ from app.services.mineru.adapter import restore_merged_text
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.table_html import TableHTML, split_cell_text, verify_projection
 from app.services.mineru.table_merge import partition_rows, restore_merged_tables
+from app.services.mineru import table_merge as table_tool
 from test_mineru_merge import merged_case, normalize_case
 from test_mineru_merge_boundaries import boundary_case
 from test_mineru_stage33_text_compat import multispan_case
@@ -340,3 +341,117 @@ def test_caption_absent_from_original_v1_is_reported_not_invented_from_layout():
     assert (error.value.diagnostic["observed"], error.value.diagnostic["expected"]) == (0, 1)
     assert "PRIVATE" not in str(error.value.diagnostic) and "PRIVATE" not in str(error.value)
     assert (items, pages) == snapshot
+
+
+def chained_table_case(*, count=3, second_join=False):
+    """构造多页重复表头和边界续接的内存元数据，不生成PDF或真实验收素材。"""
+    header = [["项目", "说明"]]
+    rows = [header + [["甲", "前段"]], header + [["", "后段"], ["乙", "中段"]]]
+    if second_join:
+        rows.append(header + [["", "尾段"], ["丙", "末段"]])
+    else:
+        rows.append(header + [["丙", "末段"]])
+    rows.extend(header + [[f"条目{index}", f"数值{index}"]] for index in range(3, count))
+    combined = header + [["甲", "前段<br>后段"], ["乙", "中段<br>尾段" if second_join else "中段"],
+                         ["丙", "末段"]]
+    combined.extend([[f"条目{index}", f"数值{index}"]] for index in range(3, count))
+    items, pages = table_case(footnote=False)
+    for index, source_rows in enumerate(rows):
+        if index >= 2:
+            pages[index] = deepcopy(pages[1])
+            pages[index]["page_idx"] = index
+            items.append(deepcopy(items[2]) | {"page_idx": index})
+        pages[index]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]["html"] = html(source_rows)
+    set_merged(items, pages, html(combined))
+    return items, pages
+
+
+@pytest.mark.parametrize("count,second_join", [(3, False), (3, True), (6, False)])
+def test_chained_continuations_and_repeated_headers_keep_each_source_page(count, second_join):
+    """多页续接与重复表头可组合，完整Adapter保留页码/值/原项/稳定ID和所有源页。"""
+    items, pages = chained_table_case(count=count, second_join=second_join)
+    snapshot, doc_id = (deepcopy(items), deepcopy(pages)), uuid4()
+    restored, summary = restore_merged_tables(items, pages)
+    positions = [index for index, value in enumerate(items) if value["type"] == "table"]
+    assert restored[1] == items[1] and len(restored) == len(items)
+    for page, position in enumerate(positions):
+        raw = pages[page]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]["html"]
+        verify_projection(TableHTML(raw), TableHTML(restored[position]["table_body"]))
+        assert restored[position]["bbox"] == items[position]["bbox"]
+        assert restored[position]["page_idx"] == page
+    assert summary[0]["reused_prefix_rows"] == [0] + [1] * (count - 1)
+    assert summary[0]["continued_row_count"] == (2 if second_join else 1)
+    layout, geometry = {"pdf_info": list(pages.values())}, {page: (600, 800) for page in pages}
+    parsed = normalize_case(items, layout, geometry, doc_id=doc_id)
+    assert [block.page for block in parsed.blocks if block.block_type == "table"] == list(range(1, count + 1))
+    assert normalize_case(items, layout, geometry, doc_id=doc_id) == parsed
+    assert (items, pages) == snapshot
+
+
+def test_continued_row_column_refinement_is_proved_by_complete_source_page():
+    """源页采用不同列网格时全页证明一致细化，不能只凭续接行文字相同接受。"""
+    raw = ["<table><tr><td>标题</td><td>单位</td><td>金额</td></tr>"
+           "<tr><td colspan=\"3\">前段</td></tr></table>",
+           "<table><tr><td colspan=\"2\">后段</td></tr>"
+           "<tr><td>甲</td><td>10</td></tr></table>",
+           html([["乙", "20", "完成"]])]
+    merged = TableHTML("<table><tr><td>标题</td><td>单位</td><td>金额</td></tr>"
+        "<tr><td colspan=\"3\">前段 后段</td></tr>"
+        "<tr><td colspan=\"2\">甲</td><td>10</td></tr>"
+        "<tr><td>乙</td><td>20</td><td>完成</td></tr></table>")
+    sources = [TableHTML(value) for value in raw]
+    pieces, refinements, reused = partition_rows(merged, sources)
+    for source, piece in zip(sources, pieces):
+        verify_projection(source, TableHTML(piece))
+    assert refinements == [False, True, False] and reused == [0, 0, 0]
+    # 同一源列边界在后续行映射不一致，即使所有文字相同也不得接受。
+    sources[1] = TableHTML(raw[1].replace("</table>", "<tr><td>丙</td><td>30</td></tr></table>"))
+    inconsistent = TableHTML(merged.text.replace("<tr><td>乙", "<tr><td>丙</td><td colspan=\"2\">30</td></tr><tr><td>乙"))
+    with pytest.raises(MinerUError):
+        partition_rows(inconsistent, sources)
+
+
+@pytest.mark.parametrize("damage", ["value", "header", "row_order", "extra_row", "bbox", "deleted", "cross_rowspan"])
+def test_chained_mapping_never_repairs_missing_values_or_invalid_sources(damage):
+    """缺值、错表头、乱序、多行和坏来源仍失败；最终Adapter不返回半份Block。"""
+    items, pages = chained_table_case(count=4)
+    if damage in {"value", "header"}:
+        span = pages[2]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]
+        span["html"] = span["html"].replace("末段", "被改写") if damage == "value" else span["html"].replace("项目", "其他列")
+    elif damage == "row_order":
+        rows = TableHTML(items[0]["table_body"])
+        fragments = [rows.text[row["start"]:row["end"]] for row in rows.rows]
+        fragments[-2], fragments[-1] = fragments[-1], fragments[-2]
+        set_merged(items, pages, "<table>" + "".join(fragments) + "</table>")
+    elif damage == "extra_row":
+        set_merged(items, pages, items[0]["table_body"].replace("</table>", "<tr><td>多项</td><td>99</td></tr></table>"))
+    elif damage == "bbox":
+        pages[2]["para_blocks"][0]["bbox"][0] += 30
+    elif damage == "deleted":
+        pages[2]["para_blocks"][0]["blocks"][0]["lines_deleted"] = False
+    else:
+        set_merged(items, pages, items[0]["table_body"].replace("<td>甲</td>", '<td rowspan="2">甲</td>')
+                   .replace("<td>乙</td>", ""))
+    snapshot = deepcopy(items), deepcopy(pages)
+    with pytest.raises(MinerUError) as error:
+        normalize_case(items, {"pdf_info": list(pages.values())}, {page: (600, 800) for page in pages})
+    assert error.value.code in {"MERGE_EVIDENCE", "EMPTY_BLOCK"}
+    assert (items, pages) == snapshot
+
+
+def test_chained_mapping_refuses_ambiguous_reuse_or_empty_continuation():
+    """空单元格既可重复又可续接时存在多解，不能任意选择其中一种来源解释。"""
+    raw = html([["列"], [""]])
+    with pytest.raises(MinerUError) as error:
+        table_tool.partition_chained_rows(TableHTML(raw), [TableHTML(raw) for _ in range(3)])
+    assert error.value.diagnostic["reason"] == "TABLE_ROW_MAPPING_AMBIGUOUS"
+
+
+@pytest.mark.parametrize("budget", ["ROW_MAPPING_MAX_ATTEMPTS", "ROW_MAPPING_MAX_BYTES"])
+def test_chained_mapping_budget_exhaustion_never_returns_first_candidate(monkeypatch, budget):
+    """组合搜索超预算固定失败，不把尚未排除其他解释的首个候选当作成功。"""
+    items, pages = chained_table_case()
+    monkeypatch.setattr(table_tool, budget, 0)
+    with pytest.raises(MinerUError) as error:
+        restore_merged_tables(items, pages)
+    assert error.value.diagnostic["reason"] == "TABLE_LIMIT"

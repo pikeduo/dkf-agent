@@ -11,6 +11,10 @@ from app.services.mineru.table_html import TableHTML, verify_projection
 # 另一张表不是间隔，普通Text/Title和未知结构也绝不能跳过。
 TABLE_GAP_TYPES = MERGE_BOUNDARY_TYPES | (PRESERVED_GAP_TYPES - {"table"})
 
+# 仅对旧映射拒绝的复杂续接尝试有界证明，避免重复表头造成组合搜索失控。
+ROW_MAPPING_MAX_ATTEMPTS = 4096
+ROW_MAPPING_MAX_BYTES = 64 * 1024**2
+
 
 def matched_table(item, pages, items):
     """V1/para/preproc按同页类型和bbox唯一匹配，前后父index一致且V1来源不重复。"""
@@ -252,13 +256,113 @@ def partition_continued_rows(merged, sources):
     return pieces, [False, False], [0, 0]
 
 
+def partition_chained_rows(merged, sources):
+    """证明多页表中的重复页首行及相邻页续接，输出只取V1原行/原单元格切片。
+
+    一个续接行至多属于相邻两页；整页网格映射统一核对，支持源页列网格的
+    单调细化。搜索须完整结束且只有一个解释，超预算/多解/缺字均拒绝。
+    此路径只处理旧算法拒绝的输入，不改变已成功v3结果及缓存的字符语义。
+    """
+    if not 2 <= len(sources) <= 200 or sum(len(s.rows) for s in sources) <= len(merged.rows):
+        raise merge_evidence_error("TABLE_ROWS")
+    head, tail = merged.text[:merged.rows[0]["start"]], merged.text[merged.rows[-1]["end"]:]
+    results, budget = [], [0, 0]
+    recoverable = {"TABLE_ROWS", "TABLE_CELLS", "TABLE_GRID", "TABLE_CONTINUATION_MARKUP"}
+
+    def spend(size=0):
+        """限制候选数量和累计HTML处理量；预算耗尽不能按先找到的候选宣布唯一。"""
+        budget[0] += 1
+        budget[1] += size
+        if budget[0] > ROW_MAPPING_MAX_ATTEMPTS or budget[1] > ROW_MAPPING_MAX_BYTES:
+            raise merge_evidence_error("TABLE_LIMIT")
+
+    def row_fragment(table, index):
+        """直接取已存V1行的原字符，不从source/layout序列化单元格正文。"""
+        row = table.rows[index]
+        stop = table.rows[index + 1]["start"] if index + 1 < len(table.rows) else row["end"]
+        return table.text[row["start"]:stop]
+
+    def visit(ordinal, cursor, previous, incoming, forced_prefix, pieces, refinements, reused):
+        """按页枚举来源可证明的前缀/续接，必须耗尽V1全部行且完整保留每个源页。"""
+        if ordinal == len(sources):
+            if cursor == len(merged.rows):
+                results.append((pieces, refinements, reused))
+                if len(results) > 1:
+                    raise merge_evidence_error("TABLE_ROW_MAPPING_AMBIGUOUS")
+            return
+        source = sources[ordinal]
+        limit = min(64, len(previous.rows) if previous is not None else 0, len(source.rows))
+        prefixes = range(limit + 1) if forced_prefix is None else (forced_prefix,)
+        for prefix in prefixes:
+            if not 0 <= prefix <= limit:
+                continue
+            try:
+                spend()
+                if prefix:
+                    before, after = source.slice_rows(0, prefix), previous.slice_rows(0, prefix)
+                    spend(len(before) + len(after))
+                    verify_projection(TableHTML(before), TableHTML(after))
+                fragments = [row_fragment(previous, index) for index in range(prefix)]
+                continued = {prefix} if incoming is not None else set()
+                if incoming is not None:
+                    fragments.append(incoming)
+                remaining = len(source.rows) - len(fragments)
+                # 无跨页续接或在末行与下一页首个非重复行续接；不切任意内部行。
+                for joining in (False, True):
+                    count = remaining - int(joining)
+                    stop = cursor + count
+                    if count < 0 or stop > len(merged.rows):
+                        continue
+                    if joining and (ordinal + 1 == len(sources) or stop == len(merged.rows)):
+                        continue
+                    if not joining and ordinal + 1 == len(sources) and stop != len(merged.rows):
+                        continue
+                    base = fragments + [row_fragment(merged, index) for index in range(cursor, stop)]
+                    next_source = sources[ordinal + 1] if joining else None
+                    next_prefixes = (range(min(64, len(source.rows), len(next_source.rows) - 1) + 1)
+                                     if joining else (None,))
+                    for next_prefix in next_prefixes:
+                        try:
+                            spend()
+                            if joining:
+                                left, right = merged.split_boundary_row(stop, source.rows[-1],
+                                    next_source.rows[next_prefix], allow_column_refinement=True)
+                                # 行间空白也来自原V1，归前页，不因单元格切分被丢弃。
+                                row_end = merged.rows[stop]["end"]
+                                next_start = (merged.rows[stop + 1]["start"]
+                                              if stop + 1 < len(merged.rows) else row_end)
+                                left += merged.text[row_end:next_start]
+                            else:
+                                left = right = None
+                            raw = head + "".join(base + ([left] if joining else [])) + tail
+                            spend(len(raw))
+                            shape = TableHTML(raw)
+                            rows = continued | ({len(source.rows) - 1} if joining else set())
+                            verify_projection(source, shape, continuation_rows=rows)
+                            visit(ordinal + 1, stop + int(joining), shape, right, next_prefix,
+                                  pieces + [raw], refinements + [source.width != shape.width],
+                                  reused + [prefix])
+                        except MergeEvidenceError as error:
+                            if error.diagnostic["reason"] not in recoverable:
+                                raise
+            except MergeEvidenceError as error:
+                if error.diagnostic["reason"] not in recoverable:
+                    raise
+
+    visit(0, 0, None, None, 0, [], [], [])
+    if not results:
+        raise merge_evidence_error("TABLE_ROWS", observed=len(merged.rows),
+                                   expected=sum(len(source.rows) for source in sources))
+    return results[0]
+
+
 def partition_rows(merged, sources):
     """按完整网格投影分配V1行，兼容云端去除跨页重复页首行，不猜任意缺行。
 
     原行数相等时保留原切片行为。行数减少时，只允许后一页的连续前缀与前页
     已验证前缀一致，并复用对应V1原行；其他行逐一消耗，最终必须用尽全部V1。
-    两页仅少一行时也尝试逐格证明末行/首行续接。页首复用最多64行，任一来源
-    有多个可行映射或跨rowspan切口均安全拒绝。
+    两页仅少一行时先沿用既有续接；仍拒绝时才尝试多页重复前缀与续接的组合。
+    页首复用最多64行，任一来源有多个可行映射或跨rowspan切口均安全拒绝。
     """
     pieces, refinements, reused, previous = [], [], [], []
     cursor = 0
@@ -306,8 +410,7 @@ def partition_rows(merged, sources):
                 except MergeEvidenceError as error:
                     if error.diagnostic["reason"] not in {"TABLE_CELLS", "TABLE_GRID", "TABLE_CONTINUATION_MARKUP"}:
                         raise
-            raise merge_evidence_error("TABLE_ROWS", observed=len(merged.rows),
-                                       expected=sum(len(value.rows) for value in sources))
+            return partition_chained_rows(merged, sources)
         piece, shape, prefix, cursor, previous = choices[0]
         pieces.append(piece)
         refinements.append(source.width != shape.width)
