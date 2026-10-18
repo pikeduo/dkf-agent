@@ -63,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """按冻结版本预检资源，行锁保护全量替换；切片/状态同事务，失败整体回滚。"""
+    """记录实际冻结版本并事务切片，识别旧Worker；切片/状态同事务，失败整体回滚。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -90,7 +90,8 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     blocks = list(session.scalars(select(DocumentBlock).where(DocumentBlock.doc_id == doc_id)
                                  .order_by(DocumentBlock.block_index.asc().nulls_last())))
     log_event("chunk.started", doc_id=doc_id, kb_id=document.kb_id, task_id=task_id,
-              block_count=len(blocks), chunk_size=options.size, chunk_overlap=options.overlap)
+              block_count=len(blocks), chunk_size=options.size, chunk_overlap=options.overlap,
+              step=options.version)
     inputs = [SourceBlock(block.block_id, block.block_index, block.page, block.section,
                           block.block_type, block.text, block.source, block.bbox,
                           getattr(block, "provenance", None)) for block in blocks]

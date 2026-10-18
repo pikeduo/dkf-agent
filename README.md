@@ -336,6 +336,8 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 
 若旧整表Chunk报`EMBEDDING_TOO_LONG`，待活动任务结束后手动重启CPU/GPU Worker，再调用`POST /api/admin/documents/{doc_id}/reindex`，从已有成功解析缓存重建新行切片并自动接续向量化/入库。普通Retry沿用旧Chunk。此操作只处理指定文档、无MinerU请求；解析质量保留，原PARTIAL可结束为PARTIAL_READY。若仍超限，查看`embedding.chunk_rejected`中的chunk_id、原数组序号、真实Token数及限制数量，保留原文不截断。
 
+`chunk.started`的`step`记录实际冻结的`block-chunk-v*`版本；只重启API不会更新已运行的CPU Worker。旧成功Office Job只有v2/v3缓存时，可用显式离线工具`python scripts/upgrade_mineru_office_cache.py --help`核对原Job/同Hash原件后转换并发布目标新缓存，再调用原Reindex。默认只核验，`--execute`运行本地Adapter，`--publish`才发布缓存；不请求MinerU或写业务SQL。升级前停止相关API/Worker，原成功缓存及Job不改；只支持整份DOCX/PPTX，身份/配置不符或目标已有缓存时拒绝覆盖，详见[恢复说明](docs/STAGE33_EVALUATION.md#最新清单30份failed68份partial_ready的恢复)。
+
 ### 运行日志
 
 API/Worker 业务日志为 UTF-8 中文可读摘要，共用 `LOG_DIR`，每天一份 `knowledge-service-YYYY-MM-DD.log`，重启继续追加；框架原始日志仍在终端。默认 INFO，记录接口、上传、解析、重试及结果数量，不记录正文或密钥；解析质量仍需对照原件。

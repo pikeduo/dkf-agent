@@ -29,6 +29,7 @@
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |
+| mineru-cache-upgrade-cli | MinerU Cache Upgrade CLI |
 | mineru-split-cli | MinerU Split CLI |
 | dataset-evaluation-cli | Dataset Evaluation CLI |
 | unknown / 未注册角色 | 未知进程 |
@@ -91,9 +92,10 @@ MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹�
 | `cache.hit / miss / stored / busy` | 缓存命中/未命中/完整结果已存盘/同内容活动任务拒绝重复；stored 不代表 SQL 已提交 |
 | `cache.persisted / maintenance_requested` | 缓存已事务回放 / 显式 Reindex或Force Reparse 请求；固定操作、缓存键、命中和数量摘要 |
 | `chunk.dispatched / dispatch_failed / rejected` | 独立切片投递、确认失败及状态/检查点拒绝，不记录正文或配置原文 |
-| `chunk.started / persisted / skipped` | 按 Block 原序开始切片、事务提交成功及旧/已完成消息跳过；数量、估算长度参数、超目标数和耗时 |
+| `chunk.started / persisted / skipped` | 按 Block 原序开始切片、事务提交成功及旧/已完成消息跳过；started的step为实际冻结切片版本，另记数量、估算长度参数、超目标数和耗时 |
 | `chunk.table_split / table_split_skipped` | HTML完整行/rowspan组或原生TSV逻辑记录分片；无法证明边界则整表保留。只记block_id、页码、阶段及片数/安全原因，不含单元格、HTML或字符来源明细，尚未代表切片事务提交 |
 | `chunk.retry / failed / error_record_failed` | 临时数据库有限重试、安全终止及错误未能写库，不输出异常原文 |
+| `cache.upgrade_validated / upgrade_published / upgrade_rejected` | 原Office成功Job缓存身份核验、显式发布目标新缓存及安全拒绝；无云访问，发布不代表业务入库。只记doc/job/batch、数量与质量，不输出正文、路径或参数原文 |
 | `embedding.model_loaded / encoded / encode_failed / encode_skipped` | 模型加载/统一编码/安全错误/空输入跳过；模型名、设备、维度、数量和耗时，不记录正文或向量 |
 | `embedding.dispatched / dispatch_failed / rejected / started` | GPU 任务投递/确认失败/拒绝/开始，独立 task_id 和 doc_id 关联 |
 | `embedding.batch_completed / persisted / skipped` | 批次暂存/完整文件与 SQL 状态提交/旧消息跳过；暂存不等于完整发布，INDEXING 只表示等待入库 |

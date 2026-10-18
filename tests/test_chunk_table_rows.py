@@ -220,6 +220,19 @@ def test_native_tsv_new_policy_does_not_change_frozen_versions(version):
     assert_evidence(current, [source])
 
 
+def test_two_sheet_timeseries_uses_v4_rows_instead_of_two_oversized_v3_chunks():
+    """复现两Sheet/1640个短日期数值行：v3整表，v4必须分组且原行/字符全部保留。"""
+    sources = [block(1, "说明\t原值\n来源\t本地", "table", section="说明"),
+        block(2, "\n".join(f"2020-01-{index % 28 + 1:02d}\t-{index}.123456789" for index in range(1640)),
+              "table", section="数值")]
+    old = chunks(sources, ChunkOptions(version=CAPTION_VERSION), file_type="xlsx")
+    current = chunks(sources, file_type="xlsx")
+    assert len(old) == 2 and old[1].metadata["oversized"]
+    assert len(current) > 2 and all(chunk.metadata["chunker_version"] == VERSION for chunk in current)
+    assert all(not chunk.metadata["oversized"] and len(chunk.text) <= 2000 for chunk in current)
+    assert_evidence(current, sources)
+
+
 @pytest.mark.parametrize("damage", ["quote", "width", "single_long_row", "single_column", "cloud"])
 def test_native_rows_never_guess_bad_structure_or_split_inside_long_record(damage):
     """坏引号/列数、单列不明格式、单个超长记录或云端TSV不猜切，更不截断字段。"""

@@ -714,6 +714,17 @@ def test_nonfinite_numbers_are_omitted_without_losing_event(events):
     assert "duration_ms" not in record and "delay_seconds" not in record
 
 
+def test_cache_upgrade_cli_and_chunk_version_use_registered_safe_summaries(events):
+    """旧缓存升级角色/事件集中注册，切片版本只记固定摘要，不输出私有正文或路径。"""
+    assert logs.ROLE_LABELS["mineru-cache-upgrade-cli"] == "MinerU Cache Upgrade CLI"
+    logs.log_event("cache.upgrade_published", doc_id=uuid4(), job_id=uuid4(), state="PARTIAL",
+                   text="SECRET_BODY", output_dir="SECRET_PATH")
+    logs.log_event("chunk.started", step="block-chunk-v4", block_count=2)
+    first, second = records(events)
+    assert first["state"] == "PARTIAL" and "业务入库尚未执行" in events.getvalue()
+    assert second["step"] == "block-chunk-v4" and "SECRET" not in events.getvalue()
+
+
 @pytest.mark.parametrize("field", ["drawing_count", "line_count", "object_count", "limit_count"])
 @pytest.mark.parametrize("value", ["SECRET_BODY", -1, True, 1.5, 2**63, float("nan")])
 def test_preflight_counts_reject_non_integer_or_sensitive_values(events, field, value):

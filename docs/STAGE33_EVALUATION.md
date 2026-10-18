@@ -2,7 +2,86 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 2026-10-18 Office失败修复与分组恢复
+## 最新清单：30份FAILED、68份PARTIAL_READY的恢复
+
+用户最新输出中，剩余6份`EMBEDDING_TOO_LONG`的Chunk仍为`block-chunk-v3`（已逐份只读查询确认）；原生TSV和大表策略需要CPU Worker加载v4后**Reindex**才生效。重试Embedding不会改变原Chunk。已补充`chunk.started`的`step=实际冻结版本`日志，避免只看磁盘源码误判运行版本。
+
+| 数量 | 当前原因 | 恢复方式与边界 |
+|---|---|---|
+| 6+1 | 旧版切片导致超Token/源文本预算 | 已有成功缓存，加载v4后串行Reindex，不请求MinerU |
+| 6+2 | DOCX排版模板/customXml误拒绝 | 兼容代码已编写，加载新Worker后Retry；可能首次提交0～8个新云文件，须用户确认费用 |
+| 3 | 同Hash原成功Job只有v2缓存，当前目标无缓存/Job | 新增显式本地缓存升级CLI，核对原成功Job及原ZIP，转换后由原Reindex接续 |
+| 1 | 单XML 20204999字节大于16MiB | 不取消资源保护，最后单独调整既有预算至32MiB，再由用户恢复；不能保证无后续问题/费用 |
+| 9 | 真正的外部工作簿、图片/OLE依赖 | 保留失败，不能伪造缺失内容或将预览/缓存值当完整结果 |
+| 2 | 原MinerU Job远端failed | 没有已证明成功结果；需要平台具体原因，不自动重投、Force或追加批次 |
+
+68份PARTIAL_READY已存在真实向量，但不等于完整内容通过。19:57本地质量快照按优先原因分为：10份缺required页、27份含纯视觉页、12份存在空结构/表格内容，另19份需进一步质量审核；分类互斥，仅用于定位，不据此猜测图片语义或批量改READY。最新逐文档缺页、待审页、警告及错误由下述只读脚本重新查询并输出CSV。
+
+### 1. 用户执行定向回归并确认进程安全退出
+
+Codex仅编写，未执行以下测试、真实转换、缓存发布或任务恢复：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_office_cache_upgrade.py tests/test_stage33_office_recovery.py tests/test_chunk_table_rows.py tests/test_chunk_splitter.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+python -m celery -A app.core.celery_app:celery_app inspect active
+python -m celery -A app.core.celery_app:celery_app inspect reserved
+python -m celery -A app.core.celery_app:celery_app inspect scheduled
+```
+
+先暂停新的导入，待相关任务安全结束后正常停止API/全部CPU及GPU Worker，不强杀任务、不清队列。下面缓存升级期间只需PostgreSQL保持可用；停止相关进程可避免文件发布与其他文档维护交错。本轮无新迁移、依赖或环境变量。
+
+### 2. 三份旧成功缓存显式升级（本地，无云请求）
+
+`upgrade_mineru_office_cache.py`默认只核验身份；`--execute`才运行本地Adapter，`--publish`才发布目标新缓存。只支持整份DOCX/PPTX，保留原Job/Batch/缓存，不用于PDF分片、Hybrid或XLSX Native主结果。数据库事务强制READ ONLY并回滚；原件Hash、所有缓存文件Hash、原Job专属缓存回执、云参数Hash、冻结Guard/覆盖范围必须匹配。不会复制旧Normalizer标签来冒充升级。报告保留具体`identity_diagnostic.failed_check`；失败时停止，不下载或重新上传。
+
+**在调整任何ROUTER配置之前执行**，配置/云参数变化仍拒绝；不把16→32MiB的资源许可混入旧缓存升级。
+
+```powershell
+$kbId = '158030a1-42d6-42ee-835d-02fdbff23f81'
+$upgrades = @(
+    @{ Source='e5254d97-ae7b-4235-98e0-0e3b12e2c08d'; Job='8790d023-7981-4616-a62b-f8056ce77786'; Target='be97464e-7ecc-4fd3-9af7-14a830c3bdf6' },
+    @{ Source='cd8126f6-2d64-4277-9025-b86a9dff7479'; Job='5feb103f-0895-470f-9d21-ee10e295f56f'; Target='5bf1bd8a-8879-4472-a2c7-4ff04bcba0ef' },
+    @{ Source='1f76ed22-b166-42d2-bb9f-cc6d595a941e'; Job='cd5e7a78-d808-4d03-bee4-09435185409c'; Target='d517319d-c348-49c6-925e-4abf894d1b8d' }
+)
+foreach ($entry in $upgrades) {
+    $report = "results/cache_upgrade_$($entry.Target)_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
+    python scripts/upgrade_mineru_office_cache.py `
+        --source-doc-id $entry.Source --source-job-id $entry.Job `
+        --target-doc-id $entry.Target --kb-id $kbId `
+        --execute --publish --output $report
+    if ($LASTEXITCODE -ne 0) { throw "升级停止，请查看 $report；未触发云任务。" }
+}
+```
+
+预期`CACHE_PUBLISHED_NOT_RECOVERED`、`cache_published=true`、`cloud_submitted=false`、`database_modified=false`；这还不是READY。质量如实保留，转换后的PARTIAL不冒充完整。已有目标latest指针时拒绝覆盖；若上次发布已完成，先查看报告并直接用Reindex，不反复执行升级CLI。若发布中途磁盘/缓存错误，报告`publication_attempted=true, cache_published=null`，表示可能已有部分产物，不能解读成“从未写入”；先核对目标latest及报告，不清缓存或盲目重跑。
+
+### 3. 原知识库分组恢复及全部200份状态核验
+
+按README手动启动API和加载新代码的CPU/GPU Worker。只读报告可随时执行；默认不会重投任何任务：
+
+```powershell
+# 全部200份实时状态，生成新的逐文档CSV，不改原run/checkpoint。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+
+# 只串行Reindex已检查过且已有成功缓存的失败项；READY/PARTIAL_READY保留。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteLocal
+
+# 仅在确认8份首次云解析费用后，由用户执行另一组：
+powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteNewParse -AllowCloud
+```
+
+脚本始终登记原知识库全部200份，但每次只对一份执行POST并有界等待；已有活动编排不覆盖、请求确认失败/超时不盲重发。新解析只允许前述8个已修预检的固定身份，发现已有Job停止，不把真正缺附件的9份加入收费列表。缓存升级3项缺目标缓存时留`LOCAL_CACHE_REQUIRED`，不会误走云重试。若重建后仍出现v3 Chunk，立即停止后续恢复并提示重启旧Worker。一个文档确实失败时保留其原因，继续登记其他文档；失败不被标成功。
+
+报告位于`results/stage33/recovery_status_*.csv`，记录所有200份的`status/passed/action/cause/error`及`warnings/missing_pages/visual_review_pages/diagnostic_reasons`。再次检查用默认命令，不读取旧checkpoint状态，不自动刷新run或启动QA评测。CSV含文件名与内部质量摘要，仅保留在本地受限results目录。
+
+### 4. 本轮不能自动消除的项
+
+- `082ebed3-a4e9-4b61-934b-4025b472192e`：先完成所有旧配置缓存操作，再由用户调整现有`ROUTER_XML_PART_MAX_MB=32`并重启相关API/CPU进程；允许32MiB不等于跳过总XML/DTD/实体检查。确认潜在首次云费用后，只对该文档手动`POST /api/admin/documents/082ebed3-a4e9-4b61-934b-4025b472192e/retry`。当前脚本不替用户更改配置或授权这笔费用。
+- 外部内容依赖9份、远端failed 2份的真实身份见下方历史清单；需要缺失的原依赖或原Batch具体原因，不以普通Retry/Force绕过。
+- PARTIAL_READY的68份：可靠块/向量已入库，可继续查看来源和质量；正式全量验收仍须完整READY。缺页、缺表体、纯视觉内容必须按原件/原ZIP核对，不能统一清警告或把未识别图像当装饰。当前没有据日志凭空补文的修复。
+
+## 19:57历史检查点与既有Office兼容修复
 
 本轮只读检查19:57检查点及日志：READY101、PARTIAL_READY68、FAILED31，全部31份失败属于OCB；不是只处理了部分200份。修改代码/编写测试不代表失败文件已恢复，本轮没有执行测试、回放、API重投或GPU。
 
@@ -122,7 +201,7 @@ $newParse | ForEach-Object { Invoke-Stage33OfficeRecovery -DocId $_ -Operation r
 | 5bf1bd8a-8879-4472-a2c7-4ff04bcba0ef | cd8126f6-2d64-4277-9025-b86a9dff7479 | 5feb103f-0895-470f-9d21-ee10e295f56f |
 | d517319d-c348-49c6-925e-4abf894d1b8d | 1f76ed22-b166-42d2-bb9f-cc6d595a941e | cd5e7a78-d808-4d03-bee4-09435185409c |
 
-原缓存包含`raw/mineru_result.zip`，但当前诊断CLI仅支持PDF，不能把这些Office传给PDF命令。当前API也没有显式v2跨文档升级入口；不能复制latest指针、改Normalizer或Force代替身份校验。下一步先只读查询原Job批次/冻结参数/当前代次，再决定受控本地升级方式；本轮没有实现这条升级链路：
+原缓存包含`raw/mineru_result.zip`，PDF诊断CLI不能用于这些Office。现已新增本页顶部的显式本地升级CLI及回归，尚未由Codex执行；不能复制latest指针、改Normalizer标签或Force代替身份校验。下面保留原成功Job只读查询命令：
 
 ```powershell
 @('e5254d97-ae7b-4235-98e0-0e3b12e2c08d','cd8126f6-2d64-4277-9025-b86a9dff7479','1f76ed22-b166-42d2-bb9f-cc6d595a941e') |
