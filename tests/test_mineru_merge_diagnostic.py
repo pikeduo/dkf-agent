@@ -100,7 +100,7 @@ def test_missing_zip_is_blocked_and_does_not_revive_failed_job(context):
 
 
 def test_existing_zip_reproduces_safe_subreason_without_exporting_text_or_bbox(context, tmp_path):
-    """真实Adapter消费内存ZIP的落盘副本；仅定位子原因，原文/坐标/路径/签名URL不进报告。"""
+    """来源单侧多出Span须报目标数量不符；诊断仍不得导出原文、坐标或私有路径。"""
     document, job, settings, _ = context
     values, layout, _ = merged_case(originals=("PRIVATE_BODY", "PRIVATE_BODY_2"))
     layout["pdf_info"][0]["preproc_blocks"][1]["lines"][0]["spans"].append(
@@ -110,7 +110,11 @@ def test_existing_zip_reproduces_safe_subreason_without_exporting_text_or_bbox(c
     snapshot = deepcopy(vars(job))
     report = tool.inspect_job(document, job, settings, "original-batch", archive)
     assert report["status"] == "FAIL" and report["error_code"] == "MERGE_EVIDENCE"
-    assert report["merge_diagnostic"]["reason"] == "LINE_SPAN_COUNT"
+    # 相同Span可合法多次出现；本夹具只增加来源项，故在来源/目标序列核对时失败。
+    diagnostic = report["merge_diagnostic"]
+    assert diagnostic["reason"] == "TARGET_SPAN_COUNT"
+    assert diagnostic["stage"] == "adapter.restore_merged_text"
+    assert (diagnostic["observed"], diagnostic["expected"]) == (2, 3)
     assert report["merge_diagnostic"]["original_page"] == 1
     assert report["zip_size_bytes"] == archive.stat().st_size
     serialized = json.dumps(report)
