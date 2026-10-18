@@ -110,6 +110,7 @@ FIELDS = {
     "line_count",
     "object_count",
     "limit_count",
+    "token_count",
     "chart_count",
     "source_document_count",
     "hybrid_visual_candidate_count",
@@ -231,6 +232,8 @@ EVENT_LABELS = {
     "chunk.dispatch_failed": "切片投递确认失败，保留检查点",
     "chunk.rejected": "切片请求状态或检查点校验未通过",
     "chunk.started": "开始按原 Block 阅读顺序切片",
+    "chunk.table_split": "长表格已按完整原行分组，尚未提交切片事务",
+    "chunk.table_split_skipped": "长表格行边界无法安全确认，保留原表及超目标标记",
     "chunk.persisted": "切片已事务落库，等待向量化",
     "chunk.skipped": "跳过已完成或过期切片任务",
     "chunk.retry": "切片数据库操作等待重试",
@@ -239,6 +242,7 @@ EVENT_LABELS = {
     "embedding.model_loaded": "本地 BGE-M3 模型已加载",
     "embedding.encoded": "本地 Dense 向量编码完成，尚未代表文档任务提交",
     "embedding.encode_failed": "本地向量编码安全失败",
+    "embedding.chunk_rejected": "切片超过模型真实Token上限，保留原文与来源，未发布向量结果",
     "embedding.encode_skipped": "跳过空的本地向量编码请求，未加载模型",
     "embedding.dispatched": "文档 GPU 批处理任务已投递",
     "embedding.dispatch_failed": "GPU 投递确认失败，保留检查点",
@@ -418,6 +422,7 @@ FIELD_LABELS = {
     "line_count": "文本行数",
     "object_count": "图像及绘图数",
     "limit_count": "限制数量",
+    "token_count": "真实Token数",
     "chart_count": "图表数",
     "source_document_count": "源文档数",
     "hybrid_visual_candidate_count": "视觉候选数",
@@ -478,14 +483,14 @@ def shared_file_lock(directory: Path):
 
 
 def safe_fields(fields: dict) -> dict:
-    """保留白名单标量；预检计数仅接受有界非负整数，标识仅接受 UUID。"""
+    """保留白名单标量；资源及Token计数仅接受有界非负整数，标识仅接受UUID。"""
 
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
             continue
         # 资源计数不能夹带正文、布尔值或任意对象，零计数也必须保留。
-        if key in {"drawing_count", "line_count", "object_count", "limit_count"} and (
+        if key in {"drawing_count", "line_count", "object_count", "limit_count", "token_count"} and (
             type(value) is not int or not 0 <= value <= 2**31 - 1
         ):
             continue

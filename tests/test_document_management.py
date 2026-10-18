@@ -101,6 +101,29 @@ def test_reindex_changes_only_management_and_processing_generation_and_starts_ca
     assert tool.public_management(document).stage == "parse"
 
 
+def test_reindex_after_token_limit_rebuilds_v2_chunks_from_existing_parse_generation(context):
+    """旧整表向量超限后显式Reindex走缓存回放，新切片采用v2并保持原解析质量。"""
+    from app.services.chunk.processing import checkpoint_options, prepare_chunk
+    from app.services.chunk.splitter import ChunkOptions, LEGACY_VERSION, VERSION
+
+    document, session, settings = context
+    document.status, document.error_message = "FAILED", str(EmbeddingError("EMBEDDING_TOO_LONG"))
+    document.chunk_config = {"options": ChunkOptions(version=LEGACY_VERSION).snapshot(),
+                             "source_parse_task_id": str(document.processing_task_id)}
+    document.parse_quality = {"content": "PARTIAL", "missing_pages": [12]}
+    quality = document.parse_quality.copy()
+    previous = document.chunk_task_id, document.embedding_task_id, document.index_task_id
+    tool.prepare_management(session, document, settings, "reindex")
+    action = tool.next_action(session, document, settings)
+    assert action["operation"] == "reindex" and action["stage"] == "parse"
+    assert document.chunk_task_id is document.embedding_task_id is document.index_task_id is None
+    # 模拟原缓存回放完成；只调用现有切片准备，不读文件/连接队列或执行Parser。
+    document.status = "CHUNKING"
+    chunk_id, dispatch = prepare_chunk(session, document, settings)
+    assert dispatch and chunk_id not in previous and checkpoint_options(document).version == VERSION
+    assert document.parse_quality == quality and document.embedding_task_id is document.index_task_id is None
+
+
 def test_reindex_pipeline_prepares_each_existing_stage_once_and_stops_at_ready(context, monkeypatch):
     """缓存回放后按阶段依次投递，一个阶段一次；重复编排消息不重建Chunk/GPU/索引。"""
     document, session, settings = context

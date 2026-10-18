@@ -138,14 +138,51 @@ def test_invalid_inputs_are_rejected_before_model_load(stub_service, texts):
 
 
 def test_true_token_limit_refuses_truncation(stub_service):
-    """含特殊 token 的真实长度超限必须拒绝，长表格或 Query 不静默编码前缀。"""
+    """超限仍拒绝截断，并提供安全的输入序号及含特殊token的实际长度。"""
 
     service, model, _, _ = stub_service
-    with pytest.raises(EmbeddingError, match="EMBEDDING_TOO_LONG"):
+    with pytest.raises(EmbeddingError, match="EMBEDDING_TOO_LONG") as error:
         service.embed_documents(["长" * 31])
+    assert error.value.diagnostic == {"item_index": 1, "token_count": 33, "limit_count": 32}
     assert model.calls == []
     with pytest.raises(EmbeddingError, match="EMBEDDING_TOO_LONG"):
         service.embed_query("长" * 31)
+
+
+def test_token_limit_diagnostic_uses_order_across_service_batches(stub_service):
+    """跨内部批次的超限序号对应原输入，不因批次切换回到1，也不返回部分向量。"""
+    service, model, _, _ = stub_service
+    with pytest.raises(EmbeddingError) as error:
+        service.embed_documents(["甲", "乙", "长" * 31])
+    assert error.value.code == "EMBEDDING_TOO_LONG"
+    assert error.value.diagnostic["item_index"] == 3 and model.calls == [["甲", "乙"]]
+
+
+def test_row_chunks_can_reach_embedding_without_truncating_the_source(stub_service):
+    """新行切片经原Service逐片编码；Stub证明长度衔接及来源，不代表真实GPU已验收。"""
+    from dataclasses import replace
+
+    from test_chunk_splitter import assert_evidence, block, chunks
+    from test_chunk_table_rows import html_table
+
+    service, model, _, _ = stub_service
+    service.options = replace(service.options, max_length=8192)
+    source = block(1, html_table(rows=300), "table")
+    with pytest.raises(EmbeddingError, match="EMBEDDING_TOO_LONG"):
+        service.embed_documents([source.text])
+    assert model.calls == []
+    drafts = chunks([source])
+    vectors = service.embed_documents([draft.text for draft in drafts])
+    assert len(vectors) == len(drafts) > 1
+    assert [text for batch in model.calls for text in batch] == [draft.text for draft in drafts]
+    assert_evidence(drafts, [source])
+
+
+@pytest.mark.parametrize("value", ["SECRET_BODY", True, -1, 0, 1.5, 2**63])
+def test_length_error_diagnostic_rejects_untrusted_counts(value):
+    """新增诊断只能携带受限正整数，不能借错误对象泄漏原文或路径。"""
+    error = EmbeddingError("EMBEDDING_TOO_LONG", item_index=value, token_count=value, limit_count=value)
+    assert error.diagnostic == {} and "SECRET" not in str(error)
 
 
 @pytest.mark.parametrize("vectors", [[], [[1.0] * 3], [[0.0] * DIMENSION],

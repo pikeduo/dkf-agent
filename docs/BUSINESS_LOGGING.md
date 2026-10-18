@@ -91,10 +91,12 @@ MinerU本地后处理的未分类异常使用`LOCAL_PIPELINE_ERROR`，不再抹�
 | `cache.persisted / maintenance_requested` | 缓存已事务回放 / 显式 Reindex或Force Reparse 请求；固定操作、缓存键、命中和数量摘要 |
 | `chunk.dispatched / dispatch_failed / rejected` | 独立切片投递、确认失败及状态/检查点拒绝，不记录正文或配置原文 |
 | `chunk.started / persisted / skipped` | 按 Block 原序开始切片、事务提交成功及旧/已完成消息跳过；数量、估算长度参数、超目标数和耗时 |
+| `chunk.table_split / table_split_skipped` | 长HTML表按完整行/rowspan关联组分片，或无法证明边界而保留整表；只记block_id、页码、固定阶段及片数/安全原因，不含HTML或字符来源明细，尚未代表切片事务提交 |
 | `chunk.retry / failed / error_record_failed` | 临时数据库有限重试、安全终止及错误未能写库，不输出异常原文 |
 | `embedding.model_loaded / encoded / encode_failed / encode_skipped` | 模型加载/统一编码/安全错误/空输入跳过；模型名、设备、维度、数量和耗时，不记录正文或向量 |
 | `embedding.dispatched / dispatch_failed / rejected / started` | GPU 任务投递/确认失败/拒绝/开始，独立 task_id 和 doc_id 关联 |
 | `embedding.batch_completed / persisted / skipped` | 批次暂存/完整文件与 SQL 状态提交/旧消息跳过；暂存不等于完整发布，INDEXING 只表示等待入库 |
+| `embedding.chunk_rejected` | 真实Tokenizer超限；doc_id/task_id/chunk_id、全局1-based item_index、token_count及limit_count定位输入。token_count中文标签为“真实Token数”，仅接受0～2³¹−1的整数；encode_failed的item_index为单次Service输入序号。失败不发布完整结果，不输出正文/Token IDs/路径 |
 | `embedding.retry / failed / error_record_failed` | 数据库有限重试/安全终止/错误无法落库；不透传模型/CUDA/路径原始异常 |
 | `index.dispatched / dispatch_failed / rejected / started` | 独立 CPU 入库任务投递、确认失败、状态拒绝及开始，复用 doc_id/task_id 关联 |
 | `index.batch_written / persisted / skipped` | 批次仅执行未提交 / 所有向量与 READY 事务提交 / 旧或已完成消息跳过；不记录向量/正文/文件路径 |

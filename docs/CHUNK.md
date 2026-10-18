@@ -6,13 +6,16 @@
 
 ## 策略与计量边界
 
-MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进入source_spans，Document.parse_quality进入Chunk metadata。未知页码文字只保留本地隔离产物，不造page=1的Chunk；切片规则/公式/原字符偏移不改。部分覆盖最终只能PARTIAL_READY，详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
+MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进入source_spans，Document.parse_quality进入Chunk metadata。未知页码文字只保留本地隔离产物，不造page=1的Chunk；原始Block/公式/字符来源不改。部分覆盖最终只能PARTIAL_READY，详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
 
 - 按从 1 开始的连续 block_index 阅读；未知历史顺序安全失败，不按页码/bbox/UUID 排序。
 - 标题/section 边界优先，不把旧章节的正文重叠带入新章节。后续切片尽量带当前标题（最多估算 100 token）；长标题主内容仍完整保留。
 - 普通正文/image_text 优先空行段落，超长段落按字符/token 区间切分。段落拼接用两个换行；source_spans 精确标识哪些字符来自 Block，拼接分隔符不是原文。
-- 表格/公式原样整体保留。公式与相邻同章节解释在预算内组成不可拆单元，过长解释不能保证同一 Chunk，仍可通过相邻 source block_index 反查。XLSX 原式不计算、不清洗、不被云计算值覆盖。
-- 默认目标 600、重叠 80；允许范围 400～700 / 50～100。重叠只取同章节普通正文尾部，不复用整表/公式；预算不足时可减少/不重叠。末尾/短章节可小于目标。超长结构块不拆、不截断，metadata.oversized=true，后续向量化必须另行处理模型输入限制。
+- 新检查点采用`block-chunk-v2`：超目标HTML表格复用既有`TableHTML`提供的原行区间，按完整行分组；rowspan涉及的行取传递关联组，colspan/单元格/内联公式/实体保持原样。原表格Block不变，不按字符截断行或公式。非HTML表格暂保持整块。
+- 每组引用原表外壳和连续原行；首片的前缀、末片的后缀标content，其余重复外壳标context，所有原字符主内容恰好覆盖一次。外壳与行仍使用原Block的精确source_spans，不补写表头/单元格，不改页码或来源。
+- 公式原样整体保留，与相邻同章节解释在预算内组成不可拆单元，过长解释不能保证同一Chunk，仍可通过相邻source block_index反查。XLSX原式不计算、不清洗、不被云计算值覆盖。
+- 默认目标600、重叠80；允许范围400～700 / 50～100。行组使用`size-100`估算token预算及其四倍字符目标，给标题上下文留空间；重叠只取同章节普通正文尾部，不重复表格行/公式。末尾/短章节可小于目标。不可拆长行/rowspan组/公式保留完整，估算超目标仍标metadata.oversized=true，由真实Tokenizer判定能否编码。
+- 无法证明行边界或网格的HTML（例如当前`TableHTML`不支持的属性/标签）保留整表，并记录`chunk.table_split_skipped`；不新增解析失败，不猜测或修补表格。安全拆分记录`chunk.table_split`，均不代表事务已提交。
 - `unicode-estimate-v1` 为确定性本地估算：中文/非 ASCII 字符逐字，ASCII 词每四字符估一 token，空白不计。不是 bge-m3 精确 tokenizer，也不能保证模型 token 上限；本轮无新依赖/模型部署。计量方式和参数写入 metadata，改变算法应升级 chunker_version。
 - 本地保护：源文本最多 1000 万字符、10 万 Block、2 万 Chunk；超限固定 CHUNK_LIMIT，不部分成功。
 
@@ -31,6 +34,16 @@ Chunk UUID5 由 doc_id、kb_id、输入内容/Block 身份/顺序、配置和该
 Worker 持有文档行锁，检查切片代次和来源解析代次，全部切片生成后全量替换 Chunk 并推进 EMBEDDING，一次事务提交。失败整体回滚，独立事务记录安全原因；数据库临时错误最多 3 次重试，5/10/20 秒。旧代次、已完成状态不能被迟到失败回调覆盖。进程失联没有自动 Outbox/补投，用户查询后显式恢复。
 
 成功重新解析/缓存回放替换 Block 时在同一事务清除旧 Chunk 和切片检查点，避免引用已删除 Block；失败保留旧 Block/Chunk，必须结合 Document 状态辨别旧结果。活动切片检查点未完成时不允许 Reindex/Reparse；切片成功后可 Reindex→缓存 Block→显式 Chunk。改变 CHUNK_SIZE/OVERLAP 不修改正在执行或已完成的冻结参数；用成功 Reindex 建立新的切片检查点，不需要 Force Reparse，不消耗云端。
+
+旧`block-chunk-v1`检查点继续整表策略及原metadata/稳定ID，不随代码升级自动重建Chunk。原v1整表导致`EMBEDDING_TOO_LONG`时，普通Retry仍消费旧Chunk；应待活动任务结束后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v2切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。
+
+定向离线回归由用户手动执行（不需要数据库/模型或云端）：
+
+```powershell
+python -m pytest tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+```
+
+新增用例覆盖完整行/传递rowspan、原字符全覆盖、版本隔离与稳定ID、不可拆结构保留、旧检查点复用、新Reindex代次、Stub长度检查及失败不发布向量。代码与用例已编写，未执行；真实表格、Tokenizer及GPU结果须由用户确认。
 
 ## 用户手动验收
 

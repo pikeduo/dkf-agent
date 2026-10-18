@@ -8,7 +8,10 @@ from itertools import islice
 from collections.abc import Iterator
 from uuid import UUID, uuid5
 
-VERSION = "block-chunk-v1"
+from app.core.business_logging import log_event
+
+VERSION = "block-chunk-v2"
+LEGACY_VERSION = "block-chunk-v1"
 TOKENIZER = "unicode-estimate-v1"
 MAX_SOURCE_CHARS = 10_000_000
 MAX_BLOCKS = 100_000
@@ -30,11 +33,11 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """拒绝未知算法版本及超出第一版允许范围的检查点参数。"""
+        """新切片使用v2行分组；已有v1冻结检查点保持原算法，不静默换代。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version != VERSION or self.tokenizer != TOKENIZER):
+                or self.version not in (LEGACY_VERSION, VERSION) or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
     def snapshot(self) -> dict:
@@ -174,9 +177,63 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
     return result
 
 
+def table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
+    """长HTML表按原行分组，rowspan关联行不可拆；复用原外壳并保留精确字符来源。
+
+    原Block不变，外壳只在首/末片计为主内容，其他引用标context。无法证明行边界时
+    保留原整表及oversized标记，交给真实Tokenizer拒绝超限，不能猜切单元格或公式。
+    """
+    whole = [[Span(block, 0, len(block.text))]]
+    if ((token_count(whole[0]) <= budget and len(block.text) <= budget * 4)
+            or not re.match(r"\s*<table(?:\s|>)", block.text, re.I)):
+        return whole
+    from app.services.mineru.errors import MinerUError
+    from app.services.mineru.table_html import TableHTML
+
+    try:
+        table = TableHTML(block.text)
+    except MinerUError:
+        log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
+                  stage="chunk.table_rows", step="UNSUPPORTED_TABLE_ROWS")
+        return whole
+
+    # rowspan的覆盖终点取传递闭包，只在没有跨界单元格的边界切开。
+    groups, start, stop = [], 0, 0
+    for index, row in enumerate(table.rows):
+        stop = max(stop, index + max(cell["rowspan"] for cell in row["cells"]))
+        if index + 1 == stop:
+            groups.append((start, stop))
+            start = stop
+
+    def spans_for(first: int, last: int) -> list[Span]:
+        """只引用原表外壳与连续原行；不重写HTML、实体、单元格值或原字符偏移。"""
+        prefix_end, suffix_start = table.rows[0]["start"], table.rows[-1]["end"]
+        end = table.rows[last]["start"] if last < len(table.rows) else suffix_start
+        spans = [Span(block, 0, prefix_end, "content" if first == 0 else "context"),
+                 Span(block, table.rows[first]["start"], end),
+                 Span(block, suffix_start, len(block.text), "content" if last == len(table.rows) else "context")]
+        return [span for span in spans if span.end > span.start]
+
+    result, first, last = [], groups[0][0], groups[0][1]
+    for next_first, next_last in groups[1:]:
+        candidate = spans_for(first, next_last)
+        # 字符预算限制空白/HTML标记膨胀；仍是切片目标，不冒充模型精确token上限。
+        if token_count(candidate) > budget or sum(span.end - span.start for span in candidate) > budget * 4:
+            result.append(spans_for(first, last))
+            first = next_first
+        last = next_last
+    result.append(spans_for(first, last))
+    if len(result) == 1:
+        # 只有一个不可拆关联组时原样保留整表，避免无收益地增加拼接空白和来源片段。
+        return whole
+    log_event("chunk.table_split", block_id=block.block_id, page=block.page,
+              stage="chunk.table_rows", chunk_count=len(result))
+    return result
+
+
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """按可信 block_index 切片并生成稳定 ID；不执行文件读取、分页推断或外部调用。"""
+    """按可信原序及冻结v1/v2策略切片；v2支持长表行分组，不改原Block或字符证据。"""
 
     options = options or ChunkOptions()
     config = options.snapshot()
@@ -201,9 +258,12 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     atoms = []
     for block in blocks:
         if block.text.strip():
-            atoms.extend([[span] for span in text_spans(block, options.size - 100)]
-                         if block.block_type not in {"table", "formula"}
-                         else [[Span(block, 0, len(block.text))]])
+            if block.block_type == "table" and options.version == VERSION:
+                atoms.extend(table_units(block, options.size - 100))
+            else:
+                atoms.extend([[span] for span in text_spans(block, options.size - 100)]
+                             if block.block_type not in {"table", "formula"}
+                             else [[Span(block, 0, len(block.text))]])
     units = formula_units(atoms, options.size - 100)
     result: list[ChunkDraft] = []
     pending: list[Span] = []
@@ -234,7 +294,7 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
             offset += len(span.text)
         text = "\n\n".join(text_parts)
         index = len(result) + 1
-        metadata = {"chunk_index": index, "chunker_version": VERSION, "tokenizer": TOKENIZER,
+        metadata = {"chunk_index": index, "chunker_version": options.version, "tokenizer": TOKENIZER,
             "config": config, "input_blocks_hash": input_hash, "estimated_token_count": token_count(pending),
             "oversized": token_count(pending) > options.size,
             "page_semantics": "physical_pdf" if file_type == "pdf" else "image_page" if file_type in {"jpg", "jpeg", "png"} else "logical",

@@ -47,10 +47,13 @@ ERRORS = {
 class EmbeddingError(Exception):
     """仅输出固定错误码及中文原因，禁止透传模型、正文或本机路径异常。"""
 
-    def __init__(self, code: str):
-        """把内部错误类别转换成固定安全文案，未知类别不输出调用方原文。"""
+    def __init__(self, code: str, *, item_index=None, token_count=None, limit_count=None):
+        """使用固定文案；长度错误仅附受限序号/计数，不携带正文或模型原始异常。"""
 
         self.code = code if code in ERRORS else "EMBEDDING_INFERENCE"
+        self.diagnostic = {key: value for key, value in {
+            "item_index": item_index, "token_count": token_count, "limit_count": limit_count}.items()
+            if self.code == "EMBEDDING_TOO_LONG" and type(value) is int and 0 < value <= 2**31 - 1}
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
 
@@ -236,7 +239,7 @@ class EmbeddingService:
                     "precision": "fp16" if self.options.use_fp16 and self.options.device.startswith("cuda:") else "fp32"}
 
     def _encode(self, texts: list[str], operation: str) -> list[list[float]]:
-        """逐批先校验真实 token 长度再编码；不截断、不添加 Query 指令，不返回部分成功列表。"""
+        """逐批核对真实长度并保留超限序号/数量；不截断、不添加指令或返回半份向量。"""
 
         if not isinstance(texts, list) or any(not isinstance(text, str) or not text.strip() for text in texts):
             log_event("embedding.encode_failed", level=logging.WARNING, operation=operation, error_code="EMBEDDING_INPUT")
@@ -260,8 +263,10 @@ class EmbeddingService:
                     ids = tokens["input_ids"]
                     if len(ids) != len(batch):
                         raise EmbeddingError("EMBEDDING_OUTPUT")
-                    if any(len(row) > self.options.max_length for row in ids):
-                        raise EmbeddingError("EMBEDDING_TOO_LONG")
+                    for index, row in enumerate(ids):
+                        if len(row) > self.options.max_length:
+                            raise EmbeddingError("EMBEDDING_TOO_LONG", item_index=offset + index + 1,
+                                token_count=len(row), limit_count=self.options.max_length)
                     vectors = self._model.encode(batch, batch_size=self.options.batch_size,
                         convert_to_numpy=True, normalize_embeddings=True, show_progress_bar=False,
                         prompt="", device=self.options.device)
@@ -269,7 +274,8 @@ class EmbeddingService:
                 if model_stamp(self._files) != self._stamp:
                     raise EmbeddingError("EMBEDDING_MODEL_CHANGED")
         except EmbeddingError as exc:
-            log_event("embedding.encode_failed", level=logging.ERROR, operation=operation, error_code=exc.code)
+            log_event("embedding.encode_failed", level=logging.ERROR, operation=operation,
+                      error_code=exc.code, **exc.diagnostic)
             raise
         except Exception:
             log_event("embedding.encode_failed", level=logging.ERROR, operation=operation, error_code="EMBEDDING_INFERENCE")

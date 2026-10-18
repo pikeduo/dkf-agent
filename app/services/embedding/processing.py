@@ -107,7 +107,7 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
 
 
 def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """单任务内部逐批推理并原子发布文件，全部成功后进入 INDEXING；不写 pgvector/READY。"""
+    """逐批原子发布；超限记录真实Chunk与token计数，失败不发布结果或写pgvector/READY。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -136,7 +136,16 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
         with store.writer(doc_id, task_id) as writer:
             for offset in range(0, len(rows), options.batch_size):
                 batch = rows[offset:offset + options.batch_size]
-                vectors = service.embed_documents([row.text for row in batch])
+                try:
+                    vectors = service.embed_documents([row.text for row in batch])
+                except EmbeddingError as exc:
+                    position = exc.diagnostic.get("item_index")
+                    if exc.code == "EMBEDDING_TOO_LONG" and position is not None and 1 <= position <= len(batch):
+                        row = batch[position - 1]
+                        log_event("embedding.chunk_rejected", level=logging.ERROR, doc_id=doc_id, task_id=task_id,
+                            chunk_id=row.chunk_id, item_index=row.chunk_index, stage="embedding.token_limit",
+                            error_code=exc.code, **{key: value for key, value in exc.diagnostic.items() if key != "item_index"})
+                    raise
                 if len(vectors) != len(batch):
                     raise EmbeddingError("EMBEDDING_OUTPUT")
                 for row, vector in zip(batch, vectors):

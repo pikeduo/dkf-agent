@@ -854,6 +854,40 @@ def test_embedding_summary_and_task_context_do_not_log_vectors_or_text(events):
     assert "SECRET" not in events.getvalue() and "向量结果与文档状态已提交" in events.getvalue()
 
 
+def test_token_limit_log_identifies_chunk_and_counts_without_exposing_input(events):
+    """长度诊断只输出Chunk身份和有界计数；正文、路径、向量继续由白名单拒绝。"""
+    chunk_id = uuid4()
+    logs.log_event("embedding.chunk_rejected", chunk_id=chunk_id, item_index=4,
+        token_count=9001, limit_count=8192, error_code="EMBEDDING_TOO_LONG", stage="embedding.token_limit",
+        text="SECRET_BODY", model_dir="SECRET_PATH", input_ids=[1, 2], vector=[1.0])
+    [record] = records(events)
+    assert record["chunk_id"] == str(chunk_id) and record["item_index"] == 4
+    assert record["token_count"] == 9001 and record["limit_count"] == 8192
+    assert "真实Token数=9001" in events.getvalue() and "切片超过模型真实Token上限" in events.getvalue()
+    assert {"text", "model_dir", "input_ids", "vector"}.isdisjoint(record)
+    assert "SECRET" not in events.getvalue()
+
+
+@pytest.mark.parametrize("value", ["SECRET_BODY", -1, True, 1.5, 2**63, float("nan")])
+def test_token_count_log_rejects_non_integer_or_sensitive_values(events, value):
+    """新增Token计数字段与资源计数一样受限，不能用字符串或非法数字绕过脱敏。"""
+    logs.log_event("embedding.chunk_rejected", error_code="EMBEDDING_TOO_LONG", token_count=value)
+    [record] = records(events)
+    assert "token_count" not in record and record["error_code"] == "EMBEDDING_TOO_LONG"
+    assert "SECRET" not in events.getvalue()
+
+
+@pytest.mark.parametrize("event", ["chunk.table_split", "chunk.table_split_skipped"])
+def test_table_row_events_use_registered_safe_summary(events, event):
+    """长表切片及无法安全拆分均使用集中中文摘要，原HTML和字符来源不进日志。"""
+    block_id = uuid4()
+    logs.log_event(event, block_id=block_id, page=13, stage="chunk.table_rows", chunk_count=4,
+                   text="SECRET_BODY", source_spans=[{"text": "SECRET_BODY"}])
+    [record] = records(events)
+    assert record["block_id"] == str(block_id) and record["chunk_count"] == 4 and record["page"] == 13
+    assert logs.EVENT_LABELS[event] in events.getvalue() and "SECRET" not in events.getvalue()
+
+
 @pytest.mark.parametrize("state", ["READY", "PARTIAL_READY"])
 def test_index_logs_restore_context_and_only_include_safe_summary(events, state):
     """两种索引终态均关联文档/任务并保持安全摘要，不将部分完成误称为完整 READY。"""

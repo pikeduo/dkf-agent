@@ -24,7 +24,8 @@ Service 导入/构造与 API 投递不加载 Torch/模型；每进程缓存一�
 ## 长度与资源边界
 
 - EMBEDDING_BATCH_SIZE 默认 16，允许 1～128；EMBEDDING_MAX_LENGTH 默认 8192，允许 8～8192；CUDA 默认 cuda:0、fp16=true。这不是最小显存保证，真实硬件需手动验收。
-- 编码前用真实 Tokenizer（含特殊 token、truncation=False）检查长度。阶段 13 的估算 token 不作为模型真实长度；长表格/公式超限报 EMBEDDING_TOO_LONG，不截断前缀、不改写原式、不伪造向量。需后续设计结构化长块策略，当前明确失败。
+- 编码前用真实Tokenizer（含特殊token、truncation=False）检查长度。切片估算不作为模型真实长度；新`block-chunk-v2`可在CPU按完整HTML表格行及rowspan关联组切片，见[Chunk](CHUNK.md)。剩余不可拆长行/公式或不支持的表格超限仍报EMBEDDING_TOO_LONG，不截断前缀、不改写原式、不伪造向量。
+- 长度失败的`embedding.encode_failed`记录输入序号、真实Token数和限制数量；文档任务再以`embedding.chunk_rejected`关联真实chunk_id、全局1-based chunk_index、doc_id/task_id与`embedding.token_limit`阶段。日志只含受限整数及标识，不含正文/Tokenizer IDs/模型目录。后续management失败保留底层安全错误，不应仅按管理层通用码判断原因。
 - 文档只读取已有 Chunk，不重读原件、不调用 Parser/MinerU。每文档一个 gpu_queue 任务，内部依次批处理，每张 GPU 一个 solo/concurrency=1 Worker，不每 Chunk 一个任务，不静默改为 CPU。
 - 每次 Service/文档最多 2 万文本、总计 1000 万字符、单文本 100 万字符，单代次向量结果最多 512 MiB；超限明确失败。文档任务流式写数值批次，不一次物化整个文档的全部向量。
 - 缺模型、GPU 不可用、推理/显存错误、数量/维度/非有限值/零向量异常为安全永久失败，不自动反复推理或缩小模型输入。临时数据库最多 3 次重试，5/10/20 秒。
@@ -47,6 +48,17 @@ data/embeddings/<doc_id>/<embedding_task_id>/
 
 成功重解析/缓存回放/切片替换会在相应事务失效旧 Embedding 检查点，不自动删除历史文件；失败回滚保留原 Chunk。活动 GPU 检查点不允许 Reindex/Reparse 改代次，向量完成后可维护。若因显存或部署参数需改 batch/model_dir/device，停止相关进程、更新配置，再用已有成功 Parse Cache 执行 Reindex→Chunk→Embed 建立新检查点；不为此 Force Reparse、不调用 MinerU。缓存缺失仍按阶段 12 规则失败，不绕过。
 
+旧v1整表Chunk发生EMBEDDING_TOO_LONG时，普通Retry只恢复旧向量输入，不会改用新行策略。待当前任务结束、手动重启CPU/GPU Worker使新代码生效后，使用文档级`POST /api/admin/documents/{doc_id}/reindex`复用成功解析缓存，重建v2 Chunk及本地向量并接续Index；无需MinerU请求，不重建其他文档。原解析质量仍保留，PARTIAL不会因此变成完整READY。单文档恢复示例：
+
+```powershell
+$base = "http://127.0.0.1:8000/api/admin/documents/da426abd-541e-45c0-a2b2-7cba49bc9d1a"
+Invoke-RestMethod -Method Post -Uri "$base/reindex" -TimeoutSec 120 -ErrorAction Stop
+# 202只表示受理；稍后查询到索引终态才表示下游完成。
+Invoke-RestMethod -Uri "$base/status" -ErrorAction Stop |
+    Select-Object status, error_message, block_count, chunk_count, vector_count, invalid_vector_count, management, parse_quality |
+    ConvertTo-Json -Depth 8
+```
+
 向量文件与模型目录都需限制访问/备份；Hash 不是签名。入库/检索必须检查实际 model_fingerprint、1024 维、归一化和编码版本，不能只凭维度一致混用不同权重。/embed 本身不完成入库，后续 /index 已接入 HNSW/READY，尚待用户验收；没有检索/RAG。
 
 ## 用户手动自动测试
@@ -55,7 +67,7 @@ Codex 仅编写以下用例，未执行；不会自动生成文档样本、下�
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_embedding_service.py tests/test_embedding_artifacts.py tests/test_swagger_docs.py tests/test_business_logging.py -q
+python -m pytest tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_chunk_table_rows.py tests/test_embedding_artifacts.py tests/test_swagger_docs.py tests/test_business_logging.py -q
 python -m pytest tests/embedding_db_smoke.py tests/chunk_db_smoke.py tests/knowledge_db_smoke.py -q
 python -m pytest tests -q
 python -m pytest tests/knowledge_admin_smoke.py tests/document_upload_smoke.py tests/document_processing_smoke.py tests/native_parser_db_smoke.py tests/mineru_db_smoke.py tests/parser_router_smoke.py tests/hybrid_smoke.py tests/parse_cache_smoke.py tests/business_logging_smoke.py tests/batch_upload_smoke.py -q

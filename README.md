@@ -98,7 +98,7 @@ HYBRID_MAX_IMAGE_MB=16
 - API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
 - Native 解析/切片无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token。文档向量化需要本地 BGE-M3、CUDA GPU 和 GPU Worker；不需要 DeepSeek Key，不下载 Reranker。
 - API/GPU Worker 共用可读写的 EMBEDDINGS_DIR，默认 data/embeddings；向量文件含业务衍生数据，应限制访问并备份，不入仓库。每代次结果上限 512 MiB，无自动清理；模型和向量目录自定义到仓库内时需自行配置忽略规则。
-- 切片不读取原件、不调用 MinerU 或模型；CHUNK_SIZE 允许 400～700，CHUNK_OVERLAP 允许 50～100。采用本地 token 估算而非模型精确计量；长表格/公式优先整体保留，可能超目标，metadata 会标记。
+- 切片不读取原件、不调用MinerU或模型；CHUNK_SIZE允许400～700，CHUNK_OVERLAP允许50～100。新切片按完整HTML表格行分组，rowspan关联行一起保留，原Block/页码/字符来源不变；公式及无法安全拆分的结构保持完整。长度为本地估算，真实Tokenizer仍拒绝模型超限输入，详见[Chunk](docs/CHUNK.md)。
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
 
@@ -333,6 +333,8 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型仅首次编码时加载，ready/health 不证明 GPU 已验收；一份文档一个任务、内部批处理，不每 Chunk 投递一次，只启动 CPU Worker 不会执行向量化。
 
 对已切片、状态为 EMBEDDING 的文档调用 `POST /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed`，命令见 [已有 Chunk 向量化](#已有-chunk-向量化)。完成为 INDEXING / awaiting_index，结果仅保存在 EMBEDDINGS_DIR；不写 pgvector、不创建索引、不标记 READY。详细真实验收、SQL 与故障恢复继续参阅 [Embedding](docs/EMBEDDING.md)，不在此重复业务测试清单。
+
+若旧整表Chunk报`EMBEDDING_TOO_LONG`，待活动任务结束后手动重启CPU/GPU Worker，再调用`POST /api/admin/documents/{doc_id}/reindex`，从已有成功解析缓存重建新行切片并自动接续向量化/入库。普通Retry沿用旧Chunk。此操作只处理指定文档、无MinerU请求；解析质量保留，原PARTIAL可结束为PARTIAL_READY。若仍超限，查看`embedding.chunk_rejected`中的chunk_id、原数组序号、真实Token数及限制数量，保留原文不截断。
 
 ### 运行日志
 
