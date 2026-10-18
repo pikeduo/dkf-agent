@@ -2,6 +2,138 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
+## 2026-10-18 Office失败修复与分组恢复
+
+本轮只读检查19:57检查点及日志：READY101、PARTIAL_READY68、FAILED31，全部31份失败属于OCB；不是只处理了部分200份。修改代码/编写测试不代表失败文件已恢复，本轮没有执行测试、回放、API重投或GPU。
+
+| 数量 | 已确认原因 | 本轮处理及边界 |
+|---|---|---|
+| 7 | 原生TSV表格被保留为整块，真实Token超过8192 | 新`block-chunk-v4`按完整TSV逻辑记录切片；使用已有解析缓存Reindex，普通Retry不能换掉旧Chunk |
+| 1 | NBA工作簿缓存10823650字符超过1000万；另有8064171字符/12845行/295435单元格、含p段落的HTML表 | v4源上限1600万、有界网格及单元格p兼容；旧v1～v3、Adapter默认行为不变，单文档串行重建 |
+| 6 | DOCX仅外部排版模板被误判缺正文附件 | 仅官方`attachedTemplate`外部关系例外；不下载模板，不放行内容附件；此前未创建云Job，Retry可能首次收费 |
+| 2 | Workbook合法的根`customXml/item*.xml`被Hybrid误判必须在xl内 | 精确官方关系允许已有包内部件，其他路径/内容校验保留；后续可能新建Bundle/Whole云任务 |
+| 1 | XLSX单XML部件20204999字节超过默认16MiB；Sheet总XML38016609字节 | 保留保护并增加实测字节日志；由用户完成前述缓存恢复后受控设置既有预算32MiB，不能直接宣称已通过 |
+| 9 | 外部工作簿、OLE或图片内容关系 | 真实依赖仍未提供；没有把缓存公式值/预览图当完整内容，无自动放行 |
+| 3 | 同Hash旧付费成功缓存为Normalizer v2，新v4缓存不命中 | 找到旧缓存及其中ZIP的文件路径；未执行Hash/转换验证，未复制身份或静默升级，费用保护保留 |
+| 2 | 日志明确记录MinerU远端state=failed | 没有可证明成功的本地结果，不能用Adapter修改修复或自动申请新批次 |
+
+用户先执行定向回归（不含真实DB/GPU/API；Codex未运行）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_stage33_office_recovery.py tests/test_chunk_table_rows.py tests/test_chunk_splitter.py tests/test_document_management.py tests/test_parser_router.py tests/test_hybrid.py tests/test_parse_cache.py tests/test_business_logging.py tests/test_stage33_pipeline.py -q -ra
+```
+
+回归通过后，先确认队列任务安全结束，再由用户重启API及CPU/GPU Worker加载新代码；不要清Redis/缓存、强杀处理中任务或迁移数据库。本轮无新迁移/依赖。只读查看队列：
+
+```powershell
+python -m celery -A app.core.celery_app:celery_app inspect active
+python -m celery -A app.core.celery_app:celery_app inspect reserved
+python -m celery -A app.core.celery_app:celery_app inspect scheduled
+```
+
+以下辅助函数只调用原管理API，一份结束才处理下一份；不会上传文件、创建知识库或Force。HTTP确认丢失时停止，不自动再次POST。`PARTIAL_READY`仍须核对缺口，不算正式完整READY。
+
+```powershell
+$ErrorActionPreference = 'Stop'
+function Invoke-Stage33OfficeRecovery {
+    # 手动串行恢复指定失败身份；遇活动编排只观察，遇失败/超时立即停止。
+    param([string]$DocId, [ValidateSet('reindex','retry')][string]$Operation)
+    $base = "http://127.0.0.1:8000/api/admin/documents/$DocId"
+    $s = Invoke-RestMethod "$base/status" -TimeoutSec 30
+    if ($s.kb_id -ne '158030a1-42d6-42ee-835d-02fdbff23f81') { throw "知识库不符：$DocId" }
+    if ($s.status -in @('READY','PARTIAL_READY')) {
+        Write-Host "$DocId 已为 $($s.status)，未重投"
+        return
+    }
+    if ($s.management.state -ne 'running') {
+        if ($s.status -ne 'FAILED') { throw "请先核对活动任务：$DocId / $($s.status)" }
+        if ($Operation -eq 'reindex' -and -not $s.parse_cache_present) { throw "成功缓存缺失：$DocId" }
+        if ($Operation -eq 'retry') {
+            # 本组只允许从未创建云Job的文件，收费历史不能靠重复Retry绕过。
+            $detail = Invoke-RestMethod $base -TimeoutSec 30
+            if (@($detail.parse_jobs).Count -gt 0) { throw "已有Job，先核对结果/费用：$DocId" }
+        }
+        Invoke-RestMethod -Method Post "$base/$Operation" -TimeoutSec 120 | Out-Null
+    }
+    $deadline = (Get-Date).AddHours(2)
+    do {
+        Start-Sleep -Seconds 5
+        $s = Invoke-RestMethod "$base/status" -TimeoutSec 30
+        if ($s.status -in @('READY','PARTIAL_READY')) {
+            if ($s.chunk_count -lt 1 -or $s.vector_count -ne $s.chunk_count -or $s.invalid_vector_count -ne 0) {
+                throw "终态向量统计异常：$DocId"
+            }
+            $s | Select-Object doc_id,status,block_count,chunk_count,vector_count
+            return
+        }
+        if ($s.management.state -eq 'failed') {
+            throw "$DocId 失败：stage=$($s.management.stage)，cause=$($s.management.cause_code)，error=$($s.error_message)"
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "$DocId 等待超时；后台可能仍执行，请先GET状态，不重复POST"
+}
+
+# 第一组：8份已有成功缓存，先执行第一份验证v4切片/GPU/索引，再串行处理其余。
+$cached = @(
+    'b37f4679-2701-4d54-8165-c80fd0840611',
+    '8b72d308-ac54-4506-bf8d-734cacaf1b28',
+    '897d54a0-dd38-42ad-b7e5-d0a22b35f956',
+    'e4c88d4d-f816-4b55-a0ea-92a5d642ec16',
+    '3649c30e-d0cd-4c36-95cc-4842599156e5',
+    'ce7e99cf-0928-4609-a1bf-2baa6781bc86',
+    'efdf30a0-e412-4d28-8a3a-5257f2fe62a0',
+    'be585058-60d3-4e7a-a96b-db0bc23f6d28'
+)
+Invoke-Stage33OfficeRecovery -DocId $cached[0] -Operation reindex
+# 确认第一份的真实终态及Chunk元数据chunker_version=block-chunk-v4，再运行：
+$cached | Select-Object -Skip 1 | ForEach-Object { Invoke-Stage33OfficeRecovery -DocId $_ -Operation reindex }
+```
+
+第二组命令由用户在接受**新解析费用**后手动执行：这8份此前没有自己的云Job；可能0～8个新云文件任务，实际由Native/Hybrid/Whole决定，不是复用旧付费结果。不要把其他14份塞入此列表。
+
+```powershell
+$newParse = @(
+    'da3d2a31-4be8-454a-82a2-e5195b2c2da8',
+    '6978b773-c412-4541-96ea-07ebf3517c90',
+    '68989d39-3032-40c0-8d42-dddb29ea2185',
+    '3f73d303-099f-4698-8910-4748667f64d2',
+    '7440559b-26e2-40dd-ae35-39881536ac11',
+    'ee5e1f7a-0208-4c2d-adbc-eca7b98a4aa7',
+    '7339e772-0627-40bf-b90f-a0e6646c0356',
+    '83d24856-fb63-49f9-9466-8db2bf8543c8'
+)
+$newParse | ForEach-Object { Invoke-Stage33OfficeRecovery -DocId $_ -Operation retry }
+```
+
+单XML超限的`082ebed3-a4e9-4b61-934b-4025b472192e`应最后处理。完成上组后，确认Worker空闲；在API和CPU Worker各自启动终端设置`$env:ROUTER_XML_PART_MAX_MB='32'`并按README重启，再单独调用上面的函数`-Operation retry`。可能首次新增1个云文件任务；若仍超限按新日志处理，不关闭总XML/DTD安全限制。进程环境变化不写入`.env`；重启前恢复原值16。路由配置参与缓存身份，不在该临时配置下恢复其他旧缓存。
+
+剩余14份必须保留在失败清单，不能声称本轮已修好：
+
+- 外部工作簿4份：`fd0eed46-d01c-450d-901e-d6c10edcdb68`、`d5eefa49-4d03-4e66-aa33-54b7d27e5734`、`5f7494bb-d83a-41cf-b4ee-30a618b4da60`、`b353a134-04d8-4cb2-ae30-9d87301f459f`。
+- 外部OLE/图片5份：`4d18710e-c8bf-4504-8982-bd5ce7e115a9`、`926d4339-96f6-4756-af61-121901efd806`、`e1f59a27-a401-4de1-809b-a998ae7c63f1`、`c8e4ca42-f739-48c4-9c2d-50120f956309`、`2d4cb398-1f04-461a-87e8-84437fcf2554`。
+- 远端失败2份：`81f211b8-330f-4015-9ad7-b3d377a7392b`（Job `681c250a-43c4-4557-bdbb-c5a0043edbec`），`8a3496d6-dd9e-40bd-be60-70b4b701002a`（Job `53406701-32c5-47ff-a09c-a239c8324dad`）。需平台安全原因，不能凭本地异常推断ZIP损坏或直接重收费。
+
+3份v2历史成功缓存已找到如下映射（仅读取元数据及文件存在性，尚未执行回放/校验）：
+
+| 阶段33失败文档 | 原文档 | 原成功Job |
+|---|---|---|
+| be97464e-7ecc-4fd3-9af7-14a830c3bdf6 | e5254d97-ae7b-4235-98e0-0e3b12e2c08d | 8790d023-7981-4616-a62b-f8056ce77786 |
+| 5bf1bd8a-8879-4472-a2c7-4ff04bcba0ef | cd8126f6-2d64-4277-9025-b86a9dff7479 | 5feb103f-0895-470f-9d21-ee10e295f56f |
+| d517319d-c348-49c6-925e-4abf894d1b8d | 1f76ed22-b166-42d2-bb9f-cc6d595a941e | cd5e7a78-d808-4d03-bee4-09435185409c |
+
+原缓存包含`raw/mineru_result.zip`，但当前诊断CLI仅支持PDF，不能把这些Office传给PDF命令。当前API也没有显式v2跨文档升级入口；不能复制latest指针、改Normalizer或Force代替身份校验。下一步先只读查询原Job批次/冻结参数/当前代次，再决定受控本地升级方式；本轮没有实现这条升级链路：
+
+```powershell
+@('e5254d97-ae7b-4235-98e0-0e3b12e2c08d','cd8126f6-2d64-4277-9025-b86a9dff7479','1f76ed22-b166-42d2-bb9f-cc6d595a941e') |
+    ForEach-Object {
+        $d = Invoke-RestMethod "http://127.0.0.1:8000/api/admin/documents/$_" -TimeoutSec 30
+        $d.parse_jobs | Select-Object @{n='source_doc_id';e={$d.doc_id}},job_id,state,error_code,batch_id,upload_complete
+    } | Format-Table -AutoSize
+```
+
+恢复期间用GET查看真实状态，重新加载`$items`只会重读磁盘旧快照。所有200份都已登记时，可在手动恢复结束后沿用原run执行普通`--step import --execute --resume --allow-cloud`（**不加**`--retry-failed`/`--retry-failed-only`），由原导入器观察并刷新报告；该命令仍具有补传缺失文档的能力，执行前确认200个原doc_id均存在。`--step report`单独运行只汇总既有检查点，不访问数据库刷新。正式检索仍须200完整READY，不将68个PARTIAL_READY合算成功。
+
 ## v4原ZIP回放、质量报告与恢复
 
 MinerU v4先提取可靠内容，再尝试可选严格增强；MERGE_EVIDENCE不再自动等于整份FAILED。新增`0009_parse_quality`需由用户迁移。`PARTIAL_READY`表示可靠块及全部对应向量可用，不计入完整READY；缺页不删除、不伪造Block。当前代码/测试未由Codex运行，25份ZIP实际结果仍待用户执行。

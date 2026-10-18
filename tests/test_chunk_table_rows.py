@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.chunk import splitter
-from app.services.chunk.splitter import ChunkError, ChunkOptions, LEGACY_VERSION, ROW_VERSION, VERSION
+from app.services.chunk.splitter import ChunkError, ChunkOptions, LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, VERSION
 from app.services.mineru.table_html import TableHTML
 from test_chunk_splitter import assert_evidence, block, chunks
 
@@ -112,9 +112,9 @@ def test_legacy_checkpoint_retains_whole_table_without_running_new_policy(monkey
     assert_evidence(drafts, [source])
 
 
-@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION])
+@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION])
 def test_completed_checkpoint_is_reused_without_upgrading_options(version):
-    """已切片文档重复请求沿用v1/v2检查点，不偷偷重建Chunk或使现有向量失效。"""
+    """已切片文档重复请求沿用v1～v3检查点，不重建Chunk或使现有向量失效。"""
     from types import SimpleNamespace
     from uuid import uuid4
 
@@ -187,3 +187,124 @@ def test_long_formula_keeps_original_unit():
     drafts = chunks([source])
     assert len(drafts) == 1 and drafts[0].text == source.text and drafts[0].metadata["oversized"]
     assert_evidence(drafts, [source])
+
+
+@pytest.mark.parametrize("kind", ["xlsx", "csv"])
+def test_native_quoted_tsv_splits_logical_rows_without_changing_cells(kind):
+    """原生XLSX/CSV均输出TSV；字段内换行、Tab、双引号及公式必须完整留在原行。"""
+    import csv
+    from io import StringIO
+    from app.parsers.csv import table_text
+
+    rows = [[f"项目{i}\n单元格内换行", f'=SUM(A{i}:B{i})', '含\tTab及"引号"'] for i in range(180)]
+    source = block(1, table_text(rows), "table", section="原工作表")
+    drafts = chunks([source], file_type=kind)
+    assert len(drafts) > 1
+    observed = []
+    for draft in drafts:
+        observed.extend(csv.reader(StringIO(draft.text, newline=""), delimiter="\t", strict=True))
+        assert draft.section == "原工作表" and draft.page_start == draft.page_end == 1
+        assert not draft.metadata["oversized"]
+        assert all(span["role"] == "content" for span in draft.metadata["source_spans"])
+    assert observed == rows
+    assert_evidence(drafts, [source])
+
+
+@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION])
+def test_native_tsv_new_policy_does_not_change_frozen_versions(version):
+    """旧v1～v3的TSV整表行为冻结；新v4才按行拆分，Chunk身份不混用。"""
+    source = block(1, "\n".join(f"日期{i}\t数值{i}" for i in range(300)), "table")
+    old = chunks([source], ChunkOptions(version=version), file_type="xlsx")
+    current = chunks([source], file_type="xlsx")
+    assert len(old) == 1 and old[0].text == source.text and len(current) > 1
+    assert_evidence(current, [source])
+
+
+@pytest.mark.parametrize("damage", ["quote", "width", "single_long_row", "single_column", "cloud"])
+def test_native_rows_never_guess_bad_structure_or_split_inside_long_record(damage):
+    """坏引号/列数、单列不明格式、单个超长记录或云端TSV不猜切，更不截断字段。"""
+    from dataclasses import replace
+
+    text = 'A\t"' + "长" * 900 if damage == "quote" else 'A\t' + "长" * 900
+    if damage == "width":
+        text = 'A\tB\nC\tD\t' + "长" * 900
+    if damage == "single_column":
+        text = "\n".join("单列" for _ in range(500))
+    if damage == "cloud":
+        text = "\n".join(f"项目{i}\t数值{i}" for i in range(300))
+    source = block(1, text, "table")
+    if damage == "cloud":
+        source = replace(source, source="mineru_cloud")
+    drafts = chunks([source], file_type="xlsx")
+    assert len(drafts) == 1 and drafts[0].text == text
+    assert_evidence(drafts, [source])
+
+
+def test_large_html_new_budget_keeps_adapter_defaults_and_exact_evidence():
+    """超过旧4096行的大表仅v4扩大资源预算；Adapter默认拒绝，行/网格校验仍保留。"""
+    from app.services.mineru.errors import MinerUError
+    from app.services.mineru.table_html import TableLimits
+
+    source = block(1, '<table>' + '<tr><td>A</td><td>B</td></tr>' * 4100 + '</table>', "table")
+    with pytest.raises(MinerUError):
+        TableHTML(source.text)
+    old = chunks([source], ChunkOptions(version=CAPTION_VERSION))
+    current = chunks([source])
+    assert len(old) == 1 and len(current) > 1
+    assert_evidence(current, [source])
+    assert sum(len(TableHTML(draft.text).rows) for draft in current) == 4100
+    # 新规模预算不放松越界rowspan与矩形网格检查。
+    with pytest.raises(MinerUError):
+        TableHTML('<table><tr><td rowspan="2">A</td></tr></table>',
+                  limits=TableLimits(max_rows=20_000, max_cells=400_000, max_grid_cells=524_288))
+
+
+def test_source_budget_is_versioned_and_keeps_bounded_rejection(monkeypatch):
+    """缩小预算验证v4与旧版各用自己的上限，超预算仍整份失败，不制造半份Chunk。"""
+    monkeypatch.setattr(splitter, "MAX_SOURCE_CHARS", 100)
+    monkeypatch.setattr(splitter, "MAX_V4_SOURCE_CHARS", 200)
+    source = block(1, "甲" * 150)
+    assert chunks([source])
+    with pytest.raises(ChunkError, match="CHUNK_LIMIT"):
+        chunks([source], ChunkOptions(version=CAPTION_VERSION))
+    with pytest.raises(ChunkError, match="CHUNK_LIMIT"):
+        chunks([block(1, "甲" * 201)])
+
+
+def test_v4_html_cell_paragraphs_keep_values_raw_markup_and_rowspan():
+    """复现大工作簿单元格中的p；仅v4可分组，原HTML/段落/跨行关系完整保留。"""
+    from app.services.mineru.errors import MinerUError
+
+    rows = '<tr><th><p>原表头</p></th><th><p>公式</p></th></tr>'
+    rows += ''.join(f'<tr><td><p>项目{i}</p><p>说明 &amp; 原值</p></td>'
+                    f'<td><p><eq>x_{i}</eq><br/>原式</p></td></tr>' for i in range(80))
+    source = block(1, '<table>' + rows + '</table>', 'table')
+    with pytest.raises(MinerUError):
+        TableHTML(source.text)
+    previous = chunks([source], ChunkOptions(version=CAPTION_VERSION))
+    current = chunks([source])
+    assert len(previous) == 1 and len(current) > 1
+    expected = [cell['text'] for row in TableHTML(source.text, cell_paragraphs=True).rows for cell in row['cells']]
+    observed = [cell['text'] for draft in current for row in TableHTML(draft.text, cell_paragraphs=True).rows
+                for cell in row['cells']]
+    assert observed == expected
+    assert_evidence(current, [source])
+    spanning = block(1, '<table><tr><td rowspan="2"><p>关联</p></td><td><p>' + '甲' * 700
+        + '</p></td></tr><tr><td><p>续行</p></td></tr><tr><td colspan="2"><p>末行</p></td></tr></table>', 'table')
+    grouped = chunks([spanning])
+    assert len(TableHTML(grouped[0].text, cell_paragraphs=True).rows) == 2
+    assert_evidence(grouped, [spanning])
+
+
+@pytest.mark.parametrize('body', [
+    '<p><tr><td>A</td></tr></p>',
+    '<tr><td><p style="hidden">A</p></td></tr>',
+    '<tr><td><p><p>A</p></p></td></tr>',
+    '<tr><td rowspan="2"><p>A</p></td></tr>',
+])
+def test_cell_paragraph_option_keeps_grid_nesting_and_attribute_guards(body):
+    """段落兼容不放松表外p、嵌套p、未知属性或越界rowspan的结构保护。"""
+    from app.services.mineru.errors import MinerUError
+
+    with pytest.raises(MinerUError):
+        TableHTML('<table>' + body + '</table>', cell_paragraphs=True)

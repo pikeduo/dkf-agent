@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentBlock, DocumentChunk, DocumentParseJob
-from app.services.chunk.splitter import MAX_BLOCKS, MAX_SOURCE_CHARS, ChunkError, ChunkOptions, SourceBlock, build_chunks
+from app.services.chunk.splitter import MAX_BLOCKS, ChunkError, ChunkOptions, SourceBlock, build_chunks, source_char_limit
 from app.services.document_processing import transition_document
 
 
@@ -63,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """行锁保护全量替换和 GPU/入库检查点失效；切片/状态同事务，失败由调用方整体回滚。"""
+    """按冻结版本预检资源，行锁保护全量替换；切片/状态同事务，失败整体回滚。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -79,7 +79,13 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     total_chars, block_count = session.execute(select(
         func.coalesce(func.sum(func.length(DocumentBlock.text)), 0), func.count())
         .select_from(DocumentBlock).where(DocumentBlock.doc_id == doc_id)).one()
-    if total_chars > MAX_SOURCE_CHARS or block_count > MAX_BLOCKS:
+    if total_chars > source_char_limit(options.version) or block_count > MAX_BLOCKS:
+        chars_exceeded = total_chars > source_char_limit(options.version)
+        log_event("chunk.failed", doc_id=doc_id, task_id=task_id, stage="chunk.source_budget",
+                  step="SOURCE_CHAR_LIMIT" if chars_exceeded else "BLOCK_COUNT_LIMIT",
+                  block_count=block_count, item_count=total_chars if chars_exceeded else block_count,
+                  limit_count=source_char_limit(options.version) if chars_exceeded else MAX_BLOCKS,
+                  error_code="CHUNK_LIMIT")
         raise ChunkError("CHUNK_LIMIT：切片源文本超过本地资源上限")
     blocks = list(session.scalars(select(DocumentBlock).where(DocumentBlock.doc_id == doc_id)
                                  .order_by(DocumentBlock.block_index.asc().nulls_last())))

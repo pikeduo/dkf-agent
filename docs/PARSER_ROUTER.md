@@ -30,6 +30,8 @@
 
 预检禁止 XML DTD/实体和网络获取，先验证真实容器及 Hash。PDF 逐页检查，横向重叠只判断风险，不改阅读顺序。小 logo、绘图/文本量和预检规模阈值通过 `.env` 中 ROUTER_* 配置，见 README。
 
+DOCX只有精确官方`attachedTemplate`且`TargetMode=External`时可视为非正文排版依赖，不抓取模板；内部模板缺件、其他命名空间的同名类型、外部图片/OLE/工作簿仍拒绝。Office XML单部件默认16MiB，超限新增`router.inspection_rejected / XML_PART_SIZE`，只记录实际`size_bytes`与`limit_count`，总XML预算、DTD/实体保护不变。调整既有`ROUTER_XML_PART_MAX_MB`需由用户重启相关进程；配置参与缓存身份，先完成旧配置下缓存恢复。
+
 `PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数；PDF_OBJECT_LIMIT保留步骤名称兼容，现仅针对单页图片数超过5000。日志保留触发页及实际计数/阈值，绘图数不能被日志白名单丢弃；不据通用错误码猜测云端失败。
 
 图片与绘图合计超过5000、但图片未超硬限制时，仅停止Python层的绘图几何/装饰细查，记录`router.preflight_geometry_limited / PDF_DRAWING_DETAIL_LIMIT`。保留真实数量、`required=true / content_or_uncertain`，增加既有`PDF_COMPLEX_DRAWING`理由，继续检查所有后续页；auto进入原MinerU Whole链路。总页数、单页文本行数、图片硬预算及原件/云端限制保持；PyMuPDF元数据提取仍执行，这不是进程级资源隔离。显式Native仍保留其对照范围，不能据此忽略覆盖或宣称视觉完整。该调整不改覆盖v2、Normalizer、Guard或缓存协议；从未创建云Job的失败文档经用户Retry可能首次提交收费任务。

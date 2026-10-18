@@ -3,6 +3,8 @@
 import hashlib
 import json
 import re
+import csv
+from io import StringIO
 from dataclasses import dataclass, replace
 from itertools import islice
 from collections.abc import Iterator
@@ -10,11 +12,13 @@ from uuid import UUID, uuid5
 
 from app.core.business_logging import log_event
 
-VERSION = "block-chunk-v3"
+VERSION = "block-chunk-v4"
+CAPTION_VERSION = "block-chunk-v3"
 ROW_VERSION = "block-chunk-v2"
 LEGACY_VERSION = "block-chunk-v1"
 TOKENIZER = "unicode-estimate-v1"
 MAX_SOURCE_CHARS = 10_000_000
+MAX_V4_SOURCE_CHARS = 16_000_000
 MAX_BLOCKS = 100_000
 MAX_CHUNKS = 20_000
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[^\s]", re.UNICODE)
@@ -34,11 +38,11 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """新切片使用v3表体行分组；已有v1/v2冻结检查点保持原算法，不静默换代。"""
+        """新切片使用v4原生TSV/大表行分组；已有v1～v3检查点保持冻结算法。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version not in (LEGACY_VERSION, ROW_VERSION, VERSION) or self.tokenizer != TOKENIZER):
+                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, VERSION) or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
     def snapshot(self) -> dict:
@@ -178,8 +182,53 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
     return result
 
 
-def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = False) -> list[list[Span]]:
-    """长HTML表按原行分组；v3允许原Block同时含表题/注释，v2保持旧入口规则。
+def source_char_limit(version: str) -> int:
+    """SQL预检和纯切片共用版本化字符预算，旧检查点不随新默认值扩大。"""
+    return MAX_V4_SOURCE_CHARS if version == VERSION else MAX_SOURCE_CHARS
+
+
+def native_table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
+    """按Native的带引号TSV逻辑行切片，字段内换行/制表符不作为记录边界。
+
+    仅由已知原生XLSX/CSV表格入口调用；不重新序列化，不复制表头。无法确认
+    列数、引号或单列格式时保留整块，完整长行仍由真实Tokenizer判定上限。
+    """
+    whole = [[Span(block, 0, len(block.text))]]
+    if token_count(whole[0]) <= budget and len(block.text) <= budget * 4:
+        return whole
+    stream = StringIO(block.text, newline="")
+    records, start, width = [], 0, None
+    try:
+        for row in csv.reader(stream, delimiter="\t", strict=True):
+            end = stream.tell()
+            width = len(row) if width is None else width
+            if len(row) != width or width < 2 or width > 1024 or len(records) >= 100_000:
+                return whole
+            records.append(Span(block, start, end))
+            start = end
+    except csv.Error:
+        log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
+                  stage="chunk.table_rows", step="UNSUPPORTED_NATIVE_ROWS")
+        return whole
+    if start != len(block.text) or not records:
+        return whole
+    result, first, last, cost = [], 0, 0, 0
+    for record in records:
+        count = token_count([record])
+        if last > first and (cost + count > budget or record.end - first > budget * 4):
+            result.append([Span(block, first, last)])
+            first, cost = last, 0
+        last, cost = record.end, cost + count
+    result.append([Span(block, first, last)])
+    if len(result) > 1:
+        log_event("chunk.table_split", block_id=block.block_id, page=block.page,
+                  stage="chunk.native_table_rows", chunk_count=len(result))
+    return result
+
+
+def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = False,
+                large_tables: bool = False) -> list[list[Span]]:
+    """长HTML表按原行分组；v4支持单元格段落及有界大网格，旧版本入口不变。
 
     原Block不变，外壳只在首/末片计为主内容，其他引用标context。无法证明行边界时
     保留原整表及oversized标记。表体外文字只引用一次，不重复到每片或猜切单元格。
@@ -207,10 +256,12 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
     elif not re.match(r"\s*<table(?:\s|>)", block.text, re.I):
         return whole
     from app.services.mineru.errors import MinerUError
-    from app.services.mineru.table_html import TableHTML
+    from app.services.mineru.table_html import TableHTML, TableLimits
 
     try:
-        table = TableHTML(block.text[table_start:table_end])
+        limits = TableLimits(max_chars=16_000_000, max_rows=20_000, max_cells=400_000,
+                             max_grid_cells=524_288) if large_tables else TableLimits()
+        table = TableHTML(block.text[table_start:table_end], limits=limits, cell_paragraphs=large_tables)
     except MinerUError:
         log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
                   stage="chunk.table_rows", step="UNSUPPORTED_TABLE_ROWS")
@@ -256,13 +307,13 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
 
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """按冻结v1/v2/v3策略切片；v3兼容带表题/注释的长表，不改原Block或字符证据。"""
+    """按冻结版本切片；v4新增原生TSV与有界大表行分组，不改原Block或字符证据。"""
 
     options = options or ChunkOptions()
     config = options.snapshot()
     if not blocks or not any(block.text.strip() for block in blocks):
         raise ChunkError("CHUNK_EMPTY：没有可切片正文")
-    if len(blocks) > MAX_BLOCKS or sum(len(block.text) for block in blocks) > MAX_SOURCE_CHARS:
+    if len(blocks) > MAX_BLOCKS or sum(len(block.text) for block in blocks) > source_char_limit(options.version):
         raise ChunkError("CHUNK_LIMIT：切片源文本超过本地资源上限")
     if (len({block.block_id for block in blocks}) != len(blocks)
             or any(type(block.block_index) is not int or block.block_index != index
@@ -281,8 +332,13 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     atoms = []
     for block in blocks:
         if block.text.strip():
-            if block.block_type == "table" and options.version in (ROW_VERSION, VERSION):
-                atoms.extend(table_units(block, options.size - 100, allow_surrounding=options.version == VERSION))
+            if (block.block_type == "table" and options.version == VERSION
+                    and block.source == "native_parser" and file_type in {"xlsx", "csv"}):
+                atoms.extend(native_table_units(block, options.size - 100))
+            elif block.block_type == "table" and options.version in (ROW_VERSION, CAPTION_VERSION, VERSION):
+                atoms.extend(table_units(block, options.size - 100,
+                    allow_surrounding=options.version in (CAPTION_VERSION, VERSION),
+                    large_tables=options.version == VERSION))
             else:
                 atoms.extend([[span] for span in text_spans(block, options.size - 100)]
                              if block.block_type not in {"table", "formula"}
