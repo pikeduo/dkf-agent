@@ -12,15 +12,15 @@ from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.models import Document
 from app.services.document_cleanup import cleanup_owned_files
-from app.services.document_management import ManagementError, config_for, dispatch_action, exception_cause, mark_failed, next_action
+from app.services.document_management import ManagementError, config_for, dispatch_action, exception_cause, exception_stage, mark_failed, next_action
 from app.tasks.documents import DocumentProcessingError, processing_session
 
 
-def save_management_failure(doc_id: UUID, task_id: UUID, code: str, cause_code=None) -> None:
-    """业务步骤回滚后独立保存安全编排错误，不覆盖迟到的新管理代次。"""
+def save_management_failure(doc_id: UUID, task_id: UUID, code: str, cause_code=None, *, stage=None) -> None:
+    """回滚后独立保存安全原因和准备阶段，不覆盖新代次，也不伪造业务任务失败/投递。"""
     try:
         with processing_session() as session, session.begin():
-            mark_failed(session, doc_id, task_id, code, cause_code)
+            mark_failed(session, doc_id, task_id, code, cause_code, stage=stage)
     except Exception:
         log_event("management.error_record_failed", level=logging.ERROR,
                   doc_id=doc_id, task_id=task_id, error_code=code)
@@ -29,7 +29,7 @@ def save_management_failure(doc_id: UUID, task_id: UUID, code: str, cause_code=N
 @celery_app.task(bind=True, name="app.tasks.management.manage_document", max_retries=17280,
                  acks_late=True, reject_on_worker_lost=True)
 def manage_document(self, doc_id: str) -> dict:
-    """查询当前检查点、准备下一任务或清理删除；不直接执行解析/模型，不盲目补投子任务。"""
+    """短编排保留真实准备失败阶段/原因；不执行解析/模型，不将已知资源错误伪报为代次冲突。"""
     try:
         identifier, task_id = UUID(doc_id), UUID(self.request.id)
     except (ValueError, TypeError, AttributeError):
@@ -77,10 +77,16 @@ def manage_document(self, doc_id: str) -> dict:
         raise DocumentProcessingError(str(ManagementError("MANAGEMENT_CHECKPOINT"))) from None
     except Exception as exc:
         # 编排不主动重试未知投递失败/费用；文件局部清理失败也保留DB删除检查点供用户恢复。
-        code = exc.code if isinstance(exc, ManagementError) else "MANAGEMENT_CHECKPOINT"
         cause = exception_cause(exc)
-        save_management_failure(identifier, task_id, code, cause)
-        log_event("management.failed", level=logging.ERROR, doc_id=identifier, task_id=task_id, error_code=code, error_type=cause)
-        raise DocumentProcessingError(str(ManagementError(code))) from None
+        stage = exception_stage(exc) if cause is not None else None
+        code = exc.code if isinstance(exc, ManagementError) else (
+            "MANAGEMENT_STAGE_FAILED" if cause is not None else "MANAGEMENT_CHECKPOINT")
+        save_management_failure(identifier, task_id, code, cause, stage=stage)
+        log_event("management.failed", level=logging.ERROR, doc_id=identifier, task_id=task_id,
+                  error_code=code, error_type=type(exc).__name__, stage=stage, step=cause)
+        message = str(ManagementError(code))
+        if cause is not None:
+            message += f"；阶段={stage}；原因={cause}"
+        raise DocumentProcessingError(message) from None
     # 仅用户启动的管理任务查询本地DB状态，有持久化截止时间；不轮询MinerU HTTP或占用Worker睡眠。
     raise self.retry(countdown=5, throw=False) from None

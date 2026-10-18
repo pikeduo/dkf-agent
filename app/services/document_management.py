@@ -99,6 +99,20 @@ def exception_cause(exc):
     return None
 
 
+def exception_stage(exc):
+    """仅按既有服务异常确定准备失败阶段，不把资源/模型错误误称为解析代次冲突。"""
+    prepared = getattr(exc, "management_stage", None)
+    if isinstance(prepared, str) and prepared in {"chunk", "embed", "index"} and exception_cause(exc) is not None:
+        return prepared
+    if isinstance(exc, EmbeddingError):
+        return "embed"
+    if isinstance(exc, IndexingError):
+        return "index"
+    if isinstance(exc, ChunkError):
+        return "chunk"
+    return None
+
+
 def active_job(session, document):
     """只查询该文档的活动云检查点，不请求供应商，不推测Celery结果。"""
     return session.scalar(select(DocumentParseJob).where(
@@ -410,7 +424,7 @@ def publish_management(doc_id: UUID, task_id: UUID) -> bool:
 
 
 def next_action(session, document, settings) -> dict:
-    """一次只准备一个阶段并持久化投递意图；等待只查询DB，不调用云API或加载模型。"""
+    """只准备一个阶段并绑定真实准备异常；等待只查询DB，不调用云API或加载模型。"""
     config = config_for(document)
     if config is None or config["state"] != "running":
         return {"kind": "stopped"}
@@ -441,15 +455,20 @@ def next_action(session, document, settings) -> dict:
         raise ManagementError("MANAGEMENT_STATE")
     if config["stage"] == stage and config["dispatched"]:
         return {"kind": "wait"}
-    if stage == "parse":
-        document.status, document.error_message = "UPLOADED", None
-        task_id, dispatch = document.processing_task_id, True
-    elif stage == "chunk":
-        task_id, dispatch = prepare_chunk(session, document, settings)
-    elif stage == "embed":
-        task_id, dispatch = prepare_embedding(session, document, settings)
-    else:
-        task_id, dispatch = prepare_index(session, document)
+    try:
+        if stage == "parse":
+            document.status, document.error_message = "UPLOADED", None
+            task_id, dispatch = document.processing_task_id, True
+        elif stage == "chunk":
+            task_id, dispatch = prepare_chunk(session, document, settings)
+        elif stage == "embed":
+            task_id, dispatch = prepare_embedding(session, document, settings)
+        else:
+            task_id, dispatch = prepare_index(session, document)
+    except (ChunkError, EmbeddingError, IndexingError) as exc:
+        # Index准备也会调用向量输入校验；按实际操作定位，而非仅凭异常类猜阶段。
+        exc.management_stage = stage
+        raise
     config.update(stage=stage, stage_task_id=str(task_id), dispatched=True, resume_failed=False)
     document.management_config = config
     session.flush()
@@ -475,8 +494,8 @@ def dispatch_action(session, doc_id: UUID, action: dict) -> bool:
     return PUBLISHERS[stage](session, doc_id, task_id)
 
 
-def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None) -> None:
-    """独立记录编排失败及白名单底层原因，不改原文档错误或新代次。"""
+def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None, *, stage=None) -> None:
+    """独立记录安全原因和真实准备失败阶段；保留原业务状态/代次，不假造已投递的子任务。"""
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update(nowait=True))
     if document is None or document.management_task_id != task_id:
         return
@@ -489,7 +508,11 @@ def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None
         # 本地运行错误的固定前缀可透传原因；绝不回显异常原文或未知字符串。
         local = (document.error_message or "").split("：", 1)[0]
         cause_code = causes[0] if causes else safe_cause_code(local)
-    config.update(state="failed", error_code=ManagementError(code).code, cause_code=safe_cause_code(cause_code))
+    cause_code = safe_cause_code(cause_code)
+    if stage in {"chunk", "embed", "index"} and cause_code is not None:
+        task = getattr(document, {"chunk": "chunk_task_id", "embed": "embedding_task_id", "index": "index_task_id"}[stage])
+        config.update(stage=stage, stage_task_id=str(task) if task is not None else None, dispatched=False)
+    config.update(state="failed", error_code=ManagementError(code).code, cause_code=cause_code)
     document.management_config = config
     if config["operation"] == "delete":
         document.status, document.error_message = "FAILED", str(ManagementError(code))

@@ -27,7 +27,8 @@ Service 导入/构造与 API 投递不加载 Torch/模型；每进程缓存一�
 - 编码前用真实Tokenizer（含特殊token、truncation=False）检查长度。切片估算不作为模型真实长度；新`block-chunk-v3`可在CPU按完整HTML表格行及rowspan关联组切片，兼容表体前后的原表题/注释，见[Chunk](CHUNK.md)。剩余不可拆长行/公式或不支持的表格超限仍报EMBEDDING_TOO_LONG，不截断前缀、不改写原式、不伪造向量。
 - 长度失败的`embedding.encode_failed`记录输入序号、真实Token数和限制数量；文档任务再以`embedding.chunk_rejected`关联真实chunk_id、全局1-based chunk_index、doc_id/task_id与`embedding.token_limit`阶段。日志只含受限整数及标识，不含正文/Tokenizer IDs/模型目录。后续management失败保留底层安全错误，不应仅按管理层通用码判断原因。
 - 文档只读取已有 Chunk，不重读原件、不调用 Parser/MinerU。每文档一个 gpu_queue 任务，内部依次批处理，每张 GPU 一个 solo/concurrency=1 Worker，不每 Chunk 一个任务，不静默改为 CPU。
-- 每次 Service/文档最多 2 万文本、总计 1000 万字符、单文本 100 万字符，单代次向量结果最多 512 MiB；超限明确失败。文档任务流式写数值批次，不一次物化整个文档的全部向量。
+- 文档聚合最多2万Chunk、1600万字符，与v4大表输入预算衔接；Service单次调用仍最多2万文本、1000万总字符、单文本100万字符。真实Tokenizer上限8192及单代次向量结果512MiB保持不变；文档内部按原批大小逐批编码/流式写入，不一次物化全部向量。
+- `embedding.input_rejected`在读取Chunk正文之前记录`embedding.document_budget`、固定限制种类、实际计数与上限。准备阶段失败时Document仍可为EMBEDDING而`embedding_task_id=null`，表示尚未投递GPU；必须同时看`management.state/cause_code`，不能当作仍在推理。修复预算后普通Retry接续原Chunk，不需要Reindex/云请求；真实超Token仍须另行修复切片来源。
 - 缺模型、GPU 不可用、推理/显存错误、数量/维度/非有限值/零向量异常为安全永久失败，不自动反复推理或缩小模型输入。临时数据库最多 3 次重试，5/10/20 秒。
 
 ## 检查点、状态与结果

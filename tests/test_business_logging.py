@@ -725,6 +725,19 @@ def test_cache_upgrade_cli_and_chunk_version_use_registered_safe_summaries(event
     assert second["step"] == "block-chunk-v4" and "SECRET" not in events.getvalue()
 
 
+def test_embedding_document_budget_and_management_cause_have_safe_chinese_summaries(events):
+    """聚合预算/管理准备失败保留阶段和实测计数，原异常/正文/密钥均不写业务日志。"""
+    logs.log_event("embedding.input_rejected", stage="embedding.document_budget", step="TOTAL_CHAR_LIMIT",
+        chunk_count=12992, item_count=16000001, limit_count=16000000, error_code="EMBEDDING_LIMIT",
+        text="SECRET_BODY", exception="SECRET_KEY")
+    logs.log_event("management.failed", stage="embed", step="EMBEDDING_LIMIT",
+                   error_code="MANAGEMENT_STAGE_FAILED", error_type="EmbeddingError", body="SECRET_BODY")
+    first, second = records(events)
+    assert first["chunk_count"] == 12992 and first["limit_count"] == 16000000
+    assert second["stage"] == "embed" and second["step"] == "EMBEDDING_LIMIT"
+    assert "超过聚合资源预算" in events.getvalue() and "SECRET" not in events.getvalue()
+
+
 @pytest.mark.parametrize("field", ["drawing_count", "line_count", "object_count", "limit_count"])
 @pytest.mark.parametrize("value", ["SECRET_BODY", -1, True, 1.5, 2**63, float("nan")])
 def test_preflight_counts_reject_non_integer_or_sensitive_values(events, field, value):

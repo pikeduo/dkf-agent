@@ -293,3 +293,26 @@ def test_stale_or_corrupt_checkpoint_and_safe_root_cause(context):
     document.processing_task_id = uuid4()
     with pytest.raises(tool.ManagementError, match="MANAGEMENT_CHECKPOINT"):
         tool.config_for(document)
+
+
+def test_retry_after_embedding_preparation_failure_preserves_chunks_and_creates_only_gpu_intent(context, monkeypatch):
+    """聚合预算失败未创建GPU任务时，Retry只接续现有Chunk，不换解析代次或重走收费路径。"""
+    document, session, settings = context
+    manager, _ = tool.prepare_management(session, document, settings, "reindex")
+    document.status, document.chunk_task_id = "EMBEDDING", uuid4()
+    original = document.processing_task_id, document.chunk_task_id
+    tool.mark_failed(session, document.doc_id, manager, "MANAGEMENT_STAGE_FAILED", "EMBEDDING_LIMIT", stage="embed")
+    assert document.embedding_task_id is None and document.management_config["stage_task_id"] is None
+
+    def prepare_gpu(session, doc, settings):
+        """只冻结内存GPU任务标识，不加载模型/读取原件/执行云任务。"""
+        doc.embedding_task_id = uuid4()
+        return doc.embedding_task_id, True
+
+    monkeypatch.setattr(tool, "prepare_embedding", prepare_gpu)
+    resumed, dispatch = tool.prepare_management(session, document, settings, "retry")
+    action = tool.next_action(session, document, settings)
+    assert dispatch and resumed != manager and action["stage"] == "embed" and action["kind"] == "dispatch"
+    assert (document.processing_task_id, document.chunk_task_id) == original
+    assert action["task_id"] == str(document.embedding_task_id)
+    assert document.status == "EMBEDDING" and tool.next_action(session, document, settings) == {"kind": "wait"}

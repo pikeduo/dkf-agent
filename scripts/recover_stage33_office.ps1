@@ -18,7 +18,7 @@ $localIds = @(
     'b37f4679-2701-4d54-8165-c80fd0840611', '8b72d308-ac54-4506-bf8d-734cacaf1b28',
     '897d54a0-dd38-42ad-b7e5-d0a22b35f956', 'e4c88d4d-f816-4b55-a0ea-92a5d642ec16',
     '3649c30e-d0cd-4c36-95cc-4842599156e5', 'ce7e99cf-0928-4609-a1bf-2baa6781bc86',
-    'efdf30a0-e412-4d28-8a3a-5257f2fe62a0', 'be585058-60d3-4e7a-a96b-db0bc23f6d28',
+    'be585058-60d3-4e7a-a96b-db0bc23f6d28',
     'be97464e-7ecc-4fd3-9af7-14a830c3bdf6', '5bf1bd8a-8879-4472-a2c7-4ff04bcba0ef',
     'd517319d-c348-49c6-925e-4abf894d1b8d'
 )
@@ -27,6 +27,10 @@ $newParseIds = @(
     '68989d39-3032-40c0-8d42-dddb29ea2185', '3f73d303-099f-4698-8910-4748667f64d2',
     '7440559b-26e2-40dd-ae35-39881536ac11', 'ee5e1f7a-0208-4c2d-adbc-eca7b98a4aa7',
     '7339e772-0627-40bf-b90f-a0e6646c0356', '83d24856-fb63-49f9-9466-8db2bf8543c8'
+)
+# 已确认切片成功、聚合预算检查阻止GPU任务创建的两份；恢复只接续现有Chunk。
+$embeddingBudgetIds = @(
+    'be585058-60d3-4e7a-a96b-db0bc23f6d28', '7339e772-0627-40bf-b90f-a0e6646c0356'
 )
 
 function Get-Stage33Status {
@@ -52,7 +56,7 @@ function Wait-Stage33Recovery {
 }
 
 function ConvertTo-Stage33Row {
-    # 所有未完成项保留逐文档原因/缺页/待审页；PARTIAL_READY不计入完整通过数。
+    # 同时展示业务/管理状态；准备阶段失败不再被EMBEDDING外观误判为仍在运行。
     param($Document, $State)
     $passed = ($State.status -eq 'READY' -and $State.block_count -gt 0 -and
         $State.chunk_count -gt 0 -and $State.chunk_count -eq $State.vector_count -and
@@ -60,6 +64,14 @@ function ConvertTo-Stage33Row {
     $action = 'WAIT_OR_REVIEW'
     if ($passed) { $action = 'COMPLETE' }
     elseif ($State.status -eq 'PARTIAL_READY') { $action = 'QUALITY_REVIEW' }
+    elseif ($Document.doc_id -in $embeddingBudgetIds -and $State.status -eq 'EMBEDDING' -and
+            -not $State.embedding_task_id -and $State.management.state -eq 'failed' -and
+            $State.management.cause_code -eq 'EMBEDDING_LIMIT') { $action = 'LOCAL_RETRY' }
+    elseif ($Document.doc_id -eq 'efdf30a0-e412-4d28-8a3a-5257f2fe62a0' -and
+            $State.status -eq 'FAILED' -and $State.management.cause_code -eq 'EMBEDDING_TOO_LONG') {
+        # 该文档已用v4重建且仍有12238真实Token长片；不反复Reindex消耗GPU。
+        $action = 'TOKEN_SOURCE_REVIEW'
+    }
     elseif ($State.status -eq 'FAILED') {
         if ($Document.doc_id -in $localIds) {
             $action = if ($State.parse_cache_present) { 'LOCAL_REINDEX' } else { 'LOCAL_CACHE_REQUIRED' }
@@ -68,11 +80,13 @@ function ConvertTo-Stage33Row {
         elseif ($State.management.cause_code -eq 'PREFLIGHT_LIMIT') { $action = 'XML_BUDGET_REVIEW' }
         elseif ($State.management.stage -eq 'cloud') { $action = 'ORIGINAL_CLOUD_JOB_REVIEW' }
     }
+    elseif ($State.management.state -eq 'failed') { $action = 'MANAGEMENT_FAILED_REVIEW' }
     return [pscustomobject]@{
         doc_id = $Document.doc_id; file = $Document.file_name; status = $State.status
         stage = $State.management.stage; blocks = $State.block_count; chunks = $State.chunk_count
         vectors = $State.vector_count; invalid_vectors = $State.invalid_vector_count
         passed = $passed; action = $action; cause = $State.management.cause_code
+        management_state = $State.management.state; management_error = $State.management.error_code
         error = $State.error_message; quality = $State.parse_quality.content
         warnings = ($State.parse_quality.warnings -join ',')
         missing_pages = ($State.parse_quality.missing_pages -join ',')
@@ -98,6 +112,7 @@ $rows = @(
         $row = ConvertTo-Stage33Row $document $state
         $operation = $null
         if ($ExecuteLocal -and $row.action -eq 'LOCAL_REINDEX') { $operation = 'reindex' }
+        if ($ExecuteLocal -and $row.action -eq 'LOCAL_RETRY') { $operation = 'retry' }
         if ($ExecuteNewParse -and $row.action -eq 'NEW_PARSE_REQUIRES_CLOUD_PERMISSION') {
             $detail = Invoke-RestMethod "$apiRoot/documents/$($document.doc_id)" -TimeoutSec 30
             if (@($detail.parse_jobs).Count -gt 0) {
@@ -129,5 +144,5 @@ New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 $report = Join-Path $reportDirectory ("recovery_status_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmssfff'))
 $rows | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8
 $rows | Group-Object status | Sort-Object Name | Format-Table Name,Count -AutoSize
-$rows | Where-Object { -not $_.passed } | Format-Table doc_id,status,stage,cause,action -AutoSize
+$rows | Where-Object { -not $_.passed } | Format-Table doc_id,status,stage,management_state,cause,action -AutoSize
 Write-Host "完整入库检查通过：$(@($rows | Where-Object { $_.passed }).Count)/200；逐项报告：$report"

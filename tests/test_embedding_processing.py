@@ -10,6 +10,55 @@ from app.services.embedding import processing
 from app.services.embedding.service import DIMENSION, EmbeddingError, EmbeddingOptions
 
 
+@pytest.mark.parametrize("count,chars", [(15160, 11273580), (12992, 14965690), (20000, 16000000)])
+def test_document_budget_accepts_large_aggregate_before_reading_current_chunk_rows(monkeypatch, count, chars):
+    """复现两份大表的SQL聚合计数；文档预算区别于单批预算，不读取实际文档或加载模型。"""
+    document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4(), processing_task_id=uuid4())
+    row = SimpleNamespace(chunk_index=1, source_parse_task_id=str(document.processing_task_id), text="内存切片")
+    aggregate, ordered = MagicMock(), MagicMock()
+    aggregate.one.return_value = (count, chars)
+    ordered.all.return_value = [row]
+    session = MagicMock()
+    session.execute.side_effect = [aggregate, ordered]
+    log = MagicMock()
+    monkeypatch.setattr(processing, "log_event", log)
+    assert processing.read_chunks(session, document) == [row]
+    assert session.execute.call_count == 2
+    log.assert_not_called()
+
+
+@pytest.mark.parametrize("count,chars,step,limit", [
+    (1, 16000001, "TOTAL_CHAR_LIMIT", 16000000),
+    (20001, 1, "CHUNK_COUNT_LIMIT", 20000),
+])
+def test_document_budget_rejects_before_fetching_text_and_logs_only_safe_counts(monkeypatch, count, chars, step, limit):
+    """文档边界仍有限；越界不加载正文/模型，只记录实际计数和固定失败阶段。"""
+    document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4())
+    session, log = MagicMock(), MagicMock()
+    session.execute.return_value.one.return_value = (count, chars)
+    monkeypatch.setattr(processing, "log_event", log)
+    with pytest.raises(EmbeddingError) as failure:
+        processing.read_chunks(session, document)
+    assert failure.value.code == "EMBEDDING_LIMIT" and session.execute.call_count == 1
+    assert log.call_args.args == ("embedding.input_rejected",)
+    assert log.call_args.kwargs["stage"] == "embedding.document_budget"
+    assert log.call_args.kwargs["step"] == step and log.call_args.kwargs["limit_count"] == limit
+
+
+def test_large_document_budget_keeps_source_generation_and_order_checks():
+    """扩大聚合预算仍不放行其他解析代次的Chunk，不因字符量合规跳过来源检查。"""
+    document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4(), processing_task_id=uuid4())
+    row = SimpleNamespace(chunk_index=1, source_parse_task_id=str(uuid4()), text="内存切片")
+    aggregate, ordered = MagicMock(), MagicMock()
+    aggregate.one.return_value = (12992, 14965690)
+    ordered.all.return_value = [row]
+    session = MagicMock()
+    session.execute.side_effect = [aggregate, ordered]
+    with pytest.raises(EmbeddingError) as failure:
+        processing.read_chunks(session, document)
+    assert failure.value.code == "EMBEDDING_SOURCE"
+
+
 def test_later_batch_token_limit_identifies_chunk_without_publishing_partial_vectors(monkeypatch, tmp_path):
     """第二批超限映射到全局Chunk序号，保留原异常且不发布manifest或推进INDEXING。"""
     options = EmbeddingOptions(str(tmp_path / "unused-model"), batch_size=2)

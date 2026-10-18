@@ -11,6 +11,9 @@ from sqlalchemy.exc import OperationalError
 from app.core.config import Settings
 from app.models import Document
 from app.services import document_management as service
+from app.services.embedding.service import EmbeddingError
+from app.services.chunk.splitter import ChunkError
+from app.services.indexing import IndexingError
 from app.tasks import management as worker
 
 
@@ -142,3 +145,45 @@ def test_busy_gpu_row_retries_short_check_without_marking_business_failed(contex
     monkeypatch.setattr(session, "scalar", occupied)
     result = worker.manage_document.apply(args=[str(document.doc_id)], task_id=str(document.management_task_id))
     assert result.state == "RETRY" and document.management_config["state"] == "running"
+
+
+@pytest.mark.parametrize("stage,error", [
+    ("embed", EmbeddingError("EMBEDDING_LIMIT")),
+    ("chunk", ChunkError("CHUNK_LIMIT：固定资源限制")),
+    ("index", IndexingError("INDEX_SCHEMA")),
+    ("index", EmbeddingError("EMBEDDING_SOURCE")),
+])
+def test_prepare_failure_keeps_actual_stage_and_cause_without_false_generation_conflict(context, monkeypatch, stage, error):
+    """准备子任务时的已知失败如实记录阶段/原因；没有成功投递就不伪造任务编号或READY。"""
+    document, session = context
+    frozen = document.processing_task_id
+    document.status = {"chunk": "CHUNKING", "embed": "EMBEDDING", "index": "INDEXING"}[stage]
+
+    def rejected(*args):
+        """仅抛固定服务异常，不执行切片/向量/数据库或消息投递。"""
+        raise error
+
+    dispatch, log = [], []
+    monkeypatch.setattr(service, {"chunk": "prepare_chunk", "embed": "prepare_embedding", "index": "prepare_index"}[stage], rejected)
+    monkeypatch.setattr(worker, "dispatch_action", lambda *args: dispatch.append(args))
+    monkeypatch.setattr(worker, "log_event", lambda *args, **kwargs: log.append((args, kwargs)))
+    result = worker.manage_document.apply(args=[str(document.doc_id)], task_id=str(document.management_task_id))
+    cause = service.exception_cause(error)
+    assert result.state == "FAILURE" and f"原因={cause}" in str(result.result)
+    config = document.management_config
+    assert config["state"] == "failed" and config["stage"] == stage
+    assert config["error_code"] == "MANAGEMENT_STAGE_FAILED" and config["cause_code"] == cause
+    assert config["stage_task_id"] is None and config["dispatched"] is False
+    assert document.processing_task_id == frozen and not dispatch
+    assert log[-1][1]["error_type"] == type(error).__name__ and log[-1][1]["step"] == cause
+
+
+def test_real_generation_conflict_remains_checkpoint_failure_and_never_dispatches(context, monkeypatch):
+    """真实解析代次不符仍拒绝，不因修正资源错误分类而绕过检查点身份。"""
+    document, session = context
+    document.processing_task_id = uuid4()
+    dispatch = []
+    monkeypatch.setattr(worker, "dispatch_action", lambda *args: dispatch.append(args))
+    result = worker.manage_document.apply(args=[str(document.doc_id)], task_id=str(document.management_task_id))
+    assert result.state == "FAILURE" and "MANAGEMENT_CHECKPOINT" in str(result.result)
+    assert not dispatch and document.status == "UPLOADED"

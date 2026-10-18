@@ -12,18 +12,26 @@ from app.core.config import PROJECT_ROOT, Settings
 from app.models import Document, DocumentChunk, DocumentParseJob
 from app.services.document_processing import transition_document
 from app.services.embedding.artifacts import ArtifactStore, digest_json
-from app.services.embedding.service import DIMENSION, MAX_ITEMS, MAX_TOTAL_CHARS, EmbeddingError, EmbeddingOptions, get_embedding_service
+from app.services.embedding.service import DIMENSION, MAX_ITEMS, EmbeddingError, EmbeddingOptions, get_embedding_service
+
+# 文档按GPU批次流式编码，聚合预算对齐v4大表；Service每次调用仍保留1000万字符限制。
+MAX_DOCUMENT_TOTAL_CHARS = 16_000_000
 
 
 def read_chunks(session: Session, document: Document) -> list:
-    """只读取当前文档必要的 Chunk 输入，限制数量/字符量，拒绝未知顺序及非当前解析代次。"""
+    """以文档级预算读取当前Chunk；超限先记安全计数，来源/顺序及单批模型限制仍严格检查。"""
 
     predicate = (DocumentChunk.doc_id == document.doc_id, DocumentChunk.kb_id == document.kb_id)
     count, chars = session.execute(select(func.count(), func.coalesce(func.sum(func.length(DocumentChunk.text)), 0))
                                   .select_from(DocumentChunk).where(*predicate)).one()
     if count == 0:
         raise EmbeddingError("EMBEDDING_EMPTY")
-    if count > MAX_ITEMS or chars > MAX_TOTAL_CHARS:
+    if count > MAX_ITEMS or chars > MAX_DOCUMENT_TOTAL_CHARS:
+        chars_exceeded = chars > MAX_DOCUMENT_TOTAL_CHARS
+        log_event("embedding.input_rejected", level=logging.ERROR, doc_id=document.doc_id,
+            stage="embedding.document_budget", step="TOTAL_CHAR_LIMIT" if chars_exceeded else "CHUNK_COUNT_LIMIT",
+            chunk_count=count, item_count=chars if chars_exceeded else count,
+            limit_count=MAX_DOCUMENT_TOTAL_CHARS if chars_exceeded else MAX_ITEMS, error_code="EMBEDDING_LIMIT")
         raise EmbeddingError("EMBEDDING_LIMIT")
     rows = session.execute(select(DocumentChunk.chunk_id, DocumentChunk.text,
         DocumentChunk.chunk_metadata["chunk_index"].as_integer().label("chunk_index"),

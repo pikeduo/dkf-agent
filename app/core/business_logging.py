@@ -278,6 +278,7 @@ EVENT_LABELS = {
     "management.finished": "文档管理编排已结束，以文档状态为准",
     "management.deleted": "文档自有文件清理及数据库级联删除已完成",
     "management.failed": "文档管理未完成，保留检查点及安全原因",
+    "embedding.input_rejected": "文档向量输入超过聚合资源预算，未继续处理或改写切片",
     "management.error_record_failed": "文档管理失败原因未能写入数据库",
     "formula.started": "开始指定来源的公式语义提取",
     "formula.synthesis_started": "公式及相邻证据已核对，准备单次语义结构化",

@@ -2,7 +2,46 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 最新清单：30份FAILED、68份PARTIAL_READY的恢复
+## 22:27恢复结果与Embedding聚合预算修复
+
+用户三份实时CSV分别为：22:11 READY102/PARTIAL_READY68/FAILED30；22:18 READY107/PARTIAL_READY68/FAILED24/EMBEDDING1；22:27 READY112/PARTIAL_READY70/FAILED16/EMBEDDING2，均登记200份。报告是逐文档读取快照，不保证同时刻状态；目前不宣称全部READY。
+
+原任务`885de43e-d667-4501-82b7-40ce7482d1eb`关联`7339e772-0627-40bf-b90f-a0e6646c0356`。日志明确为`read_chunks → prepare_embedding → next_action`抛出`EMBEDDING_LIMIT`，随后被管理任务误包装成`MANAGEMENT_CHECKPOINT`。只读SQL聚合确认：
+
+| 文档 | 当前Chunk | 文本总字符 | 原上限 | GPU任务 |
+|---|---:|---:|---:|---|
+| be585058-60d3-4e7a-a96b-db0bc23f6d28 | 15160 | 11273580 | 10000000 | 未创建 |
+| 7339e772-0627-40bf-b90f-a0e6646c0356 | 12992 | 14965690 | 10000000 | 未创建 |
+
+本轮仅修复文档聚合预算（1600万字符）及准备失败的错误分类/阶段，保留单批Service的1000万字符、2万Chunk、8192真实Token及512MiB向量产物限制。两份可用原Chunk普通Retry，不重新解析/切片/请求MinerU。新失败按真实阶段记录`MANAGEMENT_STAGE_FAILED/cause_code`；真正代次冲突仍拒绝。新CSV补充management_state/management_error，避免把已停止编排误当仍在运行。
+
+用户先执行定向Mock测试，Codex未执行：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_embedding_processing.py tests/test_embedding_service.py tests/test_management_task.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+```
+
+测试通过后，先暂停新投递并检查`celery inspect active/reserved/scheduled`，待任务安全结束再正常停止、重启API和全部CPU/GPU Worker加载修改。无需迁移或修改环境变量。仅恢复上述两份时，由用户先对第一份执行并等到终态，再处理第二份：
+
+```powershell
+$base = 'http://127.0.0.1:8000/api/admin/documents/7339e772-0627-40bf-b90f-a0e6646c0356'
+Invoke-RestMethod -Method Post -Uri "$base/retry" -TimeoutSec 120 -ErrorAction Stop
+Invoke-RestMethod -Uri "$base/status" -TimeoutSec 30 -ErrorAction Stop |
+    Select-Object status,chunk_count,vector_count,invalid_vector_count,embedding_task_id,management |
+    ConvertTo-Json -Depth 6
+# 第一份完成后，将$base末尾换为be585058-60d3-4e7a-a96b-db0bc23f6d28，执行相同Retry/状态命令。
+```
+
+状态/向量数量及原解析质量决定业务验收，不以202或GPU任务已创建当完成。两份各有约1.3～1.5万Chunk，真实GPU耗时/显存及本地向量文件大小需用户验收，建议串行。使用下列只读命令重新生成全部200份实时报告：
+
+```powershell
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+```
+
+该脚本`-ExecuteLocal`新增对两份`LOCAL_RETRY`的串行接续；原已验证缓存组仍按Reindex。`efdf30a0…`已由v4重建为124个Chunk，日志仍有第101个Chunk的12238真实Token超限，现标`TOKEN_SOURCE_REVIEW`，不反复重建并消耗GPU；本轮没有修复该来源长片。3份旧缓存未发布、9份外部依赖、1份XML预算、2份原云失败及70份PARTIAL_READY仍分别保留，不因本次预算修复自动通过。
+
+## 较早清单：30份FAILED、68份PARTIAL_READY的恢复
 
 用户最新输出中，剩余6份`EMBEDDING_TOO_LONG`的Chunk仍为`block-chunk-v3`（已逐份只读查询确认）；原生TSV和大表策略需要CPU Worker加载v4后**Reindex**才生效。重试Embedding不会改变原Chunk。已补充`chunk.started`的`step=实际冻结版本`日志，避免只看磁盘源码误判运行版本。
 
