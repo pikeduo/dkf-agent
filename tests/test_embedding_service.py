@@ -159,7 +159,7 @@ def test_token_limit_diagnostic_uses_order_across_service_batches(stub_service):
 
 
 def test_row_chunks_can_reach_embedding_without_truncating_the_source(stub_service):
-    """新行切片经原Service逐片编码；Stub证明长度衔接及来源，不代表真实GPU已验收。"""
+    """带表题/注释的长表经新切片逐片编码；Stub核对来源及长度，不代表真实GPU验收。"""
     from dataclasses import replace
 
     from test_chunk_splitter import assert_evidence, block, chunks
@@ -167,7 +167,7 @@ def test_row_chunks_can_reach_embedding_without_truncating_the_source(stub_servi
 
     service, model, _, _ = stub_service
     service.options = replace(service.options, max_length=8192)
-    source = block(1, html_table(rows=300), "table")
+    source = block(1, "原始表题\n" + html_table(rows=300) + "\n原始注释" * 50, "table")
     with pytest.raises(EmbeddingError, match="EMBEDDING_TOO_LONG"):
         service.embed_documents([source.text])
     assert model.calls == []

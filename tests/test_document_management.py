@@ -101,14 +101,15 @@ def test_reindex_changes_only_management_and_processing_generation_and_starts_ca
     assert tool.public_management(document).stage == "parse"
 
 
-def test_reindex_after_token_limit_rebuilds_v2_chunks_from_existing_parse_generation(context):
-    """旧整表向量超限后显式Reindex走缓存回放，新切片采用v2并保持原解析质量。"""
+@pytest.mark.parametrize("old_version", ["block-chunk-v1", "block-chunk-v2"])
+def test_reindex_after_token_limit_rebuilds_v3_chunks_from_existing_parse_generation(context, old_version):
+    """旧整表向量超限后显式Reindex走缓存回放，新切片采用v3并保持原解析质量。"""
     from app.services.chunk.processing import checkpoint_options, prepare_chunk
-    from app.services.chunk.splitter import ChunkOptions, LEGACY_VERSION, VERSION
+    from app.services.chunk.splitter import ChunkOptions, VERSION
 
     document, session, settings = context
     document.status, document.error_message = "FAILED", str(EmbeddingError("EMBEDDING_TOO_LONG"))
-    document.chunk_config = {"options": ChunkOptions(version=LEGACY_VERSION).snapshot(),
+    document.chunk_config = {"options": ChunkOptions(version=old_version).snapshot(),
                              "source_parse_task_id": str(document.processing_task_id)}
     document.parse_quality = {"content": "PARTIAL", "missing_pages": [12]}
     quality = document.parse_quality.copy()

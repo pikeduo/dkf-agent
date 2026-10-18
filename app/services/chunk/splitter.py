@@ -10,7 +10,8 @@ from uuid import UUID, uuid5
 
 from app.core.business_logging import log_event
 
-VERSION = "block-chunk-v2"
+VERSION = "block-chunk-v3"
+ROW_VERSION = "block-chunk-v2"
 LEGACY_VERSION = "block-chunk-v1"
 TOKENIZER = "unicode-estimate-v1"
 MAX_SOURCE_CHARS = 10_000_000
@@ -33,11 +34,11 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """新切片使用v2行分组；已有v1冻结检查点保持原算法，不静默换代。"""
+        """新切片使用v3表体行分组；已有v1/v2冻结检查点保持原算法，不静默换代。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version not in (LEGACY_VERSION, VERSION) or self.tokenizer != TOKENIZER):
+                or self.version not in (LEGACY_VERSION, ROW_VERSION, VERSION) or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
     def snapshot(self) -> dict:
@@ -177,21 +178,39 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
     return result
 
 
-def table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
-    """长HTML表按原行分组，rowspan关联行不可拆；复用原外壳并保留精确字符来源。
+def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = False) -> list[list[Span]]:
+    """长HTML表按原行分组；v3允许原Block同时含表题/注释，v2保持旧入口规则。
 
     原Block不变，外壳只在首/末片计为主内容，其他引用标context。无法证明行边界时
-    保留原整表及oversized标记，交给真实Tokenizer拒绝超限，不能猜切单元格或公式。
+    保留原整表及oversized标记。表体外文字只引用一次，不重复到每片或猜切单元格。
     """
     whole = [[Span(block, 0, len(block.text))]]
-    if ((token_count(whole[0]) <= budget and len(block.text) <= budget * 4)
-            or not re.match(r"\s*<table(?:\s|>)", block.text, re.I)):
+    if token_count(whole[0]) <= budget and len(block.text) <= budget * 4:
+        return whole
+    table_start, table_end = 0, len(block.text)
+    if allow_surrounding:
+        # MinerU基础块会把表题、HTML表体和表下注释串在一起；只定位唯一表体，不改Adapter。
+        openings = list(re.finditer(r"<table(?:\s|>)", block.text, re.I))
+        closings = list(re.finditer(r"</table\s*>", block.text, re.I))
+        if not openings:
+            return whole
+        if len(openings) != 1 or len(closings) != 1 or openings[0].start() >= closings[0].start():
+            log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
+                      stage="chunk.table_rows", step="AMBIGUOUS_TABLE_BODY")
+            return whole
+        table_start, table_end = openings[0].start(), closings[0].end()
+        # 纯空白归入表格外壳，避免大行组挤出仅含空白的独立Chunk。
+        if not block.text[:table_start].strip():
+            table_start = 0
+        if not block.text[table_end:].strip():
+            table_end = len(block.text)
+    elif not re.match(r"\s*<table(?:\s|>)", block.text, re.I):
         return whole
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.table_html import TableHTML
 
     try:
-        table = TableHTML(block.text)
+        table = TableHTML(block.text[table_start:table_end])
     except MinerUError:
         log_event("chunk.table_split_skipped", block_id=block.block_id, page=block.page,
                   stage="chunk.table_rows", step="UNSUPPORTED_TABLE_ROWS")
@@ -206,12 +225,12 @@ def table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
             start = stop
 
     def spans_for(first: int, last: int) -> list[Span]:
-        """只引用原表外壳与连续原行；不重写HTML、实体、单元格值或原字符偏移。"""
-        prefix_end, suffix_start = table.rows[0]["start"], table.rows[-1]["end"]
-        end = table.rows[last]["start"] if last < len(table.rows) else suffix_start
-        spans = [Span(block, 0, prefix_end, "content" if first == 0 else "context"),
-                 Span(block, table.rows[first]["start"], end),
-                 Span(block, suffix_start, len(block.text), "content" if last == len(table.rows) else "context")]
+        """把表体内区间移回原Block偏移，只引用外壳/连续原行，不重复表题或脚注。"""
+        prefix_end, suffix_start = table_start + table.rows[0]["start"], table_start + table.rows[-1]["end"]
+        end = table_start + table.rows[last]["start"] if last < len(table.rows) else suffix_start
+        spans = [Span(block, table_start, prefix_end, "content" if first == 0 else "context"),
+                 Span(block, table_start + table.rows[first]["start"], end),
+                 Span(block, suffix_start, table_end, "content" if last == len(table.rows) else "context")]
         return [span for span in spans if span.end > span.start]
 
     result, first, last = [], groups[0][0], groups[0][1]
@@ -228,12 +247,16 @@ def table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
         return whole
     log_event("chunk.table_split", block_id=block.block_id, page=block.page,
               stage="chunk.table_rows", chunk_count=len(result))
+    if table_start:
+        result.insert(0, [Span(block, 0, table_start)])
+    if table_end < len(block.text):
+        result.append([Span(block, table_end, len(block.text))])
     return result
 
 
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """按可信原序及冻结v1/v2策略切片；v2支持长表行分组，不改原Block或字符证据。"""
+    """按冻结v1/v2/v3策略切片；v3兼容带表题/注释的长表，不改原Block或字符证据。"""
 
     options = options or ChunkOptions()
     config = options.snapshot()
@@ -258,8 +281,8 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     atoms = []
     for block in blocks:
         if block.text.strip():
-            if block.block_type == "table" and options.version == VERSION:
-                atoms.extend(table_units(block, options.size - 100))
+            if block.block_type == "table" and options.version in (ROW_VERSION, VERSION):
+                atoms.extend(table_units(block, options.size - 100, allow_surrounding=options.version == VERSION))
             else:
                 atoms.extend([[span] for span in text_spans(block, options.size - 100)]
                              if block.block_type not in {"table", "formula"}

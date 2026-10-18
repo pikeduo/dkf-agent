@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.chunk import splitter
-from app.services.chunk.splitter import ChunkError, ChunkOptions, LEGACY_VERSION, VERSION
+from app.services.chunk.splitter import ChunkError, ChunkOptions, LEGACY_VERSION, ROW_VERSION, VERSION
 from app.services.mineru.table_html import TableHTML
 from test_chunk_splitter import assert_evidence, block, chunks
 
@@ -36,6 +36,49 @@ def test_long_html_table_rows_keep_complete_grid_and_exact_evidence():
         assert all(span["page"] == 13 and span["block_id"] == str(sources[1].block_id) for span in spans)
     expected = [cell["text"] for row in TableHTML(sources[1].text).rows for cell in row["cells"]]
     assert observed == expected
+
+
+@pytest.mark.parametrize("placement", ["caption", "footnote", "both"])
+def test_captioned_or_footnoted_table_splits_body_with_exact_original_offsets(placement):
+    """复现MinerU的表题+表体+脚注Block；只分表体，附文与原字符均保留且不重复。"""
+    prefix = "原始表题及章节\n" if placement in {"caption", "both"} else ""
+    suffix = "\n原始脚注与说明" * 60 if placement in {"footnote", "both"} else ""
+    body = html_table()
+    source = block(1, prefix + body + suffix, "table", page=13)
+    drafts = chunks([source])
+    assert len(drafts) > 1
+    assert_evidence(drafts, [source])
+    observed, table_count = [], 0
+    for draft in drafts:
+        # 标题/注释可能独立成片；只把完全位于原HTML表体的来源交给既有网格核对。
+        spans = [span for span in draft.metadata["source_spans"]
+                 if span["start_char"] >= len(prefix) and span["end_char"] <= len(prefix) + len(body)]
+        if not spans:
+            continue
+        fragment = "\n\n".join(draft.text[span["chunk_start_char"]:span["chunk_end_char"]] for span in spans)
+        table_count += 1
+        observed.extend(cell["text"] for row in TableHTML(fragment).rows for cell in row["cells"])
+    expected = [cell["text"] for row in TableHTML(body).rows for cell in row["cells"]]
+    assert table_count > 1 and observed == expected
+    assert all(draft.page_start == draft.page_end == 13 for draft in drafts)
+
+
+def test_surrounding_whitespace_does_not_become_an_empty_chunk():
+    """表外纯空白仍留在原外壳，不因超长rowspan关联组产生无法向量化的空白片。"""
+    body = '<table><tr><td rowspan="2">A</td><td>' + "甲" * 700 + '</td></tr>'
+    body += '<tr><td>' + "乙" * 700 + '</td></tr><tr><td colspan="2">末行</td></tr></table>'
+    source = block(1, "\n  " + body + "\n  ", "table")
+    drafts = chunks([source])
+    assert len(drafts) > 1 and all(draft.text.strip() for draft in drafts)
+    assert_evidence(drafts, [source])
+
+
+def test_multiple_table_bodies_are_not_guessed_or_partially_dropped():
+    """一个Block含多个表体时保留全块，不猜表题归属或丢掉第二张表。"""
+    source = block(1, "表题\n" + html_table() + "\n另一表题\n" + html_table(), "table")
+    drafts = chunks([source])
+    assert len(drafts) == 1 and drafts[0].text == source.text
+    assert_evidence(drafts, [source])
 
 
 def test_transitive_rowspan_rows_are_never_separated():
@@ -69,8 +112,9 @@ def test_legacy_checkpoint_retains_whole_table_without_running_new_policy(monkey
     assert_evidence(drafts, [source])
 
 
-def test_completed_v1_checkpoint_is_reused_without_upgrading_options():
-    """已切片文档重复请求沿用v1检查点，不偷偷重建Chunk或使现有向量失效。"""
+@pytest.mark.parametrize("version", [LEGACY_VERSION, ROW_VERSION])
+def test_completed_checkpoint_is_reused_without_upgrading_options(version):
+    """已切片文档重复请求沿用v1/v2检查点，不偷偷重建Chunk或使现有向量失效。"""
     from types import SimpleNamespace
     from uuid import uuid4
 
@@ -79,13 +123,28 @@ def test_completed_v1_checkpoint_is_reused_without_upgrading_options():
 
     parse_id, chunk_id = uuid4(), uuid4()
     document = SimpleNamespace(doc_id=uuid4(), status="EMBEDDING", processing_task_id=parse_id,
-        chunk_task_id=chunk_id, chunk_config={"options": ChunkOptions(version=LEGACY_VERSION).snapshot(),
+        chunk_task_id=chunk_id, chunk_config={"options": ChunkOptions(version=version).snapshot(),
                                              "source_parse_task_id": str(parse_id)})
     session = MagicMock()
     session.scalar.return_value = None
     assert prepare_chunk(session, document, Settings(_env_file=None)) == (chunk_id, False)
-    assert checkpoint_options(document).version == LEGACY_VERSION
+    assert checkpoint_options(document).version == version
     session.flush.assert_not_called()
+
+
+def test_frozen_v2_keeps_prior_behavior_for_captioned_table():
+    """已经执行过的v2配方保持原行为；修复只用于新v3检查点，不暗改旧Chunk身份。"""
+    from uuid import uuid4
+
+    doc_id, kb_id = uuid4(), uuid4()
+    source = block(1, "表题\n" + html_table() + "\n表下注释", "table")
+    previous = chunks([source], ChunkOptions(version=ROW_VERSION), doc_id=doc_id, kb_id=kb_id)
+    current = chunks([source], doc_id=doc_id, kb_id=kb_id)
+    assert len(previous) == 1 and previous[0].text == source.text and len(current) > 1
+    assert previous[0].metadata["chunker_version"] == ROW_VERSION
+    assert {draft.chunk_id for draft in previous}.isdisjoint(draft.chunk_id for draft in current)
+    assert_evidence(previous, [source])
+    assert_evidence(current, [source])
 
 
 def test_new_table_policy_is_deterministic_and_uses_different_chunk_identity():
