@@ -54,6 +54,7 @@ docs/*
 !docs/CONTEST_INTEGRATION.md
 !docs/CONTEST_API_CONTRACT.md
 !docs/CONTEST_BACKEND.md
+!docs/CONTEST_FRONTEND.md
 !docs/FORMULA_SEMANTICS.md
 !docs/KNOWLEDGE_AGENT.md
 !docs/PRESET_IMPORT.md
@@ -68,3 +69,10 @@ docs/archive/*
 # Local benchmark data
 /data/dataset/
 *.crdownload
+
+# Vue工作台的依赖、构建和测试产物不入仓库，package-lock.json仍应由用户安装后审阅提交。
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+/frontend/test-results/
+/frontend/*.tsbuildinfo

@@ -2,7 +2,7 @@
 
 ## 当前交付
 
-工作基线为本地`feat/contest-integration`，阶段1从`9507c2f`实施并由用户提交至`42d0743`，阶段2以该本地提交为基础；参考目录为`D:\python project\dkf_agent_integration_patch`。阶段1已完成必要修复/契约静态检查，人工回归及GPU Reindex仍待验收。阶段2已编写独立竞赛后端、意图/澄清/Linking及安全Trace，尚未运行测试或启动服务；Vue3未开始。后续开发不得修改或合并到main，不自动暂存、提交或推送。
+工作基线为本地`feat/contest-integration`，阶段1从`9507c2f`实施并由用户提交至`42d0743`，后续以该本地工程为基础；参考目录为`D:\python project\dkf_agent_integration_patch`。阶段1静态检查完成，人工回归及GPU Reindex仍待验收。阶段2后端已交付，自动测试（含类型兼容修复复测）和真实联调仍待用户验收。阶段3已编写Vue3/TypeScript工作台、双服务开发代理及隔离测试，但未安装npm依赖、执行测试/typecheck/构建、启动服务或真实联调。不得修改或合并到main，不自动暂存、提交或推送。
 
 原FastAPI、PostgreSQL/pgvector、Redis/Celery、MinerU、LlamaIndex、RAG、Citation、Formula及有限LangGraph Knowledge Agent继续保留。知识阶段33全200文档/4087题仍待验收，竞赛阶段1完成不改变该结论。
 
@@ -35,12 +35,14 @@
 flowchart LR
     UI[Vue3 统一界面] --> P[开发代理 / 部署反向代理]
     P -->|/api/contest/* → /api/*| C[竞赛FastAPI :8001]
-    P -->|/api/* 与 /health| K[原知识FastAPI :8000]
+    P -->|/api/knowledge/* 与 /api/admin/*| K[原知识FastAPI :8000]
+    P -->|/health/contest → /health| C
+    P -->|/health/knowledge → /health| K
     C --> S[Schema Linking / 澄清 / 只读SQL]
     K --> R[原上传 / Celery / RAG / Citation / Formula]
 ```
 
-第二服务代码已在阶段2实现，待用户部署/运行验收；图中Vue3和代理仍为后续设计。代理必须先匹配`/api/contest/*`再匹配通用`/api/*`；Vite只提供开发代理，生产需由用户部署反向代理。第二服务不复制上传、Parser、向量存储、RAG或公式引擎。
+第二服务代码在阶段2实现；阶段3已编写Vue3及开发代理，均待用户运行验收。代理分别精确匹配contest、knowledge、admin，避免通用/api截获问数；双健康检查各自转发真实/health。Vite只提供开发代理，生产需由用户部署反向代理。第二服务不复制上传、Parser、向量存储、RAG或公式引擎。
 
 | 参考代码的实际问题 | 后续整合处理 |
 |---|---|
@@ -66,11 +68,13 @@ flowchart LR
 | 阶段 | 实施范围 | 验收门槛 |
 |---|---|---|
 | 1 | 必要修复、版本化契约和四Tool边界已实施 | 静态检查完成；定向人工回归/单文档GPU Reindex仍待验收 |
-| 2（本次） | 独立contest_backend、目录/只读SQL/费用、意图/Linking/澄清/Trace已编写；按用户本轮范围包含原计划阶段3 | 用户隔离测试及真实权限/表格/条件/外键/费用/Trace验收，全部仍待执行 |
-| 3（待授权） | Vue3及双服务同源代理，知识库/上传/问数/文档问答/证据界面 | 所有页面依赖真实API；失败不显示成功；完整分页、页语义、证据与执行对应 |
+| 2 | 独立contest_backend、目录/只读SQL/费用、意图/Linking/澄清/Trace已交付 | 自动测试及真实权限/表格/条件/外键/费用/Trace仍待用户验收 |
+| 3（本次） | Vue3/TypeScript、双服务同源开发代理、问数/SQL/知识/上传管理/证据/Trace及人工跨源联动已编写 | 依赖安装、typecheck、隔离测试、构建和真实浏览器联调均待用户执行 |
 | 4（后续） | 薄适配、手工联调与赛题演示说明 | 用户授权范围内人工端到端验收；未实现能力明确标记，无自动跨源规划器 |
 
 统一Agent暂时只有[契约与设计](CONTEST_API_CONTRACT.md)，不新增Coordinator运行时，不重构原Knowledge Agent；未来启用统一入口需另立实现阶段。
+
+阶段3的文件清单、参考前端复用说明、实际API/DTO对应、环境变量和完整人工步骤见[前端交付与验收](CONTEST_FRONTEND.md)。浏览器令牌/会话私钥及业务内容仅在内存，不自动重发收费请求；不勾选上传许可时显式native，不把前端勾选当后端权限。没有开发统一Agent、第二套RAG/Formula/向量库，也未修改app、contest_backend或公共Python契约。本轮完成阶段3后停止等待用户确认。
 
 ## 阶段1人工验收
 

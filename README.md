@@ -4,7 +4,7 @@
 
 **新上传 → 自动解析 → Chunk → 本地 Embedding → pgvector → READY → 自动参与同库查询。** 每份文档独立增量处理，不重建整个知识库；READY表示所有Chunk向量已入库，不代表内容质量或问答准确。提供只读Dense/BM25/Hybrid、本地BGE重排、DeepSeek/自定义LLM问答及HTTP搜索/问答。当前接口暂无鉴权，仅限本机或可信内网，不应暴露公网。
 
-竞赛问数后端`contest_backend`已实现独立FastAPI、Schema Linking、多轮澄清、受限PostgreSQL查询与安全Trace，运行验收待用户执行。原知识库服务继续按下文启动；Vue3、同源代理及统一Agent HTTP尚未接入。边界见[竞赛整合说明](docs/CONTEST_INTEGRATION.md)。
+竞赛问数后端`contest_backend`已实现独立FastAPI、Schema Linking、多轮澄清、受限PostgreSQL查询与安全Trace；`frontend`已编写Vue3 + TypeScript工作台及双服务开发代理。自动测试、构建和真实联调仍待用户手动验收。原知识服务按下文启动，统一Agent HTTP/自动跨源规划尚未实现。边界见[竞赛整合说明](docs/CONTEST_INTEGRATION.md)。
 
 ### 独立竞赛问数服务
 
@@ -30,9 +30,30 @@ python -m uvicorn contest_backend.main:app --host 127.0.0.1 --port 8001 --worker
 | `POST /api/sessions/{session_id}/reset` | 修改问题/条件前清空旧确认与许可 |
 | `GET /api/traces/{trace_id}?session_id=...` | 会话专属安全步骤摘要 |
 
-除health外需`Authorization: Bearer <入口令牌>`，会话操作还需`X-Session-Token`，不能仅凭UUID授权。单入口令牌授权全部注册源，限本机单可信操作员；状态/预算仅存单进程内存，重启失效，必须`workers=1`。不提供Swagger或统一`/api/agent/query`；未来`/api/contest/*`代理尚未配置。
+除health外需`Authorization: Bearer <入口令牌>`，会话操作还需`X-Session-Token`，不能仅凭UUID授权。单入口令牌授权全部注册源，限本机单可信操作员；状态/预算仅存单进程内存，重启失效，必须`workers=1`。不提供Swagger或统一`/api/agent/query`；开发工作台将`/api/contest/*`代理到8001的`/api/*`。
 
 默认零云许可不请求模型；授权须确认**本任务原问题、选定结构及确认条件可外传给配置提供方并接受费用**，MinerU/知识问答许可不通用。无传输重试或Fallback，SQL最多一次单独许可的技术修复。查询只读、全树及表列/真实外键校验、超时与最多500行限制；最终SQL和结果仅在授权响应展示，日志/Trace无原文。权限配置、完整请求流程、错误码和资源边界见[竞赛后端说明](docs/CONTEST_BACKEND.md)。
+
+### Vue3 竞赛工作台
+
+用户先准备Node.js 22.18+（22.x）或24+，在单独PowerShell中手动执行；本轮未自动安装npm依赖、构建或启动服务：
+
+```powershell
+Set-Location 'D:\python project\dkf-agent-main\frontend'
+node --version
+npm --version
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+npm install
+npm run dev
+```
+
+打开`http://127.0.0.1:5173`。知识API需在8000、竞赛API需在8001独立运行；Worker、数据库、本地模型及迁移仍按原说明手动准备。前端配置仅含`FRONTEND_CONTEST_TARGET=http://127.0.0.1:8001`和`FRONTEND_KNOWLEDGE_TARGET=http://127.0.0.1:8000`，两者只由Vite读取并限制为约定回环地址；不填写API Key或DSN，不使用`VITE_`变量保存凭据。专用[前端模板](frontend/.env.example)与本地`frontend/.env`保持一致，根知识配置和竞赛配置不变。
+
+浏览器只请求同源`/api/contest/*`、`/api/knowledge/*`、`/api/admin/*`。`/health/contest`及`/health/knowledge`各自转发真实`/health`，只显示进程存活，不代表依赖可用。问数前在顶栏填写本地`CONTEST_API_TOKEN`，令牌/会话私钥仅驻内存，刷新后重新设置；不要将模型Key当成入口令牌。修改问题/条件先reset，换源新建会话；申请云许可和SQL修复预算均需显式操作，无自动收费重试。
+
+文档问答可仅检索，生成默认`allow_cloud=false`，每次勾选只授权当次生成。上传默认显式`native`；当次接受MinerU外传/费用后才用`auto`。原上传/管理API仍没有用户鉴权或统一费用许可系统，前端勾选不是安全控制，既有活动任务沿用后端冻结配置。状态按真实Document显示，202/UPLOADED不等于READY，PARTIAL_READY表示内容有缺口。跨源页只做人工确认实体后的联动，无自动规划器。
+
+`npm run build`生成静态文件至`frontend/dist`；`npm run preview`仅预览构建，不提供本次开发代理。生产同源反向代理须由用户另行配置，未部署。接口对应、故障处理和人工验收见[前端说明](docs/CONTEST_FRONTEND.md)。
 
 ## 1. 环境与配置
 

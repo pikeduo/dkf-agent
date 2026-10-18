@@ -14,7 +14,8 @@
 | `/api/admin/documents/{doc_id}`及`/status`、`/blocks`、`/chunks` | 原服务现有详情/状态/分页接口；retry、reindex、reparse及DELETE仍沿用原管理契约 |
 | `/api/knowledge/search` | 现有POST：kb_id、question、doc_ids及top_k；success/empty与原Evidence直传 |
 | `/api/knowledge/query` | 现有POST：搜索参数加allow_cloud默认false；直传原RAGAnswer |
-| `/api/contest/*` | 后续代理到8001的`/api/*`；阶段2已实现8001领域路由，但Vue代理尚未配置 |
+| `/api/contest/*` | 阶段3已编写Vite代理到8001的`/api/*`，与阶段2真实领域路由对应；运行待用户验收 |
+| `/health/contest`、`/health/knowledge` | 阶段3开发代理各自转发8001/8000的真实`/health`，仅进程存活 |
 | 8001 `/api/query`、`/api/catalog`、`/api/sessions`及`/api/traces/{trace_id}` | 已编写问数领域API，复用冻结AgentRequest/AgentResponse；会话/许可/reset完整路径见阶段2说明，尚未运行验收 |
 | `/api/contest/agent/query` | 拟议统一POST入口，本轮不注册；请求/响应使用下述v1，仅为未来适配设计 |
 
@@ -114,3 +115,5 @@ ErrorCode为固定枚举，前端固定中文映射；阶段2入口已编写输�
 Protocol中的run是同步接口边界，不指定线程/HTTP实现。后续适配器应核对request与context的client/session/范围一致，检查请求intent与工具类型，异常由入口映射为安全FailureResult；不能直接暴露内部服务或以客户端context作为可信输入。统一规划器、自动工具选择和跨源融合均不在本轮实现范围。
 
 阶段1结构及知识修复验收见[竞赛整合说明](CONTEST_INTEGRATION.md#阶段1人工验收)，阶段2配置、隔离测试及真实联调步骤见[竞赛后端说明](CONTEST_BACKEND.md#用户手工验收)。SQL权限/费用/Trace访问控制和真实知识来源均需用户运行验收；契约单测通过不能替代真实服务验收。
+
+阶段3 TypeScript只镜像当前SQL领域请求/响应投影以及原知识HTTP DTO，不修改冻结Python契约；对应表见[前端说明](CONTEST_FRONTEND.md)。`state/workbench.ts`中的统一Agent预留对象为`enabled=false, route=null`，不调用尚未注册的统一、来源或公式HTTP。问数的needs_clarification在界面标为needs_user；answered标为success，后端拒绝码标为blocked，不改变线上字段。浏览器不提交confirmed_slots或自定义表权限，不持久化令牌、SQL、原文或结果。

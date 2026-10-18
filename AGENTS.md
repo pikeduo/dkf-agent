@@ -20,13 +20,13 @@
 
 DKF-Agent（数知融问智能体）保留独立的`knowledge-service`；用户已授权在`feat/contest-integration`分支按方案B开展双FastAPI服务+Vue3同源代理竞赛整合。`app/`继续负责原知识库，后续`contest_backend/`负责NL2SQL/Schema Linking/意图与澄清，`frontend/`负责真实API交互；不复制知识库实现、不修改或合并到main。
 
-- 竞赛阶段2已编写独立问数FastAPI、唯一授权目录、SQL全树/表列/真实外键核验、意图/澄清及安全Trace；公共DTO/Tool协议未变。用户已准备sqlglot并反馈定向测试196通过、1失败；已修复regclass字符串类型节点导致AttributeError的问题，新增类型边界回归待用户复测，Codex不执行测试。阶段1静态检查完成，Office人工回归与真实GPU Reindex仍待验收。`main/f4b092e`仅只读审阅，旧Office缓存升级/分组恢复不是SQL前置修复，本轮不移植。细节见[竞赛后端](docs/CONTEST_BACKEND.md)。本轮止于阶段2，Vue3待用户确认；统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent，测试/部署禁令保持不变。
+- 竞赛阶段3已编写Vue3/TypeScript/Vite工作台、双服务同源代理、真实会话/澄清/SQL、知识问答/上传管理/证据/Trace及人工跨源联动；复用参考布局/样式和展示结构，不接入旧假数据与旧API字段。公共DTO/Tool协议及两个后端未修改。阶段2自动测试（含regclass修复复测）和真实服务联调仍待用户手动验收，阶段1Office人工回归与真实GPU Reindex仍待验收；阶段3依赖安装、typecheck、测试、构建及浏览器联调也未验收。仅允许在竞赛分支工作；无统一Agent HTTP/自动规划器，不重构原LangGraph。详细手工步骤见[前端说明](docs/CONTEST_FRONTEND.md)，本轮止于阶段3，等待用户确认。
 
 - 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.9）；历史计划仅供参考，不重新实现已有阶段。
 
 ### 当前开发进度
 
-当前阶段：**竞赛阶段2代码已实现，类型节点兼容修复待用户复测，真实PG/模型仍待验收；单进程会话/预算、显式云许可、受限SQL及Trace已接入独立领域API，Codex未启动服务或测试。阶段1人工回归及GPU Reindex仍待验收；Office预检和v4长表/TSV修复保留，v1～v3冻结。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原记录；全200/4087未验收，不进入知识阶段34，冻结数据不改。**
+当前阶段：**竞赛阶段3前端代码已整合，未安装npm依赖、执行测试/typecheck/构建、启动服务或联调，不宣称端到端通过。阶段2自动测试和真实PG/模型联调、阶段1人工回归及GPU Reindex仍待验收。知识Office/v4长表修复及v1～v3冻结保留；知识阶段33全量排错原记录不变，70261c48已READY、da426abd缓存PARTIAL/旧v2超限，全200/4087未验收，不进入知识阶段34。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -312,6 +312,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 路线、阶段验收、最终协议 | [开发计划](docs/DEVELOPMENT_PLAN_CODEX.md) |
 | 双服务竞赛整合、选择性移植与统一Tool边界 | [竞赛整合](docs/CONTEST_INTEGRATION.md)、[冻结契约](docs/CONTEST_API_CONTRACT.md) |
 | 竞赛问数服务、只读SQL/会话/费用与人工验收 | [竞赛后端](docs/CONTEST_BACKEND.md) |
+| Vue3工作台、同源代理、TypeScript DTO与浏览器验收 | [竞赛前端](docs/CONTEST_FRONTEND.md) |
 | Parser、页码/坐标、持久化与回归 | [Parser 契约](docs/PARSER_CONTRACT.md) |
 | 云接口、限流、检查点、顺序与真实验收 | [MinerU Cloud](docs/MINERU_CLOUD.md) |
 | 预检、决策、Guard、XLSX 对照 | [Parser Router](docs/PARSER_ROUTER.md) |

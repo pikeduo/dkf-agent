@@ -2,7 +2,7 @@
 
 ## 交付状态
 
-工作分支仅为`feat/contest-integration`。阶段2已编写独立FastAPI问数服务、Schema Linking、多轮澄清、受限PostgreSQL执行及安全Trace；Codex未运行pytest、启动服务、查询真实数据库、安装依赖或调用模型。用户定向测试反馈196通过、1失败：regclass的DataType.this为字符串，原实现访问.name导致AttributeError；现已改为只接受明确内置枚举允许集，其他节点安全返回SQL_REJECTED，并补充未知节点/系统类型拒绝与正常CAST回归，待用户复测。阶段1静态检查已完成，人工回归与真实GPU Reindex仍待用户验收。Vue3及同源代理尚未实施，统一Agent HTTP与自动跨源规划器未注册。
+工作分支仅为`feat/contest-integration`。阶段2已编写独立FastAPI问数服务、Schema Linking、多轮澄清、受限PostgreSQL执行及安全Trace；Codex未运行pytest、启动服务、查询真实数据库、安装依赖或调用模型。用户定向测试反馈196通过、1失败：regclass的DataType.this为字符串，原实现访问.name导致AttributeError；现已改为只接受明确内置枚举允许集，其他节点安全返回SQL_REJECTED，并补充未知节点/系统类型拒绝与正常CAST回归，待用户复测。阶段2自动测试及真实联调仍待用户验收，阶段1人工回归与真实GPU Reindex仍待验收。阶段3已编写Vue3及同源开发代理，运行未验收；统一Agent HTTP与自动跨源规划器未注册。
 
 只读审阅`main/f4b092e`：该提交主要增加旧Office缓存离线升级、分组恢复及冻结版本日志，并删除交付ZIP。这些对后续知识恢复有用，但不是SQL服务前置依赖；本阶段不移植、不merge、不cherry-pick，知识业务及原验收状态保留。
 
@@ -77,7 +77,7 @@ if (-not (Test-Path data/contest/registry.json)) { Copy-Item contest_backend/reg
 python -m uvicorn contest_backend.main:app --host 127.0.0.1 --port 8001 --workers 1 --no-access-log
 ```
 
-本阶段直接访问8001，未来Vue代理将`/api/contest/*`重写为这里的`/api/*`。尚未配置代理，不能声称浏览器同源链路已可用。
+直接访问8001使用本页路径；阶段3 Vite代理将浏览器`/api/contest/*`重写为这里的`/api/*`，健康路径单独匹配。代理代码已编写，浏览器同源链路仍待用户手动联调，见[前端说明](CONTEST_FRONTEND.md)。
 
 | 路径 | 契约和行为 |
 |---|---|
@@ -129,4 +129,4 @@ python -m pytest contest_backend/tests tests/test_contest_contract.py tests/test
 6. 在独立验收库验证拒写、多句、越权、只读账号和超时；不在业务库运行破坏性反例。模型失败/DB不可用须安全错误，执行未知不重放。500/501行边界及数值类型用已授权只读样本核对。
 7. 在本地检查每日日志和GET trace，只看固定IDs/步骤/数量/耗时，无question/SQL/Prompt/密钥/结果/原始上游错误。HTTP响应允许SQL，持久化日志不允许。费用与失败是否计费最终以供应商账单为准。
 
-本轮未验收：上述所有用例、真实PG权限/语法/目录、模型提供方连接与费用、真实多轮语义/性能、阶段1Office人工回归/GPU Reindex；Vue3、代理、文档/RAG/页码UI及统一Agent运行时留待后续确认。本阶段结束后停止，不继续前端。
+阶段2未验收：上述所有用例、真实PG权限/语法/目录、模型提供方连接与费用、真实多轮语义/性能；阶段1Office人工回归/GPU Reindex也仍待验收。阶段3虽已编写Vue3、代理及文档/RAG/页码UI，前端测试、构建与真实联调仍待用户执行，不提升阶段2验收状态。统一Agent运行时未实现。
