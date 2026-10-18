@@ -19,15 +19,18 @@ from test_mineru_merge import merged_case
 
 @pytest.mark.parametrize("outcome", ["pass", "adapter_fail", "guard_fail"])
 def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context, monkeypatch, outcome):
-    """Whole复用原归档；准确区分Adapter失败/Guard失败，不修改原Job或生成成功缓存。"""
+    """Whole复用原归档并区分失败阶段；缺页只报冻结计数，不放宽Guard或修改Job。"""
     document, job, settings, _ = context
     from app.services.mineru import jobs, raw_results
-    from app.parsers.routing.contracts import RouteDecision, StructuralSignals
+    from app.parsers.routing.contracts import PageSignals, RouteDecision, StructuralSignals
     from app.parsers.routing import guard
     options = jobs.parse_options(settings)
     job.parse_options = options | {"_cache_recipe": recipe(document, settings, "mineru_whole"),
         "_cache_guard": RouteDecision(parse_mode="mineru", file_type="pdf", route_strategy="mineru_whole",
-            reason_codes=("EXPLICIT_MINERU",), signals=StructuralSignals(page_count=2)).model_dump(mode="json")}
+            reason_codes=("EXPLICIT_MINERU",), signals=StructuralSignals(page_count=2,
+                pages=tuple(PageSignals(page=page, text_chars=10, image_count=0, image_area_ratio=0,
+                    drawing_count=0, annotation_count=0, required=True) for page in (1, 2))
+                if outcome == "guard_fail" else ())).model_dump(mode="json")}
     job.options_hash = hashlib.sha256(json.dumps(options, sort_keys=True).encode()).hexdigest()
     job.submission_attempted = True
     values, layout, _ = merged_case()
@@ -51,7 +54,12 @@ def test_whole_diagnostic_uses_archived_receipt_and_does_not_mutate_job(context,
         assert report["block_count"] == 2
     else:
         assert report["merge_diagnostic"]["reason"] == "MOVED_TEXT"
+    if outcome == "guard_fail":
+        assert report["missing_required_original_pages"] == [2]
+        assert report["missing_required_page_signals"] == [{"page": 2, "text_chars": 10,
+            "image_count": 0, "drawing_count": 0, "annotation_count": 0}]
     assert report["zip_batch_provenance"] == "validated_local_receipt"
+    assert not any(report[name] for name in ("database_modified", "cache_published", "cloud_submitted"))
     assert (vars(job), vars(document)) == snapshot
 
 

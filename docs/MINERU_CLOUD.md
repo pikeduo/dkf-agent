@@ -98,7 +98,7 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 - 只针对缺少table_body且相同位置的后处理table_body子块明确`lines_deleted=true / lines=[]`的占位；父table通常没有该标记。V1/para/preproc同页类型/bbox/index须唯一、V1位置无重复；来源必须是连续物理页，可跨已验证的页边界及原样旁注/页下注释/代码等间隔，最多200页和512个间隔，并受下述HTML预算约束。
 - V1合并HTML必须与目标para的网格/单元格投影完全等价；preproc仅证明各源表行/单元格和归属。受限HTMLParser不渲染/执行，只接受表格结构、br与受检行内eq比较；未知标签/属性、嵌套表、坏HTML、缺口/重叠/越界跨度安全失败。每组HTML总量≤8MiB，单HTML≤4MiB，最多4096行/65536单元格/1024列/262144占用格。输出始终切取原V1 HTML，不重新序列化layout。
 - 行数相同时沿用已通过的连续V1原字符切片。云端省略重复页首行时，允许后一页连续前缀与前页已验证前缀逐格一致，再复用对应V1原行；其余行必须按原序消耗且最终用尽全部V1行。每页最多核对64个前缀候选，多解拒绝；不拿任意缺行冒充重复表头。输出始终来自V1，每个复用行须在该页preproc中真实存在，报告保留`reused_prefix_rows`。
-- 逐行核对单元格数、td/th、原序、空白标准化后的文字及rowspan；tbody包装、等价br/空白写法不改变单元格关系。切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，不改V1的colspan；不从layout拷正文，也不推测跨页单元格续接的字符归属。
+- 逐行核对单元格数、td/th、原序、空白标准化后的文字及rowspan；tbody/br包装不改变单元格关系。切口不能跨rowspan。列数不同仅允许一致、严格单调且不收缩的边界细化映射，不改V1的colspan。两页恰有一行被续接时，先尝试旧路径，仅其拒绝后逐格证明前页末行/后页首行的非空白字符拼接完全等于V1，再切取原单元格字符；列边界/标签须一致、rowspan必须为1，不能在实体或公式标签内部切割。原标签、空白、实体和数字不重写；其余行仍严格投影，报告保留`continued_row_count`。不从layout拷正文，不处理任意多页/复杂跨度续接。
 - Caption/footnote必须由preproc唯一Span及para/V1去向共同证明：仍挂表的移动结果与后页删除标记按原规则核对；已转为同页独立Text时，必须有唯一原子块、相同index/bbox、逐Span类型/原文/坐标、非跨页标记及唯一同框V1全文对应，才保留其现有Text，不重复挂回表格。未知/缺失/重复/乱序来源拒绝，不从layout补写标题或附注；不能仅凭文字相同或index相同推断。表格根bbox不一定包含footnote，不以根框猜归属。图片只核对相对ZIP身份及唯一成员，目标仍须指向首源图，保留V1的img_path，不把合并图复制给后页，也不从layout创建新图片引用。
 - 恢复按原数组索引写回，保留原page/bbox/类型；新版本/同一拟用身份下Block ID稳定，图像/原ZIP不改写。真正空table即使有caption也不能冒充表体，EMPTY_BLOCK诊断给固定子原因、1-based page/item_index及结构类型；恢复日志不等于持久化成功。
 
@@ -110,8 +110,9 @@ Get-Content -Encoding UTF8 results/mineru_merge_zip_01.json
 
 - Span身份采用父块内的出现顺序，不以内容/bbox相同判断重复；相同公式可合法出现多次，来源与目标的数量、顺序、原文、坐标和cross_page仍逐一核对。页眉也允许一行多个纯文本Span。
 - 原样代码、旁注、页下注释不应截断跨页合并链。文字和表格共享受检间隔规则，保留原项/原索引；代码须有相同的前后子结构。不越过其他正文、标题或未知类型寻找目标；表格恢复不能越过另一张非空表，文字恢复跨图表仍须沿用独立身份校验。
+- 用户已批准非相邻物理页的严格例外：续段之间每一页的全部para/preproc父结构完全一致，均已唯一对应原样保留的图表/代码等间隔，才允许跨过整页；中间缺页、未保留正文、删除/改写结构、倒页或错误cross_page均拒绝。真实字段调查发现正文在第10/13页，中间第11页表格和第12页图表均未变；这只是本地字段证据，不是normalize已通过。
 - 英文断词在已核对的不同父块接缝适用，包括同页分栏；只接受V1已经省略的ASCII词尾连字符，数字、减号、缺字及错误跨页标记仍拒绝。
-- 本次是v3中原先拒绝结构的扩展，已成功结果的正文/页/ID及缓存键不变；不自动重写READY文档或旧缓存。跨页单元格拼接、被上游省略且无法在V1找到的附注、实际缺页仍需独立核对，不能承诺全部17份已恢复。
+- 本次是v3中原先拒绝结构的扩展，旧完整行/重复表头路径优先，已成功结果的正文/页/ID及缓存键不变；不重写READY文档或旧缓存。多页复杂单元格续接、无法在V1找到的附注、实际缺页仍须独立核对，不能承诺全部恢复。附注数量冲突报告`observed/expected`，Whole完整性失败报告冻结的`missing_required_original_pages`及安全计数，不从原件猜补正文或解除required。
 - 只读字段调查不是Adapter验收。本轮未运行pytest、真实ZIP normalize或数据库恢复；新增`tests/test_mineru_adapter_contract.py`及相邻回归由用户执行。
 
 ```powershell
@@ -133,6 +134,52 @@ Get-ChildItem "$audit/*.json" | ForEach-Object {
 ```
 
 只有`ADAPTER_PASS_NOT_RECOVERED`且Guard通过才使用原管理Retry；先手动重启旧CPU Worker加载修复代码。无云Job的PREFLIGHT_LIMIT不属于Adapter问题，也不在这16份ZIP回放中。不要Force Reparse、清缓存或重新提交已完成批次。
+
+#### 本轮6份恢复及其余10份回放
+
+用户报告`results/stage33_adapter_20261018_095528300/`中6份Adapter/Guard通过、10份失败；只读通过不等于已落库。先由用户执行上述Mock回归，再重启原CPU Worker加载代码；API、数据库、Redis、GPU Worker沿用原环境。以下操作由用户执行，不重建知识库、不重传原件。只恢复同Hash/同代次的本地适配失败；READY跳过，在途跳过，身份变化/请求不明确立即停止，不自动重发。
+
+```powershell
+$docApi = "http://127.0.0.1:8000/api/admin/documents"
+$kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
+$reports = @(Get-ChildItem "results/stage33_adapter_20261018_095528300/*.json" | ForEach-Object {
+    Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+} | Where-Object { $_.status -eq "ADAPTER_PASS_NOT_RECOVERED" -and $_.completeness_guard -eq "PASS" })
+"本轮已通过报告：$($reports.Count) 份（原报告为6份）"
+foreach ($r in $reports) {
+    $base = "$docApi/$($r.doc_id)"
+    $doc = Invoke-RestMethod -Uri $base -ErrorAction Stop
+    if ($doc.kb_id -ne $kbId -or $doc.file_hash -ne $r.original_sha256) { throw "文档身份变化，停止" }
+    if ($doc.status -eq "READY") { Write-Host "已READY，跳过：$($r.doc_id)"; continue }
+    if ($doc.status -ne "FAILED" -or $doc.management.state -eq "running") {
+        Write-Warning "在途或非失败状态，未重复投递：$($r.doc_id)"; continue
+    }
+    $jobs = @($doc.parse_jobs | Where-Object {
+        $_.job_id -eq $r.job_id -and $_.task_id -eq $doc.task_id -and $_.batch_id -eq $r.batch_id -and
+        $_.provider -eq "mineru_cloud" -and $_.state -eq "failed" -and $_.upload_complete -eq $true -and
+        $_.submission_attempted -eq $true -and $_.error_code -eq "MERGE_EVIDENCE"
+    })
+    if ($jobs.Count -ne 1) { throw "原失败Job身份或失败阶段变化，停止；不要Force Reparse" }
+    Invoke-RestMethod -Method Post -Uri "$base/retry" -TimeoutSec 120 -ErrorAction Stop |
+        Select-Object doc_id, management_task_id, operation, stage, state, status
+}
+```
+
+该6份的服务端Retry会校验原ZIP回执并设置`_local_replay_only`，不调用Provider；随后按原链路继续Chunk/Embedding/Index。成功以`/status`的READY、`chunk_count=vector_count>0`、无非法向量和management/done为准，不把202当作完成。报告文件是旧快照，恢复后不会自动改写它。
+
+继续检查其余10份时，只运行离线诊断，输出新目录：
+
+```powershell
+$audit = "results/stage33_adapter_next_$(Get-Date -Format yyyyMMdd_HHmmssfff)"
+Get-ChildItem "results/stage33_adapter_20261018_095528300/*.json" | ForEach-Object {
+    $r = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($r.status -eq "FAIL") {
+        python scripts/mineru_merge_diagnostic.py --job-id $r.job_id --batch-id $r.batch_id --output "$audit/$($r.doc_id).json"
+    }
+}
+```
+
+本轮字段调查确认：3份TABLE_EXTRAS均有后页caption在V1中找不到对应原文，不能从layout补造；还须核对其他附注，不能把它们宣布已修复。`d8087523-0aa7-4f4a-8a85-8e055710f0fd`的旧报告另有`unsubmitted_part_count=1`，即使首片本地通过，另一片也不是已付费结果回放；未单独授权前不得提交。Whole的COMPLETENESS保留失败，利用新缺页信号继续只读定位，不自动解除required。
 
 **历史报告03的Guard失败：** 原冻结预检要求全部200页；ZIP的第131、188页在V1/para/preproc/discarded中均无块。冻结摘要为text_chars=0、image_count=0、drawing_count=4，当时尚未核对原页，报告为`FAIL / COMPLETENESS`。该报告保留不改写；后续只读原页调查及新规则见下节，旧冻结Job默认仍失败，不能直接删除required页、伪造Block或修改SQL。
 

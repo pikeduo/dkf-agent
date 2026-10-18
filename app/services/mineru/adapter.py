@@ -341,7 +341,8 @@ MERGE_REASONS = {
     **{name: "restore_merged_tables" for name in (
         "TABLE_HTML", "TABLE_GRID", "TABLE_LIMIT", "TABLE_ROWS", "TABLE_CELLS",
         "TABLE_LAYOUT", "TABLE_MATCH", "TABLE_INDEX", "TABLE_DELETED", "TABLE_PAGES",
-        "TABLE_BODY", "TABLE_EXTRAS", "TABLE_IMAGES", "TABLE_AMBIGUOUS", "TABLE_ROW_MAPPING_AMBIGUOUS")},
+        "TABLE_BODY", "TABLE_EXTRAS", "TABLE_IMAGES", "TABLE_AMBIGUOUS", "TABLE_ROW_MAPPING_AMBIGUOUS",
+        "TABLE_CONTINUATION_MARKUP")},
 }
 
 
@@ -677,13 +678,42 @@ def matched_merge_boundary(item: dict, pages: dict[int, dict], allowed_pages: se
     return index, boundary["index"]
 
 
+def verify_intervening_pages(group: list[dict], pages: dict[int, dict], retained: set[tuple[int, int]]) -> None:
+    """只允许已完整保留的结构页隔在续段之间；不越过未知正文或未解释空页。
+
+    每个中间物理页的全部para父块必须有原样间隔的唯一身份，前处理也须同集合；
+    Span原文、坐标及cross_page仍由原恢复流程逐项核对。本函数不生成或移动内容。
+    """
+    for left, right in pairwise(group):
+        start, end = left["page_idx"], right["page_idx"]
+        if end < start or end - start - 1 > len(retained):
+            raise merge_evidence_error("SOURCE_PAGE", page_idx=end)
+        for index in range(start + 1, end):
+            page = pages.get(index, {})
+            before, after = page.get("preproc_blocks"), page.get("para_blocks")
+            if (not isinstance(before, list) or not isinstance(after, list) or not after
+                    or len(before) != len(after)
+                    or any(not isinstance(block, dict) or block.get("type") not in PRESERVED_GAP_TYPES
+                           or type(block.get("index")) is not int for block in before + after)):
+                raise merge_evidence_error("SOURCE_PAGE", page_idx=end)
+            originals = {(block["type"], block["index"]) for block in before}
+            current = {(block["type"], block["index"]) for block in after}
+            if (originals != current or len(current) != len(after)
+                    or any((index, block["index"]) not in retained for block in after)):
+                raise merge_evidence_error("SOURCE_PAGE", page_idx=end)
+            lookup = {(block["type"], block["index"]): block for block in before}
+            if any(lookup[(block["type"], block["index"])] != block for block in after):
+                # 全页结构须未被改写或删除，不能仅凭同一外框越过未恢复的合并表格。
+                raise merge_evidence_error("SOURCE_PAGE", page_idx=end)
+
+
 def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list[dict], int]:
     """恢复正文及有证据的非连续合并占位，保留所有原数组位置、页面与bbox。
 
     支持原序文字/行内公式Span，最多64个占位与64个经核对的原样间隔。必须有
     lines_deleted=true、空后处理lines、完整前处理来源及逐Span目标顺序证据；
-    跨页要求cross_page=true且相邻后一页；同页分栏或跨页的已核对父块接缝均允许
-    V1省略英文断词符，不把物理换页作为英文续词的必要条件。
+    跨页要求cross_page=true；非相邻物理页仅允许中间全部结构页均完整验证并原样
+    保留。同页分栏或跨页的已核对父块接缝均允许V1省略英文断词符。
     歧义安全失败，不跳过真空正文，不从layout补回V1没有的字符。
     """
 
@@ -733,6 +763,7 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             except MergeEvidenceError as error:
                 error.locate(page_idx=value.get("page_idx"), item_index=position + 1)
                 raise
+        used_boundaries = set()
         if boundary_indices:
             # 边界不能用于跨越别的正文；目标映射在V1中也必须唯一，避免重复目标歧义。
             target_box = convert_bbox(target.get("bbox"), (1000, 1000))
@@ -745,8 +776,12 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             if target_matches != 1:
                 raise merge_evidence_error("TARGET_AMBIGUOUS", page_idx=target.get("page_idx"),
                                            item_index=target_index + 1, observed=target_matches, expected=1)
-            allowed_pages = {value.get("page_idx") for value in group}
-            used_boundaries = set()
+            # 仅将实际收集的间隔页加入候选范围，后续还须验证整页覆盖，不盲建大页范围。
+            allowed_pages = {value["page_idx"] for value in group}
+            first_page, last_page = group[0]["page_idx"], group[-1]["page_idx"]
+            allowed_pages.update(items[position]["page_idx"] for position in boundary_indices
+                                 if type(items[position].get("page_idx")) is int
+                                 and first_page <= items[position]["page_idx"] <= last_page)
             for position in boundary_indices:
                 try:
                     boundary_id = matched_preserved_gap(items[position], pages, allowed_pages)
@@ -756,6 +791,7 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
                 except MergeEvidenceError as error:
                     error.locate(item_index=position + 1)
                     raise
+        verify_intervening_pages(group, pages, used_boundaries)
         if evidence[0][0].get("lines_deleted", False) is not False:
             raise merge_evidence_error("TARGET_DELETED", page_idx=target.get("page_idx"), item_index=target_index + 1)
         source_spans, span_counts = [], []
@@ -795,7 +831,7 @@ def restore_merged_text(items: list[dict], pages: dict[int, dict]) -> tuple[list
             source_page, target_page = value.get("page_idx"), target.get("page_idx")
             location = {"page_idx": source_page, "item_index": position + 1}
             if (type(source_page) is not int or type(target_page) is not int
-                    or source_page not in {target_page, target_page + 1}):
+                    or source_page < target_page):
                 raise merge_evidence_error("SOURCE_PAGE", **location)
             if moved.get("type") != original["type"]:
                 raise merge_evidence_error("SPAN_TYPE", **location)

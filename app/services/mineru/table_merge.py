@@ -175,9 +175,11 @@ def restore_extras(group, evidence, *, items=None, pages=None):
         for after, _, size in evidence[1:]:
             extra_spans(after, size, kind, deleted=True)
         values = group[0].get(kind, [])
-        if (not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values)
-                or len(values) != len(source) or len(moved) != len(source)):
+        if not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values):
             raise merge_evidence_error("TABLE_EXTRAS")
+        if len(values) != len(source) or len(moved) != len(source):
+            # 区分V1附注缺项与后续文字/坐标冲突，不导出任何附注正文。
+            raise merge_evidence_error("TABLE_EXTRAS", observed=len(values), expected=len(source))
         # V1为每条已删除附注保留一个空串；多个空串不是正文，也不能忽略非空附注。
         if any(not isinstance(value.get(kind, []), list)
                or any(part != "" for part in value.get(kind, [])) for value in group[1:]):
@@ -235,12 +237,28 @@ def verify_images(group, originals, target, members):
         raise merge_evidence_error("TABLE_IMAGES")
 
 
+def partition_continued_rows(merged, sources):
+    """证明两页表格的末行/首行续接，按V1单元格原字符恢复两页，不补字或猜跨度。"""
+    if len(sources) != 2 or sum(len(source.rows) for source in sources) != len(merged.rows) + 1:
+        raise merge_evidence_error("TABLE_ROWS")
+    boundary = len(sources[0].rows) - 1
+    left, right = merged.split_boundary_row(boundary, sources[0].rows[-1], sources[1].rows[0])
+    head = merged.text[:merged.rows[0]["start"]]
+    tail = merged.text[merged.rows[-1]["end"]:]
+    pieces = [head + merged.text[merged.rows[0]["start"]:merged.rows[boundary]["start"]] + left + tail,
+              head + right + merged.text[merged.rows[boundary]["end"]:merged.rows[-1]["end"]] + tail]
+    for source, piece, row in zip(sources, pieces, (boundary, 0)):
+        verify_projection(source, TableHTML(piece), continuation_rows=frozenset({row}))
+    return pieces, [False, False], [0, 0]
+
+
 def partition_rows(merged, sources):
     """按完整网格投影分配V1行，兼容云端去除跨页重复页首行，不猜任意缺行。
 
     原行数相等时保留原切片行为。行数减少时，只允许后一页的连续前缀与前页
     已验证前缀一致，并复用对应V1原行；其他行逐一消耗，最终必须用尽全部V1。
-    页首复用最多64行，任一来源有多个可行映射或跨rowspan切口均安全拒绝。
+    两页仅少一行时也尝试逐格证明末行/首行续接。页首复用最多64行，任一来源
+    有多个可行映射或跨rowspan切口均安全拒绝。
     """
     pieces, refinements, reused, previous = [], [], [], []
     cursor = 0
@@ -281,6 +299,13 @@ def partition_rows(merged, sources):
             if len(choices) > 1:
                 raise merge_evidence_error("TABLE_ROW_MAPPING_AMBIGUOUS")
         if not choices:
+            # 旧的完整行/重复表头路径优先；只扩展原先拒绝的输入，保持v3成功缓存正文不变。
+            if len(sources) == 2 and sum(len(value.rows) for value in sources) == len(merged.rows) + 1:
+                try:
+                    return partition_continued_rows(merged, sources)
+                except MergeEvidenceError as error:
+                    if error.diagnostic["reason"] not in {"TABLE_CELLS", "TABLE_GRID", "TABLE_CONTINUATION_MARKUP"}:
+                        raise
             raise merge_evidence_error("TABLE_ROWS", observed=len(merged.rows),
                                        expected=sum(len(value.rows) for value in sources))
         piece, shape, prefix, cursor, previous = choices[0]
@@ -387,6 +412,7 @@ def restore_merged_tables(items, pages, *, archive_members=None):
                 "merged_rows": len(merged.rows), "cells": [sum(len(r["cells"]) for r in s.rows) for s in sources],
                 "column_refinement": refinements,
                 "reused_prefix_rows": reused,
+                "continued_row_count": sum(len(source.rows) for source in sources) - len(merged.rows) - sum(reused),
                 "caption_counts": [len(e["table_caption"]) for e in extras],
                 "footnote_counts": [len(e["table_footnote"]) for e in extras],
                 "image_references_verified": True})

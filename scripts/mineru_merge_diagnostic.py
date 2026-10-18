@@ -251,7 +251,7 @@ def inspect_job(document, job, settings, batch_id: str, archive_path: Path | Non
 
 
 def inspect_whole_job(document, job, settings, batch_id, archive_path):
-    """核对当前Whole的已归档原ZIP及冻结身份；本地转换/Guard通过也不写库或缓存。"""
+    """核对Whole原ZIP/冻结身份及缺页信号；不请求云端、不放宽Guard、不写库或缓存。"""
     from app.parsers.routing.contracts import RouteDecision
     from app.parsers.routing.guard import CompletenessError, guard_result
     from app.services.document_processing import source_path
@@ -289,7 +289,8 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
         "original_sha256": document.file_hash, "zip_sha256": record["sha256"],
         "zip_size_bytes": record["size_bytes"], "normalizer_version": NORMALIZER_VERSION,
         "source_hashes_verified": True, "zip_batch_provenance": "validated_local_receipt",
-        "adapter_normalize": "NOT_EXECUTED", "completeness_guard": "NOT_EXECUTED"}
+        "adapter_normalize": "NOT_EXECUTED", "completeness_guard": "NOT_EXECUTED",
+        "database_modified": False, "cache_published": False, "cloud_submitted": False}
     try:
         report["adapter_normalize"] = "RUNNING"
         parsed = MinerUResultAdapter().normalize(archive, doc_id=document.doc_id,
@@ -312,6 +313,13 @@ def inspect_whole_job(document, job, settings, batch_id, archive_path):
             report["empty_diagnostic"] = dict(error.diagnostic)
         elif isinstance(error, CompletenessError):
             report["completeness_guard"] = "FAIL"
+            covered = {block.page for block in parsed.blocks if block.text.strip()}
+            required = {page.page for page in decision.signals.pages if page.required}
+            report["missing_required_original_pages"] = sorted(required - covered)
+            report["missing_required_page_signals"] = [{
+                "page": page.page, "text_chars": page.text_chars, "image_count": page.image_count,
+                "drawing_count": page.drawing_count, "annotation_count": page.annotation_count}
+                for page in decision.signals.pages if page.page in required - covered]
     return report
 
 

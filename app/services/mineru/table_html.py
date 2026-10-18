@@ -2,6 +2,7 @@
 
 from html import unescape
 from html.parser import HTMLParser
+import re
 
 from app.services.mineru.adapter import merge_evidence_error
 
@@ -54,7 +55,8 @@ class TableHTML(HTMLParser):
                         or not raw.isdigit() or not 1 <= int(raw) <= 512):
                     raise merge_evidence_error("TABLE_GRID")
                 spans[name] = int(raw)
-            self.cell = {"tag": tag, "parts": [], "breaks": 0, **spans}
+            self.cell = {"tag": tag, "parts": [], "breaks": 0,
+                         "content_start": self.text.find(">", self.source_offset()) + 1, **spans}
         elif tag == "br" and self.cell is not None and self.stack[-1] in {"td", "th"} and not attrs:
             self.cell["parts"].append(" ")
             self.cell["breaks"] += 1
@@ -80,6 +82,7 @@ class TableHTML(HTMLParser):
         if tag == "eq":
             self.cell["parts"].append("$ ")
         elif tag in {"td", "th"}:
+            self.cell["content_end"] = self.source_offset()
             self.cell["text"] = " ".join(unescape("".join(self.cell.pop("parts"))).split())
             self.rows[-1]["cells"].append(self.cell)
             self.cell = None
@@ -170,22 +173,92 @@ class TableHTML(HTMLParser):
             fragments.append(self.text[self.rows[index]["start"]:end])
         return self.text[:self.rows[0]["start"]] + "".join(fragments) + self.text[self.rows[-1]["end"]:]
 
+    def split_boundary_row(self, index: int, left: dict, right: dict) -> tuple[str, str]:
+        """切分已证明跨页续接的原V1行；仅非跨行单元格，原标签和数字均不重写。"""
+        row = self.rows[index]
+        if len(left["cells"]) != len(right["cells"]) or len(left["cells"]) != len(row["cells"]):
+            raise merge_evidence_error("TABLE_CELLS")
+        fragments = [[], []]
+        cursor = row["start"]
+        for a, b, target in zip(left["cells"], right["cells"], row["cells"]):
+            if (any(cell["rowspan"] != 1 for cell in (a, b, target))
+                    or any(a[key] != b[key] or a[key] != target[key]
+                           for key in ("tag", "column", "right"))):
+                raise merge_evidence_error("TABLE_GRID")
+            start, end = target["content_start"], target["content_end"]
+            raw = self.text[start:end]
+            if not a["text"] or not b["text"]:
+                # 整个单元格只属于一页时保留其完整内联标记，不做不必要的内部切割。
+                if "".join(target["text"].split()) != "".join((a["text"] + b["text"]).split()):
+                    raise merge_evidence_error("TABLE_CELLS")
+                parts = ("", raw) if not a["text"] else (raw, "")
+            else:
+                parts = split_cell_text(raw, a["text"], b["text"])
+            for result, part in zip(fragments, parts):
+                result.extend((self.text[cursor:start], part))
+            cursor = end
+        tail = self.text[cursor:row["end"]]
+        return tuple("".join(parts) + tail for parts in fragments)
 
-def verify_projection(source: TableHTML, piece: TableHTML) -> None:
+
+def split_cell_text(raw: str, left: str, right: str) -> tuple[str, str]:
+    """依据两页非空白字符序列切V1原单元格，支持实体/br但不在实体或公式标签内部切割。
+
+    空白仍保留在原V1切片中；从不从layout生成字词，两个返回切片必须原样拼回raw。
+    未支持的内联标签安全拒绝，不尝试修复HTML或替换公式。
+    """
+    first, second = "".join(left.split()), "".join(right.split())
+    expected = first + second
+    cursor = count = previous_end = 0
+    cut = None
+    pattern = re.compile(r"&(?:#[xX][0-9a-fA-F]+|#[0-9]+|[A-Za-z][A-Za-z0-9]+);|<br\s*/?>", re.I)
+    while cursor < len(raw):
+        token = pattern.match(raw, cursor)
+        stop = token.end() if token else cursor + 1
+        if raw[cursor] == "<" and not token:
+            raise merge_evidence_error("TABLE_CONTINUATION_MARKUP")
+        text = " " if token and token.group().startswith("<") else unescape(raw[cursor:stop])
+        for char in text:
+            if char.isspace():
+                continue
+            if count >= len(expected) or char != expected[count]:
+                raise merge_evidence_error("TABLE_CELLS")
+            if count == len(first) and cut is None:
+                if previous_end > cursor:
+                    raise merge_evidence_error("TABLE_CONTINUATION_MARKUP")
+                cut = cursor
+            count += 1
+            previous_end = stop
+        cursor = stop
+    if count != len(expected):
+        raise merge_evidence_error("TABLE_CELLS")
+    if not first:
+        return "", raw
+    if not second:
+        return raw, ""
+    # 多字符实体不可从中间分成两页；普通空白归前片，原HTML/字符仍无损保留。
+    return raw[:cut], raw[cut:]
+
+
+def verify_projection(source: TableHTML, piece: TableHTML, *, continuation_rows=frozenset()) -> None:
     """证明单元格及rowspan逐项一致，列网格只允许一致的严格单调细化映射。
 
     例如4列网格可映射为[0,3,6,9,10]，但任何单元格合并/交换/数值变化、
-    不一致的列边界或跨分片rowspan均拒绝；验证不会改写V1的colspan。
+    不一致的列边界或跨分片rowspan均拒绝；仅已证明续接行允许空白序列化差异，
+    非空白字符仍逐项一致。验证不会改写V1的colspan或任何正文。
     """
     # tbody只是可选HTML包装，不改变行列；br与空白的序列化差异由单元格文字核对。
     if len(source.rows) != len(piece.rows):
         raise merge_evidence_error("TABLE_ROWS")
     edges = {}
-    for before, after in zip(source.rows, piece.rows):
+    for row_index, (before, after) in enumerate(zip(source.rows, piece.rows)):
         if len(before["cells"]) != len(after["cells"]):
             raise merge_evidence_error("TABLE_CELLS")
         for a, b in zip(before["cells"], after["cells"]):
-            if any(a[key] != b[key] for key in ("tag", "text", "rowspan")):
+            if any(a[key] != b[key] for key in ("tag", "rowspan")):
+                raise merge_evidence_error("TABLE_CELLS")
+            if (a["text"] != b["text"] and (row_index not in continuation_rows
+                    or "".join(a["text"].split()) != "".join(b["text"].split()))):
                 raise merge_evidence_error("TABLE_CELLS")
             for key in ("column", "right"):
                 if a[key] in edges and edges[a[key]] != b[key]:

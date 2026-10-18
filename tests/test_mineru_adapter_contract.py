@@ -7,7 +7,7 @@ import pytest
 
 from app.services.mineru.adapter import restore_merged_text
 from app.services.mineru.errors import MinerUError
-from app.services.mineru.table_html import TableHTML, verify_projection
+from app.services.mineru.table_html import TableHTML, split_cell_text, verify_projection
 from app.services.mineru.table_merge import partition_rows, restore_merged_tables
 from test_mineru_merge import merged_case, normalize_case
 from test_mineru_merge_boundaries import boundary_case
@@ -179,8 +179,150 @@ def test_repeated_header_support_cannot_hide_missing_or_changed_cells(damage):
 
 
 def test_cross_page_cell_concatenation_is_not_mistaken_for_repeated_header():
-    """单元格续接不是重复表头；未实现可靠字符分配前仍拒绝，不猜来源。"""
+    """单元格续接按V1原字符拆回两页，不当作重复表头或复制整表。"""
     sources = [TableHTML(html([["甲", "前半句"]])), TableHTML(html([["", "后半句"]]))]
+    pieces, refinements, reused = partition_rows(TableHTML(html([["甲", "前半句 后半句"]])), sources)
+    for source, piece in zip(sources, pieces):
+        verify_projection(source, TableHTML(piece))
+    assert refinements == [False, False] and reused == [0, 0]
+
+
+def intervening_structure_case():
+    """续段之间插入整页原样代码；物理页0/2的正文不归到中间页1。"""
+    values, layout, geometry = merged_case(cross_page=True)
+    values[1]["page_idx"] = 2
+    layout["pdf_info"][1]["page_idx"] = 2
+    geometry[2] = geometry.pop(1)
+    geometry[1] = (600, 800)
+    gap, parent = structural_gap("code")
+    gap["page_idx"] = 1
+    middle = {"page_idx": 1, "page_size": [600, 800], "para_blocks": [deepcopy(parent)],
+              "preproc_blocks": [deepcopy(parent)], "discarded_blocks": []}
+    layout["pdf_info"].append(middle)
+    values.insert(1, gap)
+    return values, layout, geometry
+
+
+def test_verified_whole_structure_page_can_intervene_without_changing_original_pages():
+    """每个中间页结构均被唯一保留时允许续段，正文原页/原ID不偏移。"""
+    values, layout, geometry = intervening_structure_case()
+    snapshot = deepcopy(values), deepcopy(layout)
+    parsed = normalize_case(values, layout, geometry)
+    assert [block.page for block in parsed.blocks] == [1, 2, 3]
+    assert parsed.blocks[0].text + parsed.blocks[2].text == values[0]["text"]
+    assert parsed.blocks[1].text == values[1]["code_body"]
+    assert (values, layout) == snapshot
+
+
+@pytest.mark.parametrize("damage", ["unretained_body", "changed_structure", "missing_page", "backwards", "cross_page"])
+def test_nonadjacent_text_requires_complete_intermediate_page_evidence(damage):
+    """缺页、隐藏独立正文、结构变化、倒页或错误跨页标记不能使用新例外。"""
+    values, layout, geometry = intervening_structure_case()
+    middle = layout["pdf_info"][-1]
+    if damage == "unretained_body":
+        for group in ("preproc_blocks", "para_blocks"):
+            middle[group].append({"type": "text", "index": 9, "bbox": [10., 10., 100., 100.]})
+    elif damage == "changed_structure":
+        middle["preproc_blocks"][0]["blocks"][0]["lines"] = []
+    elif damage == "missing_page":
+        values.pop(1)
+        layout["pdf_info"].pop()
+    elif damage == "backwards":
+        values[2]["page_idx"] = -1
+    else:
+        layout["pdf_info"][0]["para_blocks"][0]["lines"][1]["spans"][0]["cross_page"] = False
     with pytest.raises(MinerUError) as error:
-        partition_rows(TableHTML(html([["甲", "前半句 后半句"]])), sources)
-    assert error.value.diagnostic["reason"] == "TABLE_ROWS"
+        normalize_case(values, layout, geometry)
+    assert error.value.code in {"MERGE_EVIDENCE", "EMPTY_BLOCK", "PAGE"}
+
+
+@pytest.mark.parametrize("raw,left,right", [
+    ("前半句 后半句", "前半句", "后半句"),
+    ("前半句<br>后半句", "前半句", "后半句"),
+    ("A &amp; B", "A &", "B"),
+    ("12,345.67", "12,345.67", ""),
+    (" 后续文字 ", "", "后续文字"),
+])
+def test_continued_cell_slices_preserve_exact_v1_bytes(raw, left, right):
+    """原空白、br及实体保留，切片拼接严格等于原V1，不重新序列化或改数值。"""
+    first, second = split_cell_text(raw, left, right)
+    assert first + second == raw
+    assert TableHTML(html([[first]])).rows[0]["cells"][0]["text"].replace(" ", "") == left.replace(" ", "")
+    assert TableHTML(html([[second]])).rows[0]["cells"][0]["text"].replace(" ", "") == right.replace(" ", "")
+
+
+@pytest.mark.parametrize("raw,left,right", [
+    ("10 20", "11", "20"), ("10 20", "10", "21"),
+    ("20 10", "10", "20"), ("10 20 extra", "10", "20"),
+    ("1,200", "120", "0"), ("<eq>x+y</eq>", "$x", "+y$"),
+    ("&NotEqualTilde;", "\u2242", "\u0338"),
+])
+def test_continued_cells_reject_changes_or_cuts_inside_markup(raw, left, right):
+    """数字、字符、顺序或尾字冲突以及实体/公式内部切割均拒绝。"""
+    with pytest.raises(MinerUError):
+        split_cell_text(raw, left, right)
+
+
+def continued_table_case():
+    """构造末行和首行续接的两页表，正文仍仅取V1字节，不生成PDF原件。"""
+    items, pages = table_case(footnote=False)
+    originals = [html([["项目", "说明"], ["A &amp; B", "前半句"]]), html([["", "后半句"]])]
+    for index, original in enumerate(originals):
+        pages[index]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]["html"] = original
+    set_merged(items, pages, html([["项目", "说明"], ["A &amp; B", "前半句<br>后半句"]]))
+    return items, pages
+
+
+def test_continued_table_keeps_full_source_pages_cells_and_deterministic_ids():
+    """完整Adapter恢复两页行数、值、来源和稳定ID；不将完整表复制到后页。"""
+    items, pages = continued_table_case()
+    snapshot, doc_id = (deepcopy(items), deepcopy(pages)), uuid4()
+    parsed = normalize(items, pages, doc_id=doc_id)
+    tables = [block for block in parsed.blocks if block.block_type == "table"]
+    assert [block.page for block in tables] == [1, 2]
+    assert [len(TableHTML(block.text).rows) for block in tables] == [2, 1]
+    for index, block in enumerate(tables):
+        source = pages[index]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]["html"]
+        verify_projection(TableHTML(source), TableHTML(block.text))
+    assert normalize(items, pages, doc_id=doc_id) == parsed
+    assert restore_merged_tables(items, pages)[1][0]["continued_row_count"] == 1
+    assert (items, pages) == snapshot
+
+
+@pytest.mark.parametrize("damage", ["value", "deleted", "page", "cross_rowspan"])
+def test_continued_table_does_not_bypass_original_source_checks(damage):
+    """续接仍需原值、删除标记、连续页和非跨行单元格，失败不返回半份结果。"""
+    items, pages = continued_table_case()
+    if damage == "value":
+        source = pages[1]["preproc_blocks"][0]["blocks"][0]["lines"][0]["spans"][0]
+        source["html"] = source["html"].replace("后半句", "另一个值")
+    elif damage == "deleted":
+        pages[1]["para_blocks"][0]["blocks"][0]["lines_deleted"] = False
+    elif damage == "page":
+        items[2]["page_idx"] = 2
+        pages[2] = pages.pop(1)
+        pages[2]["page_idx"] = 2
+    else:
+        set_merged(items, pages, items[0]["table_body"].replace("<td>A", '<td rowspan="2">A'))
+    snapshot = deepcopy(items), deepcopy(pages)
+    with pytest.raises(MinerUError):
+        restore_merged_tables(items, pages)
+    assert (items, pages) == snapshot
+
+
+def test_caption_absent_from_original_v1_is_reported_not_invented_from_layout():
+    """附注在V1缺项时明确报告实际/预期数量，不能从布局补字或当作成功。"""
+    items, pages = table_case(footnote=False)
+    caption = {"type": "table_caption", "index": 1, "bbox": [48., 48., 552., 60.],
+        "lines": [{"spans": [{"type": "text", "content": "PRIVATE_MISSING_CAPTION",
+                                "bbox": [48., 48., 552., 60.]}]}]}
+    pages[1]["preproc_blocks"][0]["blocks"].append(caption)
+    pages[1]["para_blocks"][0]["blocks"].append(
+        caption | {"lines": [], "lines_deleted": True})
+    snapshot = deepcopy(items), deepcopy(pages)
+    with pytest.raises(MinerUError) as error:
+        restore_merged_tables(items, pages)
+    assert error.value.diagnostic["reason"] == "TABLE_EXTRAS"
+    assert (error.value.diagnostic["observed"], error.value.diagnostic["expected"]) == (0, 1)
+    assert "PRIVATE" not in str(error.value.diagnostic) and "PRIVATE" not in str(error.value)
+    assert (items, pages) == snapshot
