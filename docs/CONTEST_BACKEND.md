@@ -2,7 +2,7 @@
 
 ## 交付状态
 
-工作分支仅为`feat/contest-integration`。阶段2已编写独立FastAPI问数服务、Schema Linking、多轮澄清、受限PostgreSQL执行及安全Trace；测试仅编写，未运行pytest、启动服务、查询真实数据库、安装依赖或调用模型。阶段1静态检查已完成，人工回归与真实GPU Reindex仍待用户验收。Vue3及同源代理尚未实施，统一Agent HTTP与自动跨源规划器未注册。
+工作分支仅为`feat/contest-integration`。阶段2已编写独立FastAPI问数服务、Schema Linking、多轮澄清、受限PostgreSQL执行及安全Trace；Codex未运行pytest、启动服务、查询真实数据库、安装依赖或调用模型。用户定向测试反馈196通过、1失败：regclass的DataType.this为字符串，原实现访问.name导致AttributeError；现已改为只接受明确内置枚举允许集，其他节点安全返回SQL_REJECTED，并补充未知节点/系统类型拒绝与正常CAST回归，待用户复测。阶段1静态检查已完成，人工回归与真实GPU Reindex仍待用户验收。Vue3及同源代理尚未实施，统一Agent HTTP与自动跨源规划器未注册。
 
 只读审阅`main/f4b092e`：该提交主要增加旧Office缓存离线升级、分组恢复及冻结版本日志，并删除交付ZIP。这些对后续知识恢复有用，但不是SQL服务前置依赖；本阶段不移植、不merge、不cherry-pick，知识业务及原验收状态保留。
 

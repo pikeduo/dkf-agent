@@ -36,7 +36,7 @@ def identifier(node) -> str:
 
 
 def parse_readonly(sql: str):
-    """完整解析单句及所有子树，拒绝写入/锁/自定义函数、类型与超限AST。"""
+    """完整解析单句及所有子树；类型仅接受内置枚举允许集，未知节点失败关闭。"""
     try:
         if not sql.strip() or len(sql) > 20000:
             raise ValueError("语句超限")
@@ -49,7 +49,7 @@ def parse_readonly(sql: str):
             raise ValueError("查询结构超限")
         for node in nodes:
             if (type(node).__name__ in FORBIDDEN or isinstance(node, exp.DataType)
-                    and node.this.name not in SAFE_CAST_TYPES):
+                    and (not isinstance(node.this, exp.DataType.Type) or node.this.name not in SAFE_CAST_TYPES)):
                 raise ValueError("非只读节点")
             if isinstance(node, exp.Column) and node.args.get("catalog"):
                 raise ValueError("跨库列引用")

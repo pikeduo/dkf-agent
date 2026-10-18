@@ -20,13 +20,13 @@
 
 DKF-Agent（数知融问智能体）保留独立的`knowledge-service`；用户已授权在`feat/contest-integration`分支按方案B开展双FastAPI服务+Vue3同源代理竞赛整合。`app/`继续负责原知识库，后续`contest_backend/`负责NL2SQL/Schema Linking/意图与澄清，`frontend/`负责真实API交互；不复制知识库实现、不修改或合并到main。
 
-- 竞赛阶段2已编写独立问数FastAPI、唯一授权目录、SQL全树/表列/真实外键核验、意图/澄清及安全Trace；公共DTO/Tool协议未变，sqlglot仅声明未安装，隔离测试仅编写未执行。阶段1静态检查完成，Office人工回归与真实GPU Reindex仍待验收。`main/f4b092e`仅只读审阅，旧Office缓存升级/分组恢复不是SQL前置修复，本轮不移植。细节见[竞赛后端](docs/CONTEST_BACKEND.md)。本轮止于阶段2，Vue3待用户确认；统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent，测试/部署禁令保持不变。
+- 竞赛阶段2已编写独立问数FastAPI、唯一授权目录、SQL全树/表列/真实外键核验、意图/澄清及安全Trace；公共DTO/Tool协议未变。用户已准备sqlglot并反馈定向测试196通过、1失败；已修复regclass字符串类型节点导致AttributeError的问题，新增类型边界回归待用户复测，Codex不执行测试。阶段1静态检查完成，Office人工回归与真实GPU Reindex仍待验收。`main/f4b092e`仅只读审阅，旧Office缓存升级/分组恢复不是SQL前置修复，本轮不移植。细节见[竞赛后端](docs/CONTEST_BACKEND.md)。本轮止于阶段2，Vue3待用户确认；统一Agent仅设计，无HTTP/自动跨源规划器，不重构原LangGraph Knowledge Agent，测试/部署禁令保持不变。
 
 - 最新路线：[开发计划](docs/DEVELOPMENT_PLAN_CODEX.md)（V0.9）；历史计划仅供参考，不重新实现已有阶段。
 
 ### 当前开发进度
 
-当前阶段：**竞赛阶段2代码已实现，待用户隔离测试与真实PG/模型验收；单进程会话/预算、显式云许可、受限SQL及Trace已接入独立领域API，未启动服务或测试。阶段1人工回归及GPU Reindex仍待验收；Office预检和v4长表/TSV修复保留，v1～v3冻结。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原记录；全200/4087未验收，不进入知识阶段34，冻结数据不改。**
+当前阶段：**竞赛阶段2代码已实现，类型节点兼容修复待用户复测，真实PG/模型仍待验收；单进程会话/预算、显式云许可、受限SQL及Trace已接入独立领域API，Codex未启动服务或测试。阶段1人工回归及GPU Reindex仍待验收；Office预检和v4长表/TSV修复保留，v1～v3冻结。知识阶段33仍为全量导入排错，保留70261c48已READY及da426abd缓存PARTIAL/旧v2超限的原记录；全200/4087未验收，不进入知识阶段34，冻结数据不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|

@@ -1,11 +1,12 @@
 """只读全树、表列、外键及确认条件校验；不运行SQL或模型。"""
 
 import pytest
+from sqlglot import exp
 
 from contest_backend.errors import ContestError
 from contest_backend.registry import ConditionSpec
 from contest_backend.schema_linking import LinkResult, SchemaLinker, tokens
-from contest_backend.sql_policy import prepare_sql
+from contest_backend.sql_policy import parse_readonly, prepare_sql
 
 
 @pytest.mark.parametrize("query", [
@@ -15,7 +16,9 @@ from contest_backend.sql_policy import prepare_sql
     "SELECT secret FROM sales", "SELECT * FROM private.sales", "SELECT * FROM other.business.sales",
     "SELECT * FROM pg_catalog.pg_roles", "SELECT pg_sleep(1) FROM sales",
     "SELECT pg_read_file('/private') FROM sales", "SELECT custom_function(amount) FROM sales",
-    "SELECT 'sales'::regclass FROM sales", "COPY sales TO STDOUT",
+    "SELECT 'sales'::regclass FROM sales", "SELECT CAST('sales' AS regclass) FROM sales",
+    "SELECT 'text'::regtype FROM sales", "SELECT amount::private.numeric FROM sales",
+    "COPY sales TO STDOUT",
     "SELECT * FROM sales s JOIN sales x ON s.id=x.id",
 ])
 def test_unsafe_or_unscoped_sql_is_rejected(source, query):
@@ -23,6 +26,28 @@ def test_unsafe_or_unscoped_sql_is_rejected(source, query):
     with pytest.raises(ContestError) as caught:
         prepare_sql(query, source, LinkResult(tables={"sales"}), {})
     assert caught.value.code == "SQL_REJECTED"
+
+
+@pytest.mark.parametrize("type_value", ["regclass", "INT", None, exp.Identifier(this="INT"), exp.DataType.Type.USERDEFINED])
+def test_unknown_type_node_shapes_fail_closed(monkeypatch, type_value):
+    """不同未知类型节点统一拒绝；字符串即便与允许类型同名也不获得内置类型权限。"""
+    tree = exp.Select(expressions=[exp.Cast(this=exp.Literal.string("sales"), to=exp.DataType(this=type_value))])
+
+    def parsed(query, **options):
+        """只替代解析结果以覆盖节点表示差异，不连接数据库或模型。"""
+        return [tree]
+
+    monkeypatch.setattr("contest_backend.sql_policy.sqlglot.parse", parsed)
+    with pytest.raises(ContestError) as caught:
+        parse_readonly("SELECT CAST('sales' AS unknown_type)")
+    assert caught.value.code == "SQL_REJECTED"
+
+
+@pytest.mark.parametrize("projection", ["CAST(id AS BIGINT)", "CAST(amount AS NUMERIC)", "CAST('2024-01-01' AS DATE)"])
+def test_native_allowed_casts_remain_valid(source, projection):
+    """允许集中的真实内置类型仍可限定到授权表，不因兼容修复全部禁用CAST。"""
+    query = prepare_sql(f"SELECT {projection} FROM sales", source, LinkResult(tables={"sales"}), {})
+    assert '"business"."sales"' in query and query.endswith('AS "_contest_result" LIMIT 501')
 
 
 def test_star_is_expanded_to_allowed_columns_and_execution_is_bounded(source):
