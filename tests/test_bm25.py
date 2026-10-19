@@ -6,7 +6,10 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import visitors
+from sqlalchemy.sql.functions import FunctionElement
 
+from app.models import Document, DocumentChunk
 from app.services.rag import bm25 as tool
 from bm25_stubs import StreamingResultStub, StreamingSessionStub as SqlSessionStub
 from test_dense_sql import stored_pair
@@ -273,17 +276,26 @@ def test_cursor_close_failure_uses_safe_database_error():
 
 
 def test_snapshot_projection_covers_full_sources_without_returning_corpus_text():
-    """摘要读取保留全部范围与来源字段，只返回ID、字节数和SHA256，不加载整库正文或JSON。"""
+    """按真实列映射验证摘要参数完整，避免ORM属性名及SQL字符串格式造成误判。"""
     kb_id, doc_id = uuid4(), uuid4()
     statement = tool.source_statement(kb_id, [doc_id], snapshot=True)
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert tuple(statement.selected_columns.keys()) == ('chunk_id', 'text_bytes', 'text_hash', 'source_hash')
     assert sql.count('sha256(') == 2 and 'jsonb_build_array(' in sql
     assert 'document_chunks.doc_id IN' in sql and 'documents.status IN' in sql
-    for name in tool.SOURCE_CHUNK_FIELDS:
-        assert 'document_chunks.' + name in sql
-    for name in tool.SOURCE_DOCUMENT_FIELDS:
-        assert 'documents.' + name in sql
+    # chunk_metadata对应数据库metadata列；直接检查摘要参数，不把WHERE出现字段算作摘要覆盖。
+    source_array = next(value for value in visitors.iterate(statement.selected_columns['source_hash'])
+        if isinstance(value, FunctionElement) and value.name == 'jsonb_build_array')
+    expected = [getattr(DocumentChunk, name).property.columns[0]
+        for name in tool.SOURCE_CHUNK_FIELDS if name != 'text']
+    expected += [getattr(Document, name).property.columns[0] for name in tool.SOURCE_DOCUMENT_FIELDS]
+    actual = tuple(source_array.clauses)
+    assert len(actual) == len(expected)
+    assert all(column.shares_lineage(mapped) for column, mapped in zip(actual, expected))
+    # 正文独立参与text_hash，来源摘要无需再次放入整段正文。
+    text_conversion = next(value for value in visitors.iterate(statement.selected_columns['text_hash'])
+        if isinstance(value, FunctionElement) and value.name == 'convert_to')
+    assert tuple(text_conversion.clauses)[0].shares_lineage(DocumentChunk.text.property.columns[0])
     assert 'document_chunks.embedding' not in sql and 'file_path' not in sql
 
 
