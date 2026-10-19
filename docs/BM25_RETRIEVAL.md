@@ -26,9 +26,10 @@
 - NFKC与英文大小写归一化只用于词项，不改Node原文。数字、百分比、BGE-M3/RX-7800-XT等内部连接符型号保持完整词；数字千分位逗号去除，不转浮点数或改公式名称。
 - 中文采用字符+相邻二元片段，无jieba/外部分词模型。支持关键词基线，不宣称专业分词、语义同义词或专有名词消歧；中文长词可能部分匹配，须人工核对。欧洲小数、特殊Unicode符号和复杂单位规范化仍有边界。
 - 只对实际词项重叠的Chunk计分，避免BM25Plus背景delta分把零命中Chunk当Evidence。同分按原chunk_id UUID升序稳定排序。
-- 每个Retriever最多保留一个进程内词频索引。每次按256条流式读取当前合格语料，逐行沿用完整Adapter校验，临时Node随行释放，仅积累ID/原文；评分后只加载Top-K的完整证据。命中ID/正文必须与评分输入一致，缺失或改变整批失败。相同Chunk集合/原文/算法版本及范围可复用词频，元数据始终来自本次快照；不缓存Node或跳过未命中行的校验。
+- 每个Retriever最多保留一个进程内词频索引。每题按256条读取全库ID、原文字节数、正文SHA256和完整来源SHA256；摘要覆盖全部Adapter输入、完整JSONB元数据及当前代次，由PostgreSQL 17内置函数计算，无需扩展/迁移。不能只凭数量、任务ID或命中项判断全库未变。
+- 首次或摘要变化时，在同一REPEATABLE READ快照逐行完整Adapter校验，临时Node随行释放，正文/ID必须与摘要一致；完全相同且此前已验证的摘要才复用验证结果。仅元数据变化重新验证，但正文未变可保留词频。热查询不传输/解码全库正文和JSON，评分后只读Top-K完整证据，并核对ID/正文Hash与当前摘要；缺失或改变整批失败，未命中项损坏也会使摘要失效。Node不缓存，检索范围不缩减。
 - 建索引只持有一块临时词项，相同词项字符串在本次构建共享，不积攒整库词项数组或使用全局永久词表。失效索引先释放再重建；并发请求已经持有的索引会在其查询结束后释放。Top-K使用有界堆，原评分与同分UUID规则保持。数据库查询/Adapter/构建失败不返回旧缓存。
-- 不保存磁盘索引、不使用pickle、不新建业务表或第二份Node真相；重启后自然重建。每次仍需读取合格语料，首次构建及大库读取有CPU/内存成本，吞吐待验收。
+- 不保存磁盘索引、不使用pickle、不新建业务表或第二份Node真相；重启后自然重建。每题仍核对全部合格语料摘要，冷启动另需完整读取/校验；首次构建和数据库摘要扫描仍有CPU/内存成本，吞吐待验收。
 
 首版安全预算：最多10,000个Chunk（SQL多读1条检测超限）、语料正文32 MiB UTF-8、4,000,000个派生词项，Query最多32768字符/512个派生词项。超限返回BM25_LIMIT，不截断成不完整检索。可用doc_ids缩小范围；预算不是进程总内存上限，ORM/证据元数据/词频还有额外内存成本。大库增量或持久化缓存应另行设计，不在本阶段自动展开。
 
@@ -44,6 +45,8 @@ python -m pip install "rank-bm25>=0.2.2,<0.3"
 ```
 
 core首次导入仍可能检查NLTK缓存，由用户按[Adapter说明](LLAMA_INDEX_ADAPTER.md#core-首次导入资源边界)预先准备，不由检索器安装/下载。未安装依赖报BM25_DEPENDENCY，不自动联网补齐。
+
+数据库错误采用`BM25_DATABASE_QUERY_CANCELED / BM25_DATABASE_LOCK_UNAVAILABLE / BM25_DATABASE_CONNECTION / BM25_DATABASE_RESOURCE`及原通用码。首次执行、流式拉取或关闭游标捕获SQLSTATE；关闭次生错误不覆盖首次原因。57014不单独证明语句超时，未知状态不猜测。日志`step`仅保留SQLSTATE；`index_built/index_reused`的`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`区分本次完整校验与摘要相同的验证复用。
 
 复用每日中文日志：bm25.started、index_built/index_reused、finished/empty/failed。只记录UUID/范围数量/Chunk数/复用/耗时/安全码，不写词项、Query、正文、Node、SQL、索引摘要或异常原文。BM25批量Node转换使用`log_success=False`，只省略逐项成功日志，错误仍记；原Adapter调用默认行为不变。SQL echo/第三方Tracing仍必须禁用。
 

@@ -7,6 +7,8 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import visitors
+from sqlalchemy.sql.selectable import CTE
 
 from app.models import Document, DocumentChunk
 from app.services.rag.dense import (
@@ -82,18 +84,32 @@ def test_statement_filters_before_exact_top_k_and_binds_identity():
 
 @pytest.mark.parametrize("multiple", [False, True])
 def test_document_filter_is_bound_before_distance_and_limit(multiple):
-    """单/多文档与可索引状态在候选内绑定，不先全库Top-K再删除证据。"""
+    """单/多文档过滤与距离均在物化候选内，先全量筛选再排名且不靠SQL文本先后猜执行序。"""
     kb_id, first, second = uuid4(), uuid4(), uuid4()
     doc_ids = [str(first), second, first] if multiple else [str(first)]
     statement = dense_statement(kb_id, [1.0] + [0.0] * 1023, model_identity(), doc_ids=doc_ids)
     compiled = statement.compile(dialect=postgresql.dialect())
     sql = str(compiled)
-    assert sql.index("document_chunks.doc_id IN") < sql.index(" <=> ") < sql.index("LIMIT")
+    eligible_sql = sql.split("dense_ranked AS", 1)[0]
+    assert "document_chunks.doc_id IN" in eligible_sql and " <=> " in eligible_sql
+    assert "LIMIT" not in eligible_sql and sql.index("document_chunks.doc_id IN") < sql.index("LIMIT")
     assert any(value == list(validate_doc_ids(doc_ids)) for value in compiled.params.values() if isinstance(value, list))
     assert str(first) not in sql and str(second) not in sql
     assert sql.count("kb_id =") >= 3
     assert ["READY", "PARTIAL_READY"] in compiled.params.values() and "ACTIVE" in compiled.params.values()
     assert "document_chunks.embedding IS NOT NULL" in sql and model_identity() in compiled.params.values()
+
+
+def test_exact_candidates_materialize_only_ids_and_scalar_distances():
+    """全候选屏障只保存UUID与标量，不物化完整向量，也不提前LIMIT或改为ANN。"""
+    statement = dense_statement(uuid4(), [1.0] + [0.0] * 1023, model_identity())
+    candidates = next(value for value in visitors.iterate(statement)
+                      if isinstance(value, CTE) and value.name == "dense_eligible")
+    assert tuple(candidates.c.keys()) == ("chunk_id", "cosine_distance")
+    assert "LIMIT" not in str(candidates.element) and "ORDER BY" not in str(candidates.element)
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert compiled.count(" <=> ") == 1 and "dense_eligible.embedding" not in compiled
+    assert "dense_eligible.cosine_distance ASC, dense_eligible.chunk_id ASC" in compiled
 
 
 def test_omitted_document_scope_keeps_stage17_full_kb_statement():

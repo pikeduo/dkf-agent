@@ -73,7 +73,7 @@ class DenseRetriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """原 Query 一次编码，同模型及指定文档 SQL 检索后转换 Node；失败不返回半份证据。"""
+        """原Query一次编码，精确检索并转换证据；数据库失败保留SQLSTATE且不返回半份结果。"""
         started = perf_counter()
         stage = "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
@@ -116,12 +116,13 @@ class DenseRetriever(BaseRetriever):
             if isinstance(exc, DenseRetrievalError):
                 error = exc
             elif isinstance(exc, SQLAlchemyError) or stage == "database":
-                error = DenseRetrievalError("DENSE_DATABASE")
+                error = DenseRetrievalError("DENSE_DATABASE", database_error=exc)
             elif isinstance(exc, (EmbeddingError, RagAdapterError)) and stage == "query_embedding":
                 error = DenseRetrievalError("DENSE_QUERY_EMBEDDING")
             else:
                 error = DenseRetrievalError("DENSE_RESULT" if stage == "node_adapter" else "DENSE_FAILED")
             log_event("dense.failed", level=logging.WARNING, **scope_log,
+                      step=(error.database_diagnostic or {}).get("sqlstate"),
                       stage=stage, error_code=error.code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 

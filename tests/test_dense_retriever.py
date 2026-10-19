@@ -324,3 +324,39 @@ def test_errors_and_business_logs_are_sanitized_without_partial_success(failure_
         handler.close()
         logger.handlers, logger.level, logger.propagate, logger.disabled = before
         logs.CONTEXT.reset(token)
+
+
+@pytest.mark.parametrize('failure_stage', ['setting', 'select'])
+def test_database_sqlstate_survives_settings_and_select_failures(monkeypatch, failure_stage):
+    """事务设置与首次SELECT的SQLSTATE均传到日志和调用方，禁止泛化后丢失取消原因。"""
+    from test_retrieval_database import driver_error
+
+    class FailedSettings(ReadonlySessionStub):
+        """只模拟事务设置失败，不创建真实连接。"""
+
+        def execute(self, statement):
+            """在READ ONLY设置时返回驱动错误，验证外层安全分类。"""
+            raise driver_error('57014')
+
+    chunk, document = stored_pair()
+    service = QueryServiceStub()
+    session = (FailedSettings([]) if failure_stage == 'setting' else
+               ReadonlySessionStub([(chunk, document, 0.0)], failure=driver_error('57014')))
+    events = []
+
+    def factory():
+        """返回一个可观察的独立内存会话。"""
+        return session
+
+    def log(event, **fields):
+        """捕获安全事件，避免测试写业务日志。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(retrievers, 'log_event', log)
+    retriever = DenseRetriever(chunk.kb_id, embedding_adapter=DKFEmbeddingAdapter(service), session_factory=factory)
+    with pytest.raises(DenseRetrievalError, match='DENSE_DATABASE_QUERY_CANCELED') as caught:
+        retriever.retrieve('PRIVATE_QUERY')
+    assert caught.value.database_diagnostic == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
+    assert session.closed and events[-1][0] == 'dense.failed'
+    assert events[-1][1]['step'] == '57014' and events[-1][1]['stage'] == 'database'
+    assert 'PRIVATE' not in repr(events) + str(caught.value)

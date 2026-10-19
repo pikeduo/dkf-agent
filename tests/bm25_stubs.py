@@ -1,6 +1,20 @@
 """BM25分批只读结果的内存Stub；不连接数据库、不加载模型或生成文档。"""
 
+import hashlib
+import json
+
+from app.services.rag.bm25 import SOURCE_CHUNK_FIELDS, SOURCE_DOCUMENT_FIELDS
 from test_dense_sql import SqlSessionStub
+
+
+def snapshot_row(row):
+    """模拟投影摘要的字段覆盖与稳定性；不声称复现PostgreSQL JSONB的字节布局。"""
+    chunk, document = row
+    body = chunk.text.encode("utf-8")
+    fields = [getattr(chunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
+    fields += [getattr(document, field) for field in SOURCE_DOCUMENT_FIELDS]
+    source = json.dumps(fields, default=str, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return chunk.chunk_id, len(body), hashlib.sha256(body).digest(), hashlib.sha256(source).digest()
 
 
 class StreamingResultStub:
@@ -47,7 +61,7 @@ class StreamingSessionStub(SqlSessionStub):
         return False
 
     def execute(self, statement):
-        """记录设置或返回逐行结果；仅模拟生产SQL中的明确命中ID条件。"""
+        """模拟相同范围的摘要/完整来源及命中ID投影，不执行真实SQL或Adapter。"""
         if not statement.is_select:
             self.settings.append(str(statement))
             return self
@@ -57,6 +71,8 @@ class StreamingSessionStub(SqlSessionStub):
         params = statement.compile().params
         chunk_ids = next((value for key, value in params.items() if key.startswith('chunk_id_')), None)
         rows = self.rows if chunk_ids is None else [row for row in self.rows if row[0].chunk_id in chunk_ids]
+        if "source_hash" in statement.selected_columns.keys():
+            rows = [snapshot_row(row) for row in rows]
         result = self.result_type(rows)
         self.results.append(result)
         return result

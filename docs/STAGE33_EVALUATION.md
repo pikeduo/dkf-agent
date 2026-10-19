@@ -4,7 +4,28 @@
 
 用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。按用户最新要求，先从OHR、OCB各固定抽取50条QA，共100题/400条策略执行记录；检索范围仍是全部200份。原始4087条QA和已入库向量不改动，不重传、重解析或重建索引，也不自动清除质量警告。以下流程优先于后文历史导入排错步骤。
 
-已编写只读索引快照、显式质量政策、固定种子抽样、格式/质量分组及漏召回定位。尚未运行本轮pytest、数据库快照查询、GPU检索或生成真实检索分数；测试与评测仍由用户手动执行。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准，真实成绩出来后优先定位召回与重排问题，再推进阶段34。
+已实现只读索引快照、显式质量政策、固定抽样及四策略报告。用户提供的`stage33_run_03`已有100题/400条记录，其中373成功、27失败，涉及OCB的9题；全200份索引有效，但执行状态仍INCOMPLETE。本轮补数据库安全分类、Dense标量距离物化及BM25全量摘要验证复用；仅编写回归，pytest和实际性能由用户手动验收。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准。
+
+### 当前失败题续跑
+
+旧日志8次Dense失败耗时约10秒，与现有statement_timeout相近；缺SQLSTATE不能据此确认根因。本轮保持10秒语句/2秒锁等待预算，优化查询并在首次捕获点保留SQLSTATE。取消、锁不可用、连接和资源错误各有固定码；`qa_execution.csv / failures_and_unscorable.csv / retrieval_diagnostics.csv`增加`database_reason / sqlstate`，逐题JSON保留`database_diagnostic`。旧错误不能事后补造原因。
+
+先由用户运行定向回归：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_retrieval_database.py tests/test_dense_sql.py tests/test_dense_retriever.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_hybrid_retriever.py tests/test_stage33_indexed_evaluation.py tests/test_business_logging.py -q -ra
+```
+
+通过后，在原评测进程已结束、同卡Worker无在途任务且已正常停止的前提下，启动新CLI加载代码；只需现有PostgreSQL和本地模型，不需要API/Worker或云调用：
+
+```powershell
+$kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
+$run = "stage33_run_03"
+python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed --qa-per-dataset 50 --sample-seed 33 --retry-failed
+```
+
+该命令仅重跑含失败策略的9题（每题四路），91题成功断点保留；不是导入恢复的`--retry-failed-only`。选题、索引和模型身份冻结不变。全部成功才可完成抽样执行，PARTIAL质量和OCB不可评分边界继续保留。报告汇总会混合原91题与新9题耗时，不能据此当作优化后全100题的新性能基线；本轮先验证失败消除与热查询行为。
 
 ### 1. 用户执行定向回归
 

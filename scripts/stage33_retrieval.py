@@ -125,7 +125,7 @@ def score_units(hits, units, *, document_only=False):
 
 
 def safe_service_error(error):
-    """只输出固定分类；缺依赖/未知异常不再导入框架，避免错误处理再次失败或回显原文。"""
+    """只输出固定分类；数据库错误无需导入框架，避免处理失败再次掩盖原有安全原因。"""
     if isinstance(error, Stage33Error):
         return error.code
     if isinstance(error, ImportError):
@@ -135,6 +135,8 @@ def safe_service_error(error):
         return "RETRIEVAL_SERVICE_ERROR"
     from app.services.rag.bm25 import ERRORS as bm25_errors
     from app.services.rag.dense import ERRORS as dense_errors
+    if code in bm25_errors or code in dense_errors:
+        return code
     from app.services.reranking import ERRORS as rerank_errors
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.rag.llama_index.hybrid_retriever import ERRORS as fusion_errors
@@ -143,7 +145,7 @@ def safe_service_error(error):
 
 
 def evaluate_question(qa, documents, kb_id, backend):
-    """四种策略同一原问题/同一池；分支失败如实记错误，不扩大范围或按答案挑策略。"""
+    """四路同一原问题；失败保留固定分类及安全数据库诊断，不回显原SQL或异常消息。"""
     results, values, durations = {}, {}, {}
     question = qa["question"]
     for name in STRATEGIES:
@@ -175,6 +177,12 @@ def evaluate_question(qa, documents, kb_id, backend):
             results[name] = {"status": "FAILED", "error_code": safe_service_error(error),
                 "duration_seconds": perf_counter() - started, "hits": [],
                 "metrics": None, "document_proxy_metrics": None}
+            if results[name]["error_code"].startswith(("DENSE_DATABASE", "BM25_DATABASE")):
+                # 只接受本项目受控异常携带的分类，不把任意外部对象写入报告。
+                from app.services.rag.bm25 import BM25RetrievalError
+                from app.services.rag.dense import DenseRetrievalError
+                if isinstance(error, (DenseRetrievalError, BM25RetrievalError)) and error.database_diagnostic:
+                    results[name]["database_diagnostic"] = dict(error.database_diagnostic)
     return {"dataset": qa["dataset"], "qa_id": qa["qa_id"], "truth": truth(qa), "strategies": results}
 
 

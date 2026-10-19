@@ -44,11 +44,11 @@ QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_str
 
 未知身份/历史失效代次不会偷偷补向量、恢复任务或跨库搜索。返回行还会防御性检查上述来源及距离/顺序，任意坏行/重复 ID/非法距离拒绝整个结果，不部分成功。已 READY 文档的全量有效单位向量仍由阶段 15 事务和阶段 16 人工验收保证；管理员绕过应用直接 SQL 破坏数据不在本模块完整性保证内。
 
-首版为**精确基线**：只把符合条件的 chunk_id/embedding 放入 MATERIALIZED CTE，计算 `<=>` 后按距离升序、UUID chunk_id 升序取 Top-K，再只取这些结果的正文/证据字段。候选不经过 HNSW 的近似截断，避免过滤后不足 Top-K 或同分候选不稳定。保留阶段 15 HNSW 索引，但本版本不声称走 ANN，也不自动改索引/扩展/查询参数；大库扫描/物化可能占用 CPU/内存/临时磁盘，性能需单独人工验收。
+当前仍为**精确基线**：符合条件的候选在 MATERIALIZED CTE 内计算 `<=>`，仅物化 chunk_id/标量距离，按距离、UUID升序取Top-K，再读命中正文/证据。无需把全部1024维向量写入候选临时结果；过滤、完整候选集合及同分顺序不变。候选不经过HNSW近似截断，不新增索引或迁移；大库扫描仍有成本，实际性能待用户验收。
 
 同一数据快照及相同 Query 向量排序稳定。并发导入/维护改变候选或不同 GPU/精度的数值差异，不能承诺跨时刻结果完全相同。结果表示当前 SQL 快照，查询结束后的 Reindex/删除/状态变化不由长时间行锁阻止。
 
-会话由工厂每次新建，默认关闭 autoflush，无已有事务或待写变更；显式 `SET TRANSACTION READ ONLY`、statement_timeout=10s、lock_timeout=2s。仅 SELECT，无 flush/commit/业务写入，会话退出回滚只读事务。不要传递带修改或预先开始事务的 Session。SQL/连接/超时错误固定为 DENSE_DATABASE，不自动重试；模型错误也不自动重新部署或降级 CPU。
+会话由工厂每次新建，默认关闭 autoflush，无已有事务或待写变更；显式 `SET TRANSACTION READ ONLY`、statement_timeout=10s、lock_timeout=2s。仅 SELECT，无 flush/commit/业务写入，会话退出回滚只读事务。不要传递带修改或预先开始事务的 Session。数据库错误在首次捕获点保留安全SQLSTATE，分类为`DENSE_DATABASE_QUERY_CANCELED / LOCK_UNAVAILABLE / CONNECTION / RESOURCE`（各后缀均带`DENSE_DATABASE_`）；其他保留`DENSE_DATABASE`。57014只证明查询取消，可能为超时或人工取消，不凭耗时武断归因。日志`step`仅记录SQLSTATE，不输出SQL/参数/原异常、不自动重试；模型错误也不自动部署或降级CPU。
 
 返回 score 为 **1-cosine_distance**，允许零和负值，不是概率/回答置信度。Node.id_=chunk_id，SOURCE=原 Document；正文、file_name、kb_id/doc_id、页范围、section、完整 chunk_metadata/source_spans/page_semantics 与模型身份通过既有 Adapter 深复制。默认不将数据库向量放进返回 Node（include_embedding=False），不读取原文件或完整私有部署配置。
 

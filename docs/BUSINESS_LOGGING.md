@@ -61,6 +61,8 @@ LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次�
 
 阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。
 
+Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_code`记录查询取消/锁不可用/连接/资源分类，`step`仅记录五位SQLSTATE；不增加日志字段，不记录SQL、参数、连接信息或驱动原文。57014只证明查询取消，不等同于已证实超时。BM25索引摘要的`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`表示完整来源验证/全量摘要相同后的验证复用，均不跳过本题来源快照核对。
+
 | 事件 | 含义 |
 |---|---|
 | `http.request` | 请求结束：方法、路由模板、HTTP 状态、耗时、关联 ID；不是响应正文 |

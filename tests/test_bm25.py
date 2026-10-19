@@ -270,3 +270,40 @@ def test_cursor_close_failure_uses_safe_database_error():
     with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE') as error:
         tool.select_sources(session, pair[0].kb_id)
     assert session.results[0].closed and 'PRIVATE_CLOSE_CONNECTION' not in str(error.value)
+
+
+def test_snapshot_projection_covers_full_sources_without_returning_corpus_text():
+    """摘要读取保留全部范围与来源字段，只返回ID、字节数和SHA256，不加载整库正文或JSON。"""
+    kb_id, doc_id = uuid4(), uuid4()
+    statement = tool.source_statement(kb_id, [doc_id], snapshot=True)
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert tuple(statement.selected_columns.keys()) == ('chunk_id', 'text_bytes', 'text_hash', 'source_hash')
+    assert sql.count('sha256(') == 2 and 'jsonb_build_array(' in sql
+    assert 'document_chunks.doc_id IN' in sql and 'documents.status IN' in sql
+    for name in tool.SOURCE_CHUNK_FIELDS:
+        assert 'document_chunks.' + name in sql
+    for name in tool.SOURCE_DOCUMENT_FIELDS:
+        assert 'documents.' + name in sql
+    assert 'document_chunks.embedding' not in sql and 'file_path' not in sql
+
+
+def test_source_snapshot_is_complete_stable_and_invalidates_metadata_only_changes():
+    """全量摘要包含未命中行的元数据/页码/模型身份，不仅核对Chunk数量及任务ID。"""
+    pair = stored_pair()
+    first, items = tool.read_source_snapshot(SqlSessionStub([pair]), pair[0].kb_id)
+    again, same_items = tool.read_source_snapshot(SqlSessionStub([pair]), pair[0].kb_id)
+    assert first == again and items == same_items
+    pair[0].chunk_metadata['source_spans'][0]['page'] = 4
+    changed, unchanged_text = tool.read_source_snapshot(SqlSessionStub([pair]), pair[0].kb_id)
+    assert changed != first and unchanged_text == items
+    assert all(isinstance(text_hash, bytes) and len(text_hash) == 32 for _, text_hash in items)
+
+
+@pytest.mark.parametrize('budget', [tool.CorpusLimits(1, 4096, 100), tool.CorpusLimits(10, 1, 100)])
+def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
+    """摘要路径也检查总行数/原文字节预算，拒绝前缀成功并关闭游标。"""
+    first = stored_pair()
+    session = SqlSessionStub([first, stored_pair(first[0].kb_id, 2)])
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_LIMIT'):
+        tool.read_source_snapshot(session, first[0].kb_id, limits=budget)
+    assert session.results[0].closed

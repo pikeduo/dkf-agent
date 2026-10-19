@@ -4,16 +4,18 @@ import hashlib
 import math
 import re
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import nsmallest
 from uuid import UUID
 
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, Text, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 
 from app.models import Document, DocumentChunk, KnowledgeBase
 from app.services.indexing import INDEX_VERSION
+from app.services.rag.database import DATABASE_REASONS, database_diagnostic, database_error_codes
 from app.services.rag.dense import (
     DEFAULT_TOP_K, DenseRetrievalError, validate_doc_ids, validate_query, validate_scope,
 )
@@ -25,6 +27,10 @@ MAX_CORPUS_BYTES = 32 * 1024 * 1024
 MAX_CORPUS_TOKENS = 4_000_000
 MAX_QUERY_TERMS = 512
 SOURCE_BATCH_SIZE = 256
+# 必须覆盖完整Adapter输入及当前代次；测试核对字段集合，不能仅凭任务ID复用校验。
+SOURCE_CHUNK_FIELDS = ("chunk_id", "kb_id", "doc_id", "text", "page_start", "page_end", "section", "chunk_metadata")
+SOURCE_DOCUMENT_FIELDS = ("doc_id", "kb_id", "file_name", "file_type", "index_config", "status",
+    "index_task_id", "processing_task_id", "chunk_task_id", "embedding_task_id")
 TOKEN_PATTERN = re.compile(
     r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)%?(?![a-z0-9_]|[-./+][a-z0-9])"
     r"|[a-z0-9]+(?:[-_./+][a-z0-9]+)*%?"
@@ -32,6 +38,7 @@ TOKEN_PATTERN = re.compile(
 )
 CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 ERRORS = {
+    **database_error_codes("BM25"),
     "BM25_INPUT": "知识库、文档范围、Query 或 Top-K 参数无效",
     "BM25_LIMIT": "BM25 输入或候选语料超过安全上限，未截断为部分检索",
     "BM25_SESSION": "BM25 仅接受独立无待写变更的只读会话",
@@ -46,8 +53,11 @@ ERRORS = {
 class BM25RetrievalError(Exception):
     """只传递固定错误，不暴露正文、Query、SQL、连接串或底层异常。"""
 
-    def __init__(self, code: str):
-        """将未知类别归为通用错误，禁止把上游异常原文充当错误代码。"""
+    def __init__(self, code: str, *, database_error=None):
+        """首次捕获数据库错误时保留安全SQLSTATE分类，不传递原SQL或消息。"""
+        self.database_diagnostic = database_diagnostic(database_error) if code == "BM25_DATABASE" else None
+        if self.database_diagnostic and self.database_diagnostic["reason"] in DATABASE_REASONS:
+            code += "_" + self.database_diagnostic["reason"]
         self.code = code if code in ERRORS else "BM25_FAILED"
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
@@ -111,8 +121,10 @@ def tokenize(text: str, *, max_terms=MAX_CORPUS_TOKENS) -> list[str]:
     return tokens
 
 
-def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
-    """SQL限定原范围/代次；可只取评分命中ID，预算+1仍用于检测超限。"""
+def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapshot=False):
+    """同一SQL范围可投影完整证据或逐行SHA256快照，预算+1检测超限而不截断。"""
+    if type(snapshot) is not bool:
+        raise BM25RetrievalError("BM25_INPUT")
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
     config = Document.index_config
@@ -132,65 +144,113 @@ def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
                 or len(set(chunk_ids)) != len(chunk_ids)):
             raise BM25RetrievalError("BM25_INPUT")
         filters.append(DocumentChunk.chunk_id.in_(chunk_ids))
-    return (select(DocumentChunk, Document).select_from(DocumentChunk)
+    if snapshot:
+        # PostgreSQL内置SHA256不需扩展。正文、完整元数据、页码和身份均参与指纹；
+        # 热查询只传字节数和摘要，避免解码全库JSON/反复构造ORM与Node。
+        fields = [getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
+        fields += [getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS]
+        statement = select(DocumentChunk.chunk_id, func.octet_length(DocumentChunk.text).label("text_bytes"),
+            func.sha256(func.convert_to(DocumentChunk.text, "UTF8")).label("text_hash"),
+            func.sha256(func.convert_to(cast(func.jsonb_build_array(*fields), Text), "UTF8")).label("source_hash"))
+    else:
+        statement = select(DocumentChunk, Document).options(
+            load_only(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS), raiseload=True),
+            load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True))
+    return (statement.select_from(DocumentChunk)
         .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
         .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
-        .options(load_only(DocumentChunk.chunk_id, DocumentChunk.doc_id, DocumentChunk.kb_id,
-                          DocumentChunk.text, DocumentChunk.page_start, DocumentChunk.page_end,
-                          DocumentChunk.section, DocumentChunk.chunk_metadata, raiseload=True),
-                 load_only(Document.doc_id, Document.kb_id, Document.file_name, Document.file_type,
-                           Document.status, Document.index_config, Document.index_task_id,
-                           Document.processing_task_id, Document.chunk_task_id, Document.embedding_task_id, raiseload=True))
         .order_by(DocumentChunk.chunk_id.asc()).limit(budget.chunks + 1)
         .execution_options(populate_existing=True))
+
+
+@contextmanager
+def source_cursor(session, statement):
+    """统一分批读取和关闭；首次SQLSTATE优先，关闭失败不得覆盖正在传播的根因。"""
+    if session.new or session.dirty or session.deleted:
+        raise BM25RetrievalError("BM25_SESSION")
+    result, failing = None, False
+    try:
+        with session.no_autoflush:
+            result = session.execute(statement.execution_options(yield_per=SOURCE_BATCH_SIZE))
+            yield result
+    except SQLAlchemyError as exc:
+        failing = True
+        raise BM25RetrievalError("BM25_DATABASE", database_error=exc) from None
+    except BaseException:
+        # 包括调用方提前关闭生成器；清理错误不能替换消费阶段已经发生的异常。
+        failing = True
+        raise
+    finally:
+        if result is not None:
+            try:
+                result.close()
+            except SQLAlchemyError as exc:
+                if not failing:
+                    raise BM25RetrievalError("BM25_DATABASE", database_error=exc) from None
+
+
+def read_source_snapshot(session, kb_id, doc_ids=None, *, limits=None):
+    """分批核对全库来源/正文摘要，仅保留ID与正文Hash；返回指纹用于同实例验证复用。"""
+    budget = checked_limits(limits)
+    digest = hashlib.sha256(("bm25-source-snapshot-v1:" + BM25_VERSION + ":" + TOKENIZER_VERSION).encode("ascii"))
+    items, total, last = [], 0, None
+    statement = source_statement(kb_id, doc_ids, limits=limits, snapshot=True)
+    with source_cursor(session, statement) as rows:
+        for count, row in enumerate(rows, 1):
+            if count > budget.chunks:
+                raise BM25RetrievalError("BM25_LIMIT")
+            try:
+                chunk_id, text_bytes, text_hash, source_hash = row
+                if (not isinstance(chunk_id, UUID) or chunk_id.int == 0
+                        or (last is not None and chunk_id.int <= last)
+                        or type(text_bytes) is not int or text_bytes < 1
+                        or not isinstance(text_hash, (bytes, memoryview)) or len(text_hash) != 32
+                        or not isinstance(source_hash, (bytes, memoryview)) or len(source_hash) != 32):
+                    raise ValueError
+                text_hash, source_hash = bytes(text_hash), bytes(source_hash)
+            except (ValueError, TypeError):
+                raise BM25RetrievalError("BM25_RESULT") from None
+            total += text_bytes
+            if total > budget.bytes:
+                raise BM25RetrievalError("BM25_LIMIT")
+            digest.update(chunk_id.bytes + text_bytes.to_bytes(8, "big") + text_hash + source_hash)
+            items.append((chunk_id, text_hash))
+            last = chunk_id.int
+    return digest.hexdigest(), items
 
 
 def iter_sources(session, kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
     """分批读取并逐行验证来源；游标始终关闭，调用方须消费完毕才能发布完整结果。"""
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
-    if session.new or session.dirty or session.deleted:
-        raise BM25RetrievalError("BM25_SESSION")
-    result = None
-    try:
-        with session.no_autoflush:
-            statement = source_statement(kb_id, doc_ids, limits=limits, chunk_ids=chunk_ids)
-            # ORM与驱动同时分批，避免all()把全库正文及完整source_spans一次性驻留。
-            result = session.execute(statement.execution_options(yield_per=SOURCE_BATCH_SIZE))
-            total, last = 0, None
-            for count, row in enumerate(result, 1):
-                if count > budget.chunks:
-                    raise BM25RetrievalError("BM25_LIMIT")
-                try:
-                    chunk, document = row
-                    config = document.index_config
-                    if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
-                            or (doc_ids is not None and chunk.doc_id not in doc_ids)
-                            or (chunk_ids is not None and chunk.chunk_id not in chunk_ids)
-                            or document.status not in {"READY", "PARTIAL_READY"} or document.index_task_id is None
-                            or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
-                            or any(config.get(key) != str(getattr(document, attribute)) for key, attribute in (
-                                ("source_parse_task_id", "processing_task_id"), ("source_chunk_task_id", "chunk_task_id"),
-                                ("embedding_task_id", "embedding_task_id")))
-                            or chunk.chunk_metadata.get("source_parse_task_id") != str(document.processing_task_id)
-                            or not isinstance(chunk.chunk_id, UUID) or (last is not None and chunk.chunk_id.int <= last)
-                            or not isinstance(chunk.text, str) or not chunk.text.strip()):
-                        raise ValueError
-                    total += len(chunk.text.encode("utf-8"))
-                    last = chunk.chunk_id.int
-                except Exception:
-                    raise BM25RetrievalError("BM25_RESULT") from None
-                if total > budget.bytes:
-                    raise BM25RetrievalError("BM25_LIMIT")
-                yield row
-    except SQLAlchemyError:
-        raise BM25RetrievalError("BM25_DATABASE") from None
-    finally:
-        if result is not None:
+    statement = source_statement(kb_id, doc_ids, limits=limits, chunk_ids=chunk_ids)
+    with source_cursor(session, statement) as result:
+        total, last = 0, None
+        for count, row in enumerate(result, 1):
+            if count > budget.chunks:
+                raise BM25RetrievalError("BM25_LIMIT")
             try:
-                result.close()
-            except SQLAlchemyError:
-                raise BM25RetrievalError("BM25_DATABASE") from None
+                chunk, document = row
+                config = document.index_config
+                if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
+                        or (doc_ids is not None and chunk.doc_id not in doc_ids)
+                        or (chunk_ids is not None and chunk.chunk_id not in chunk_ids)
+                        or document.status not in {"READY", "PARTIAL_READY"} or document.index_task_id is None
+                        or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
+                        or any(config.get(key) != str(getattr(document, attribute)) for key, attribute in (
+                            ("source_parse_task_id", "processing_task_id"), ("source_chunk_task_id", "chunk_task_id"),
+                            ("embedding_task_id", "embedding_task_id")))
+                        or chunk.chunk_metadata.get("source_parse_task_id") != str(document.processing_task_id)
+                        or not isinstance(chunk.chunk_id, UUID) or (last is not None and chunk.chunk_id.int <= last)
+                        or not isinstance(chunk.text, str) or not chunk.text.strip()):
+                    raise ValueError
+                total += len(chunk.text.encode("utf-8"))
+                last = chunk.chunk_id.int
+            except Exception:
+                raise BM25RetrievalError("BM25_RESULT") from None
+            if total > budget.bytes:
+                raise BM25RetrievalError("BM25_LIMIT")
+            yield row
 
 
 def select_sources(session, kb_id, doc_ids=None, *, limits=None, chunk_ids=None):

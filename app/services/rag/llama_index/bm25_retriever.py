@@ -1,6 +1,7 @@
 """将当前 READY Chunk 派生的本地 BM25 接入 LlamaIndex；不调用模型或建立框架真相表。"""
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import Callable
 from contextlib import closing
@@ -18,10 +19,10 @@ from app.core.business_logging import log_event
 from app.schemas.retrieval import RetrievalResult
 from app.services.rag.bm25 import (
     DEFAULT_TOP_K, MAX_QUERY_TERMS, BM25RetrievalError, LocalBM25Index, bm25_query, bm25_scope,
-    corpus_fingerprint, iter_sources, select_sources, tokenize, CorpusLimits, checked_limits,
+    corpus_fingerprint, iter_sources, read_source_snapshot, select_sources, tokenize, CorpusLimits, checked_limits,
 )
 from app.services.rag.llama_index.dense_retriever import readonly_session
-from app.services.rag.llama_index.node_adapter import chunk_to_node, node_to_result
+from app.services.rag.llama_index.node_adapter import ADAPTER_VERSION, chunk_to_node, node_to_result
 
 
 def corpus_item(chunk, document):
@@ -48,6 +49,7 @@ class BM25Retriever(BaseRetriever):
         self._session_factory = session_factory if session_factory is not None else readonly_session
         self._index = None
         self._index_scope = None
+        self._validated_snapshot = None
         self._index_lock = Lock()
 
     @property
@@ -74,7 +76,7 @@ class BM25Retriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """分批验证整库并在同一只读快照取回Top-K证据，不同时保留全库ORM与Node。"""
+        """每题核对全量来源摘要，变化时完整验证；同一只读快照取回并校验Top-K证据。"""
         started, stage = perf_counter(), "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
@@ -101,33 +103,48 @@ class BM25Retriever(BaseRetriever):
                 session.execute(text("SET LOCAL statement_timeout = '10s'"))
                 session.execute(text("SET LOCAL lock_timeout = '2s'"))
                 budget_args = {"limits": self._corpus_limits} if self._corpus_limits is not None else {}
-                stage = "node_adapter"
-                with closing(iter_sources(session, kb_id, doc_ids, **budget_args)) as rows:
-                    items = [corpus_item(chunk, document) for chunk, document in rows]
-                chunk_count = len(items)
-                stage = "index"
-                key = corpus_fingerprint(items, **budget_args)
-                # 缓存只含词频/ID；失效时先释放旧索引，避免重建期间同时驻留两份词频。
+                stage = "source_snapshot"
+                fingerprint, snapshot_items = read_source_snapshot(session, kb_id, doc_ids, **budget_args)
+                chunk_count = len(snapshot_items)
+                snapshot_key = (kb_id, doc_ids, ADAPTER_VERSION, fingerprint)
+                # 不是凭代次或数量推断未变化：全量SHA256包含正文、全部来源及Adapter输入。
                 with self._index_lock:
-                    reused = (self._index is not None and self._index.fingerprint == key
-                              and self._index_scope == (kb_id, doc_ids))
-                    if not reused:
-                        self._index, self._index_scope = None, None
-                        self._index = LocalBM25Index(items, **budget_args)
-                        self._index_scope = (kb_id, doc_ids)
+                    validated = self._index is not None and self._validated_snapshot == snapshot_key
+                    if not validated:
+                        stage = "node_adapter"
+                        with closing(iter_sources(session, kb_id, doc_ids, **budget_args)) as rows:
+                            items = [corpus_item(chunk, document) for chunk, document in rows]
+                        if len(items) != chunk_count or any(
+                                chunk_id != snapshot_id or hashlib.sha256(body.encode("utf-8")).digest() != body_hash
+                                for (chunk_id, body), (snapshot_id, body_hash) in zip(items, snapshot_items)):
+                            raise BM25RetrievalError("BM25_RESULT")
+                        stage = "index"
+                        key = corpus_fingerprint(items, **budget_args)
+                        reused = (self._index is not None and self._index.fingerprint == key
+                                  and self._index_scope == (kb_id, doc_ids))
+                        # 失效词频先释放；来源变化但正文相同仅重新验证，不必重复分词。
+                        if not reused:
+                            self._index, self._index_scope, self._validated_snapshot = None, None, None
+                            self._index = LocalBM25Index(items, **budget_args)
+                            self._index_scope = (kb_id, doc_ids)
+                        del items
+                        self._validated_snapshot = snapshot_key
+                    else:
+                        reused = True
                     index = self._index
                 log_event("bm25.index_reused" if reused else "bm25.index_built", **scope_log,
+                          step="SOURCE_VALIDATION_REUSED" if validated else "SOURCE_VALIDATED",
                           chunk_count=chunk_count, artifact_reused=reused)
                 stage = "score"
                 ranked = index.search(query, self._top_k)
-                expected = {items[position][0]: items[position][1] for position, _ in ranked}
-                del items
+                expected = {snapshot_items[position][0]: snapshot_items[position][1] for position, _ in ranked}
+                del snapshot_items
                 nodes = {}
                 if ranked:
                     stage = "node_adapter"
                     for chunk, document in select_sources(session, kb_id, doc_ids,
                             chunk_ids=list(expected), **budget_args):
-                        if chunk.text != expected[chunk.chunk_id]:
+                        if hashlib.sha256(chunk.text.encode("utf-8")).digest() != expected[chunk.chunk_id]:
                             raise BM25RetrievalError("BM25_RESULT")
                         nodes[chunk.chunk_id] = chunk_to_node(chunk, document,
                             include_embedding=False, log_success=False)
@@ -143,10 +160,11 @@ class BM25Retriever(BaseRetriever):
             if isinstance(exc, BM25RetrievalError):
                 error = exc
             elif isinstance(exc, SQLAlchemyError) or stage == "database":
-                error = BM25RetrievalError("BM25_DATABASE")
+                error = BM25RetrievalError("BM25_DATABASE", database_error=exc)
             else:
                 error = BM25RetrievalError("BM25_RESULT" if stage in {"node_adapter", "score"} else "BM25_INDEX")
             log_event("bm25.failed", level=logging.WARNING, **scope_log, stage=stage,
+                      step=(error.database_diagnostic or {}).get("sqlstate"),
                       error_code=error.code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 

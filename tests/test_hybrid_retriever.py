@@ -328,7 +328,7 @@ def test_existing_real_retriever_classes_share_query_service_and_readonly_sessio
     assert all("document_chunks.doc_id IN" in str(session.statements[0]) for session in sessions)
     assert all(session.new == () and session.dirty == () for session in sessions)
     assert ["READY", "PARTIAL_READY"] in sessions[1].statements[0].compile().params.values()
-    assert len(sessions[1].statements) == 2 and all(result.closed for result in sessions[1].results)
+    assert len(sessions[1].statements) == 3 and all(result.closed for result in sessions[1].results)
 
 
 def test_summary_logs_are_chinese_safe_and_keep_upstream_failure_code(monkeypatch):

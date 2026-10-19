@@ -554,7 +554,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；独立BM25只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key。HTTP入口统一Hybrid/重排，不另设BM25接口。
 
-使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次分批读取当前READY/PARTIAL_READY语料并校验证据，仅保留命中项的完整Node；建索引逐块分词，不产生第二套业务表或磁盘索引。首次构建仍有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
+使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存；每题分批核对当前READY/PARTIAL_READY全部正文与来源SHA256，首次/变化时完整验证，同一来源快照才复用验证，始终重新读取命中证据。建索引逐块分词，不新增业务表、扩展或磁盘索引。首次构建仍有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
 
 ### Hybrid Python Retriever
 
@@ -805,6 +805,8 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 `JOB_TIMEOUT` 是本地等待超时，不代表云端失败。已上传的原Batch可在重启后先查询/回收；核对原批次后，管理员普通 `/api/admin/documents/{doc_id}/retry` 可恢复当前代次的本地超时，保留原Job/Batch/Data ID，不自动重新收费。更新代码后由用户重启API/CPU Worker；新PDF费用前置检查、恢复边界及只读跨语言检索对照见 [阶段26补充说明](docs/STAGE26_SUPPLEMENT.md)。
 
 联合冒烟的 `SMOKE_RETRIEVAL_PREREQUISITE` 表示 READY/证据/向量前置校验未通过，Dense 尚未执行，不是 GPU 故障结论；先按 [只读失败复核](docs/PRESET_IMPORT.md#已有失败报告的只读复核) 查真实文档/Job 错误码，不重新上传。`code` 命令不可用时可用 Windows `notepad` 查看报告，无需安装新依赖。
+
+Dense/BM25检索的数据库错误使用`*_DATABASE_QUERY_CANCELED / *_DATABASE_LOCK_UNAVAILABLE / *_DATABASE_CONNECTION / *_DATABASE_RESOURCE`及原通用码，日志`step`保留安全SQLSTATE。57014表示查询取消，可能为超时或人工取消；不凭十秒耗时直接认定数据库故障类型，也不自动重建文档或重试。查询仍为只读，语句10秒/锁等待2秒预算不变。
 
 MinerU当前归一化版本为`mineru-adapter-v4`：先从同ZIP逐页原始结构/V1提取可靠内容，再尝试严格结构增强。局部合并失败不再一律拒绝整份正文；覆盖不足保留PARTIAL_READY及告警，不冒充完整解析。旧v1/v2/v3成功缓存隔离，不删除、覆盖或重标旧产物。详见[MinerU质量分层与本地重放](docs/MINERU_CLOUD.md#v4基础提取与质量分层)。
 

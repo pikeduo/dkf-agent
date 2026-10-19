@@ -352,6 +352,75 @@ def test_dependency_error_is_safe_without_importing_model_framework():
     assert retrieval.safe_service_error(RuntimeError("SECRET_BODY")) == "RETRIEVAL_SERVICE_ERROR"
 
 
+def test_database_failure_diagnostic_reaches_case_and_report_without_raw_error(tmp_path, monkeypatch):
+    """逐题结果与CSV保留安全SQLSTATE；失败四路不冒充成功，原问题/SQL不进入诊断字段。"""
+    import csv
+    from app.services.rag.dense import DenseRetrievalError
+    from test_retrieval_database import driver_error
+
+    data, kb = indexed_inputs(), UUID(int=999)
+    rows = indexed_rows(data, kb)
+    calls = []
+    base = mock_backend(data, calls)
+
+    class FailedBackend(base):
+        """仅模拟Dense查询取消，其他组件仍使用内存替身。"""
+
+        def retrieve_dense(self, question):
+            """将首次捕获的SQLSTATE传给既有评测错误处理。"""
+            raise DenseRetrievalError('DENSE_DATABASE', database_error=driver_error('57014'))
+
+    def reader(kb_id):
+        """返回固定索引快照，不访问真实数据库。"""
+        return deepcopy(rows)
+
+    def convert(nodes, documents, kb_id):
+        """保留原有内存来源契约，不导入模型框架。"""
+        return deepcopy(nodes)
+
+    monkeypatch.setattr(retrieval, 'hit_rows', convert)
+    retrieval.run_evaluation(data, tmp_path, kb, reader, backend_factory=FailedBackend, index_policy='indexed')
+    qa = data['questions'][0]
+    case = common.read_json(tmp_path / 'cases' / (common.digest([qa['dataset'], qa['qa_id']]) + '.json'))
+    failure = case['strategies']['dense']
+    assert failure['error_code'] == 'DENSE_DATABASE_QUERY_CANCELED'
+    assert failure['database_diagnostic'] == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
+    assert case['strategies']['hybrid']['error_code'] == 'BRANCH_FAILED'
+    assert reports.generate(data, tmp_path)['status'] == 'INCOMPLETE'
+    for file in ('qa_execution.csv', 'failures_and_unscorable.csv', 'retrieval_diagnostics.csv'):
+        with (tmp_path / file).open(encoding='utf-8-sig', newline='') as handle:
+            failures = [row for row in csv.DictReader(handle) if row['error_code'] == 'DENSE_DATABASE_QUERY_CANCELED']
+        assert len(failures) == 2
+        assert all(row['database_reason'] == 'QUERY_CANCELED' and row['sqlstate'] == '57014' for row in failures)
+        assert 'PRIVATE' not in repr(failures)
+
+
+def test_retry_failed_queries_keeps_successful_cases_byte_identical(tmp_path, monkeypatch):
+    """显式重跑仅执行含失败分支的题，成功题断点字节不变且沿用原索引与模型身份。"""
+    data, kb = indexed_inputs(), UUID(int=999)
+    rows, calls = indexed_rows(data, kb), []
+    run_mock_evaluation(data, rows, kb, tmp_path, monkeypatch, calls)
+    failed_qa, successful_qa = data['questions']
+    successful_path = tmp_path / 'cases' / (common.digest([successful_qa['dataset'], successful_qa['qa_id']]) + '.json')
+    before = successful_path.read_bytes()
+    failed_path = tmp_path / 'cases' / (common.digest([failed_qa['dataset'], failed_qa['qa_id']]) + '.json')
+    case = common.read_json(failed_path)
+    case['strategies']['dense'].update(status='FAILED', error_code='DENSE_DATABASE', hits=[])
+    common.write_json(failed_path, case)
+    calls.clear()
+
+    def reader(kb_id):
+        """原只读索引身份不变，不调用业务数据库。"""
+        return deepcopy(rows)
+
+    retrieval.run_evaluation(data, tmp_path, kb, reader, backend_factory=mock_backend(data, calls),
+        index_policy='indexed', retry_failed=True)
+    queries = [(stage, question) for stage, question in calls if stage != 'construct']
+    assert queries == [(stage, failed_qa['question']) for stage in ('dense', 'bm25', 'rerank')]
+    assert successful_path.read_bytes() == before
+    assert all(value['status'] == 'SUCCESS' for value in common.read_json(failed_path)['strategies'].values())
+
+
 def test_late_hit_and_partial_source_coverage_are_distinct_diagnostics():
     """第11名晚命中与多页仅召回一页分别记录，不能都当作完全漏召回。"""
     qa = indexed_inputs()["questions"][0]

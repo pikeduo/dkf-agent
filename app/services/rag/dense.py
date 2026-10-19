@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, load_only
 from app.models import Document, DocumentChunk, KnowledgeBase
 from app.services.embedding.service import DIMENSION, MODEL_ID, VERSION
 from app.services.indexing import INDEX_VERSION
+from app.services.rag.database import DATABASE_REASONS, database_diagnostic, database_error_codes
 from app.services.rag.llama_index.validation import json_snapshot, vector_snapshot
 
 DEFAULT_TOP_K = 20
@@ -21,6 +22,7 @@ MAX_DOC_IDS = 100
 MAX_QUERY_CHARS = 32768
 MODEL_FIELDS = {"model_name", "model_fingerprint", "dimension", "normalized", "version", "max_length", "precision"}
 ERRORS = {
+    **database_error_codes("DENSE"),
     "DENSE_INPUT": "知识库、文档范围、Query 或 Top-K 参数无效",
     "DENSE_LIMIT": "文档数量、Query 或 Top-K 超过安全上限",
     "DENSE_MODEL": "Query 模型身份或编码版本不可用",
@@ -36,8 +38,11 @@ ERRORS = {
 class DenseRetrievalError(Exception):
     """仅输出固定中文错误，禁止泄露 Query、向量、SQL、连接串及模型路径。"""
 
-    def __init__(self, code: str):
-        """未知类别归为通用失败，不把异常原文作为错误类别。"""
+    def __init__(self, code: str, *, database_error=None):
+        """在首次数据库捕获点保留SQLSTATE分类，未知类别不透传异常原文。"""
+        self.database_diagnostic = database_diagnostic(database_error) if code == "DENSE_DATABASE" else None
+        if self.database_diagnostic and self.database_diagnostic["reason"] in DATABASE_REASONS:
+            code += "_" + self.database_diagnostic["reason"]
         self.code = code if code in ERRORS else "DENSE_FAILED"
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
@@ -133,7 +138,7 @@ def eligibility(kb_id: UUID, identity: dict, doc_ids: tuple[UUID, ...] | None = 
 def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict,
                     top_k: int = DEFAULT_TOP_K, *,
                     doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None):
-    """构建参数化精确检索：知识库/文档候选物化 CTE、距离/UUID 排序，再读取 Top-K 正文。
+    """物化已过滤候选的ID/标量距离，按距离及UUID精确取Top-K后读取正文。
 
     物化屏障避免 HNSW 近似候选截断造成过滤后的漏项；不修改索引或向量值。
     """
@@ -145,12 +150,13 @@ def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict
     except Exception:
         raise DenseRetrievalError("DENSE_MODEL") from None
     owner_join = (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id)
-    candidates = (select(DocumentChunk.chunk_id, DocumentChunk.embedding).select_from(DocumentChunk)
+    distance = DocumentChunk.embedding.cosine_distance(vector)
+    # 物化全部1024维向量会产生大量临时I/O；屏障内计算距离，仅保留ID与标量。
+    candidates = (select(DocumentChunk.chunk_id, distance.label("cosine_distance")).select_from(DocumentChunk)
         .join(Document, owner_join).join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id)
         .where(*eligibility(kb_id, identity, doc_ids)).cte("dense_eligible").prefix_with("MATERIALIZED", dialect="postgresql"))
-    distance = candidates.c.embedding.cosine_distance(vector)
-    ranked = (select(candidates.c.chunk_id, distance.label("cosine_distance"))
-        .order_by(distance.asc(), candidates.c.chunk_id.asc()).limit(top_k).cte("dense_ranked"))
+    ranked = (select(candidates.c.chunk_id, candidates.c.cosine_distance)
+        .order_by(candidates.c.cosine_distance.asc(), candidates.c.chunk_id.asc()).limit(top_k).cte("dense_ranked"))
     return (select(DocumentChunk, Document, ranked.c.cosine_distance).select_from(DocumentChunk)
         .join(ranked, ranked.c.chunk_id == DocumentChunk.chunk_id).join(Document, owner_join)
         .options(load_only(DocumentChunk.chunk_id, DocumentChunk.kb_id, DocumentChunk.doc_id,
@@ -176,8 +182,8 @@ def select_dense_hits(session: Session, kb_id: UUID | str, query_vector: list[fl
     try:
         with session.no_autoflush:
             rows = session.execute(statement).all()
-    except SQLAlchemyError:
-        raise DenseRetrievalError("DENSE_DATABASE") from None
+    except SQLAlchemyError as exc:
+        raise DenseRetrievalError("DENSE_DATABASE", database_error=exc) from None
     if len(rows) > top_k:
         raise DenseRetrievalError("DENSE_RESULT")
     hits, seen, last = [], set(), None

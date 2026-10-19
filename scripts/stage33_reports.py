@@ -54,7 +54,7 @@ def fee_summary(documents):
 
 
 def generate(data, run, *, fatal_code=None):
-    """保留完整文档库及本run选题，区分抽样/全量成绩；不访问数据库、模型或云端。"""
+    """汇总完整范围及安全数据库分类，区分抽样/全量成绩；不访问数据库、模型或云端。"""
     from app.services.parse_cache import atomic_write
     checkpoint = run / "import_checkpoint.json"
     imported = read_json(checkpoint) if checkpoint.exists() else {}
@@ -108,14 +108,16 @@ def generate(data, run, *, fatal_code=None):
         executions.append(execution)
         for strategy, value in result["strategies"].items():
             diagnostic = diagnose_retrieval(result, strategy)
+            database = value.get("database_diagnostic") or {}
+            database_fields = {"database_reason": database.get("reason"), "sqlstate": database.get("sqlstate")}
             diagnostic_counts[(qa["dataset"], strategy, diagnostic["category"])] += 1
             if diagnostic["category"] != "HIT_AT_5":
                 diagnostics.append({"dataset": qa["dataset"], "qa_id": qa["qa_id"], "strategy": strategy,
                     "source_file_ids": qa["source_file_ids"], "doc_ids": execution["doc_ids"],
-                    "status": value["status"], **context, **diagnostic})
+                    "status": value["status"], **context, **diagnostic, **database_fields})
             metric_rows.append({"dataset": qa["dataset"], "qa_id": qa["qa_id"], "strategy": strategy,
                 "source_file_ids": qa["source_file_ids"], "doc_ids": execution["doc_ids"], "status": value["status"],
-                **context, "diagnosis": diagnostic["category"],
+                **context, **database_fields, "diagnosis": diagnostic["category"],
                 "scorable": result["truth"]["scorable"], "manual_pending": result["truth"]["manual_pending"],
                 "error_code": value.get("error_code") or fatal_code, "duration_seconds": value.get("duration_seconds"),
                 **(value.get("metrics") or {})})
@@ -128,6 +130,7 @@ def generate(data, run, *, fatal_code=None):
             if value["status"] != "SUCCESS" or not result["truth"]["scorable"]:
                 failures.append({"kind": "qa", "dataset": qa["dataset"], "identity": qa["qa_id"],
                     "strategy": strategy, "status": value["status"],
+                    **database_fields,
                     "error_code": value.get("error_code") or result["truth"]["basis"]})
     metrics = {group: {s: aggregate([q for q in questions if group == "overall" or q["dataset"] == group], s)
                       for s in STRATEGIES} for group in ("ohr", "ocb", "overall")}
@@ -193,14 +196,14 @@ def generate(data, run, *, fatal_code=None):
     atomic_write(run / "qa_execution.jsonl", b"".join(encoded(r) + b"\n" for r in executions))
     write_csv(run / "qa_execution.csv", metric_rows, ["dataset", "qa_id", "strategy", "source_file_ids", "doc_ids", "status",
         "source_quality", "source_file_types", "file_type_group", "required_evidence_pages_missing", "diagnosis",
-        "scorable", "manual_pending", "error_code", "duration_seconds", "recall_at_5", "recall_at_10", "mrr_at_20"])
+        "scorable", "manual_pending", "error_code", "database_reason", "sqlstate", "duration_seconds", "recall_at_5", "recall_at_10", "mrr_at_20"])
     publish_stream(run / "retrieval_results.jsonl", hits_buffer)
     hit_csv.flush()
     publish_stream(run / "retrieval_results.csv", hit_csv)
     hits_buffer.close()
     hit_csv.close()
     write_json(run / "failures_and_unscorable.json", failures)
-    write_csv(run / "failures_and_unscorable.csv", failures, ["kind", "dataset", "identity", "strategy", "status", "error_code", "adapter_diagnostic", "parser_reason_codes", "retry_http_status", "retry_request_error"])
+    write_csv(run / "failures_and_unscorable.csv", failures, ["kind", "dataset", "identity", "strategy", "status", "error_code", "database_reason", "sqlstate", "adapter_diagnostic", "parser_reason_codes", "retry_http_status", "retry_request_error"])
     write_json(run / "metrics.json", metrics)
     write_json(run / "metrics_breakdown.json", breakdown)
     write_json(run / "retrieval_diagnostics.json", {"metrics_status": report["metrics_status"],
@@ -209,7 +212,7 @@ def generate(data, run, *, fatal_code=None):
             for (dataset, strategy, category), count in sorted(diagnostic_counts.items())], "cases": diagnostics})
     write_csv(run / "retrieval_diagnostics.csv", diagnostics, ["dataset", "qa_id", "strategy", "status",
         "category", "basis", "source_file_ids", "doc_ids", "source_quality", "file_type_group",
-        "required_evidence_pages_missing", "error_code"])
+        "required_evidence_pages_missing", "error_code", "database_reason", "sqlstate"])
     for name in ("ohr", "ocb", "overall"):
         write_json(run / f"metrics_{name}.json", metrics[name])
     write_json(run / "costs_and_timing.json", {"fees": report["fees"], "strategies": metrics,

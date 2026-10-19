@@ -29,7 +29,7 @@ def lexical_pair(kb_id=None, number=1, text='NASA RX-7800-XT 100'):
 
 
 def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
-    """构造不读库；BM25在一个只读快照内分批扫描与取命中证据，始终不调用Embedding。"""
+    """构造不读库；冷启动同快照读取摘要、完整验证及命中证据，始终不调用Embedding。"""
     pair = lexical_pair()
     factory, sessions = factory_for([pair])
 
@@ -43,7 +43,7 @@ def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
     assert sessions == [] and retriever._index is None
     nodes = retriever.retrieve(QueryBundle(query_str='NASA'))
     assert len(nodes) == 1 and nodes[0].node.embedding is None and nodes[0].score > 0
-    assert sessions[0].closed and len(sessions[0].statements) == 2
+    assert sessions[0].closed and len(sessions[0].statements) == 3
     assert sessions[0].settings == ['SET TRANSACTION READ ONLY',
         'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', "SET LOCAL statement_timeout = '10s'",
         "SET LOCAL lock_timeout = '2s'"]
@@ -214,7 +214,7 @@ def test_logs_are_aggregated_sanitized_and_conversion_default_is_preserved(monke
 
 
 def test_full_corpus_nodes_are_not_retained_and_evidence_select_is_top_k(monkeypatch):
-    """逐行Node验证后立即释放，仅保存最终Top-K，第二次SQL明确绑定命中ID。"""
+    """冷启动逐行完整验证后释放，第三次SQL只绑定Top-K，摘要扫描不构造Node。"""
     first = lexical_pair(number=1)
     rows = [first] + [lexical_pair(first[0].kb_id, number=number) for number in range(2, 10)]
     factory, sessions = factory_for(rows)
@@ -236,13 +236,14 @@ def test_full_corpus_nodes_are_not_retained_and_evidence_select_is_top_k(monkeyp
     statements = sessions[0].statements
     assert all(statement.get_execution_options()['yield_per'] == core.SOURCE_BATCH_SIZE for statement in statements)
     assert 'document_chunks.chunk_id IN' not in str(statements[0])
-    assert 'document_chunks.chunk_id IN' in str(statements[1])
-    assert [row[0].chunk_id for row in rows[:2]] in statements[1].compile().params.values()
+    assert 'document_chunks.chunk_id IN' not in str(statements[1])
+    assert 'document_chunks.chunk_id IN' in str(statements[2])
+    assert [row[0].chunk_id for row in rows[:2]] in statements[2].compile().params.values()
     assert all(result.closed for result in sessions[0].results)
 
 
 def test_nonmatching_corrupt_evidence_still_fails_entire_query():
-    """节省内存不跳过未命中Chunk的原Adapter校验，也不使用已有缓存掩盖坏证据。"""
+    """未命中证据变化使摘要失效并重做完整校验，已有词频不能掩盖坏页码。"""
     first = lexical_pair(number=1)
     second = lexical_pair(first[0].kb_id, number=2, text='ESA')
     rows = [first, second]
@@ -252,7 +253,7 @@ def test_nonmatching_corrupt_evidence_still_fails_entire_query():
     second[0].page_end = 0
     with pytest.raises(core.BM25RetrievalError, match='BM25_RESULT'):
         retriever.retrieve('NASA')
-    assert len(sessions[-1].statements) == 1 and sessions[-1].closed
+    assert len(sessions[-1].statements) == 2 and sessions[-1].closed
     assert all(result.closed for result in sessions[-1].results)
 
 
@@ -297,3 +298,89 @@ def test_rebuilding_releases_stale_index_before_allocating_replacement(monkeypat
     with pytest.raises(core.BM25RetrievalError, match='BM25_INDEX'):
         retriever.retrieve('ESA')
     assert retriever._index is None and retriever._index_scope is None
+
+
+def test_unchanged_full_snapshot_skips_repeated_node_validation(monkeypatch):
+    """热查询完整核对全部摘要，仅构造命中证据Node，不重复全库ORM与Adapter工作。"""
+    first = lexical_pair(number=1)
+    rows = [first, lexical_pair(first[0].kb_id, number=2, text='ESA')]
+    factory, sessions = factory_for(rows)
+    calls = []
+    convert = retrievers.corpus_item
+
+    def tracked(chunk, document):
+        """只记录完整语料校验次数，不省略生产证据校验。"""
+        calls.append(chunk.chunk_id)
+        return convert(chunk, document)
+
+    monkeypatch.setattr(retrievers, 'corpus_item', tracked)
+    retriever = BM25Retriever(first[0].kb_id, session_factory=factory)
+    before = retriever.retrieve('NASA')
+    index = retriever._index
+    after = retriever.retrieve('NASA')
+    assert len(calls) == len(rows) and retriever._index is index
+    assert [node.model_dump() for node in before] == [node.model_dump() for node in after]
+    assert len(sessions[0].statements) == 3 and len(sessions[1].statements) == 2
+    assert 'source_hash' in sessions[1].statements[0].selected_columns.keys()
+    assert 'document_chunks.chunk_id IN' in str(sessions[1].statements[1])
+    assert set(node_adapter.CHUNK_FIELDS) <= set(core.SOURCE_CHUNK_FIELDS)
+    assert set(node_adapter.DOCUMENT_FIELDS) <= set(core.SOURCE_DOCUMENT_FIELDS)
+
+
+@pytest.mark.parametrize('change', ['text', 'source_spans', 'page', 'file_name', 'model'])
+def test_nonwinning_source_changes_require_full_validation(monkeypatch, change):
+    """未命中项的正文/来源/页/文件名/模型元数据变化均重新全量验证，不能凭数量或代次复用。"""
+    first = lexical_pair(number=1)
+    second = lexical_pair(first[0].kb_id, number=2, text='ESA')
+    factory, sessions = factory_for([first, second])
+    calls = []
+    convert = retrievers.corpus_item
+
+    def tracked(chunk, document):
+        """记录每次完整校验，确认来源变化没有被Top-K未命中掩盖。"""
+        calls.append(chunk.chunk_id)
+        return convert(chunk, document)
+
+    monkeypatch.setattr(retrievers, 'corpus_item', tracked)
+    retriever = BM25Retriever(first[0].kb_id, top_k=1, session_factory=factory)
+    retriever.retrieve('NASA')
+    previous = retriever._index
+    if change == 'text':
+        second[0].text = 'ESA changed'
+    elif change == 'source_spans':
+        second[0].chunk_metadata['source_spans'][0]['page'] = 4
+    elif change == 'page':
+        second[0].page_end = 5
+    elif change == 'file_name':
+        second[1].file_name = '更新后的来源.pdf'
+    else:
+        second[1].index_config['result']['model']['model_fingerprint'] = 'c' * 64
+    assert retriever.retrieve('NASA')[0].node.node_id == str(first[0].chunk_id)
+    assert len(calls) == 4 and len(sessions[1].statements) == 3
+    assert (retriever._index is previous) == (change != 'text')
+
+
+def test_source_snapshot_database_failure_never_returns_cached_results(monkeypatch):
+    """热查询摘要SQL失败仍明确失败，携带真实SQLSTATE，不返回上一题的词频命中。"""
+    from test_retrieval_database import driver_error
+
+    pair = lexical_pair()
+    factory, _ = factory_for([pair])
+    retriever = BM25Retriever(pair[0].kb_id, session_factory=factory)
+    assert retriever.retrieve('NASA')
+    failing_factory, sessions = factory_for([pair], failure=driver_error('55P03'))
+    retriever._session_factory = failing_factory
+    events = []
+
+    def log(event, **fields):
+        """只捕获当前模块白名单摘要，不写真实日志文件。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(retrievers, 'log_event', log)
+    with pytest.raises(core.BM25RetrievalError, match='BM25_DATABASE_LOCK_UNAVAILABLE') as caught:
+        retriever.retrieve('NASA')
+    assert caught.value.database_diagnostic == {'reason': 'LOCK_UNAVAILABLE', 'sqlstate': '55P03'}
+    assert sessions[0].closed
+    fields = next(fields for event, fields in events if event == 'bm25.failed')
+    assert fields['step'] == '55P03' and fields['stage'] == 'source_snapshot'
+    assert 'PRIVATE' not in repr(events) + str(caught.value)
