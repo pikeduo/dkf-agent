@@ -1,4 +1,4 @@
-"""阶段33固定200文件/4087QA的全量导入、检索与报告；默认dry-run，不抽样。"""
+"""阶段33固定200文件的检索与报告；支持显式QA抽样，默认dry-run及全量QA。"""
 
 import argparse
 import math
@@ -14,16 +14,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.stage33_common import (DATASET, Stage33Error, initialize, load_dataset, plain_path,
-                                   read_json, run_lock, write_json)
+                                   read_json, run_lock, select_questions, write_json)
 from scripts.stage33_reports import generate
 from scripts.stage33_runtime import API, import_all, read_snapshot, refresh_index_snapshot
 from scripts.stage33_retrieval import Backends, run_evaluation, safe_service_error
 
 
 def initial_plan(data):
-    """登记全量范围和页数成本参考，不执行Router或把潜在云份数冒充实际费用。"""
+    """登记完整文档库、本run选题及成本参考，不执行Router或把潜在云份数冒充费用。"""
     reference = sum(max(1, math.ceil(int(d["page_count"] or 1) / 200)) for d in data["documents"])
     return {"document_count": len(data["documents"]), "qa_count": len(data["questions"]),
+        "qa_scope": "sampled" if data.get("qa_selection") else "full",
+        "population_qa_count": sum(data["qa_selection"]["population_counts"].values())
+            if data.get("qa_selection") else len(data["questions"]),
+        "qa_selection": data.get("qa_selection"),
         "file_issues": data.get("file_issues", {}),
         "fingerprint": data["fingerprint"], "documents": data["documents"],
         "oversized_pdf_file_ids": [d["file_id"] for d in data["documents"] if d["file_type"] == "pdf"
@@ -34,7 +38,7 @@ def initial_plan(data):
 
 
 def build_parser():
-    """正式CLI无count/limit/前N参数，inflight只控制资源，不缩小总范围。"""
+    """检索文档库保持完整，QA可按数据集显式固定抽样；inflight仅控制导入资源。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--step", choices=["plan", "import", "snapshot", "evaluate", "report"], default="plan")
     parser.add_argument("--run", default="stage33_run_01")
@@ -51,6 +55,9 @@ def build_parser():
     parser.add_argument("--poll-interval", type=int, default=10)
     parser.add_argument("--index-policy", choices=["complete", "indexed"], default="complete",
                         help="complete要求全READY；indexed显式评测READY/PARTIAL_READY，质量缺口仍完整报告")
+    parser.add_argument("--qa-per-dataset", type=int,
+                        help="每个数据集固定抽取的QA数，例如50；省略仍评测全部4087题，文档库保持200份")
+    parser.add_argument("--sample-seed", type=int, default=33, help="QA抽样固定种子，默认33；同一run必须一致")
     parser.add_argument("--bm25-max-chunks", type=int, default=100_000)
     parser.add_argument("--bm25-max-mb", type=int, default=256)
     parser.add_argument("--bm25-max-tokens", type=int, default=32_000_000)
@@ -72,11 +79,14 @@ def main(argv=None):
             raise Stage33Error("ALL_FILES_CLOUD_PERMISSION_REQUIRED")
         if args.retry_failed_only and (args.step != "import" or not args.resume):
             raise Stage33Error("RETRY_FAILED_ONLY_REQUIRES_IMPORT_RESUME")
+        if args.step == "import" and args.qa_per_dataset is not None:
+            raise Stage33Error("QA_SAMPLE_IMPORT_FORBIDDEN")
         # 仅读取冻结原件Hash/容器与元数据，绝不重新执行阶段32准备/提取脚本。
-        data = load_dataset(DATASET)
+        data = select_questions(load_dataset(DATASET), per_dataset=args.qa_per_dataset, seed=args.sample_seed)
         plan = initial_plan(data)
         if not args.execute:
-            print(f"DRY_RUN：{plan['document_count']}份文件；{plan['qa_count']}条QA；"
+            print(f"DRY_RUN：{plan['document_count']}份文件；QA={plan['qa_count']}/{plan['population_qa_count']}；"
+                  f"范围={plan['qa_scope']}；"
                   f"全云按页参考{plan['if_all_files_use_cloud_page_based_file_count']}文件任务。"
                   f"输入错误={len(data.get('file_issues', {}))}；未上传/加载模型/连接数据库/写报告。")
             return 1 if data.get("file_issues") else 0
@@ -96,7 +106,7 @@ def main(argv=None):
             log_event("dataset_evaluation.started", kb_id=args.kb_id, stage=args.step,
                       file_count=len(data["documents"]), item_count=len(data["questions"]))
             try:
-                # 首次进入即登记全部QA，即使随后服务不可用也不会只剩成功子集。
+                # 首次即登记本run全部选定QA，不能在执行后只保留成功题。
                 generate(data, run)
                 if args.step == "import":
                     api = API(args.api_base_url)
@@ -140,10 +150,12 @@ def main(argv=None):
                 return 1
             if args.step == "snapshot":
                 return 0 if report.get("indexed") == report["fixed_document_count"] else 1
-            return 0 if args.step in {"plan", "report"} or (args.step == "import" and report["ready"] == 200) or report["status"] in {"PASS", "COMPLETED_WITH_QUALITY_LIMITS"} else 1
+            completed = {"PASS", "COMPLETED_WITH_QUALITY_LIMITS", "SAMPLE_COMPLETED",
+                         "SAMPLE_COMPLETED_WITH_QUALITY_LIMITS"}
+            return 0 if args.step in {"plan", "report"} or (args.step == "import" and report["ready"] == 200) or report["status"] in completed else 1
     except (Stage33Error, OSError, ValueError, KeyError, TypeError) as error:
         code = error.code if isinstance(error, Stage33Error) else "INPUT_OR_OUTPUT"
-        print(f"STAGE33_STOPPED：{code}；未缩减固定范围或自动重试收费任务。")
+        print(f"STAGE33_STOPPED：{code}；未覆盖旧run或自动重试收费任务。")
         return 1
 
 

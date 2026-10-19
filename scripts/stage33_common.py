@@ -1,4 +1,4 @@
-"""阶段33冻结输入校验及本地报告工具；不抽样、不解析正文、不连接服务。"""
+"""阶段33冻结输入校验、可复现QA抽样及本地报告；不解析正文或连接服务。"""
 
 import csv
 import hashlib
@@ -195,6 +195,34 @@ def load_dataset(root=DATASET, *, counts=COUNTS, verify_files=True):
             "metadata_hashes": metadata_hashes, "root": str(root), "file_issues": file_issues}
 
 
+def select_questions(data, *, per_dataset=None, seed=33):
+    """完整输入校验后按身份Hash固定抽题，保留整个文档库；不按答案、质量或检索成绩挑题。"""
+    if per_dataset is None:
+        return data
+    if (type(per_dataset) is not int or per_dataset < 1
+            or type(seed) is not int or not 0 <= seed <= 2**32 - 1):
+        raise Stage33Error("QA_SAMPLE_ARGUMENTS")
+    pools = {}
+    for qa in data["questions"]:
+        pools.setdefault(qa["dataset"], []).append(qa)
+    if not pools or any(len(pool) < per_dataset for pool in pools.values()):
+        raise Stage33Error("QA_SAMPLE_TOO_LARGE")
+
+    def rank(qa):
+        """排序只使用种子、数据集和官方QA身份，输入行序及答案均不影响抽样。"""
+        return digest(["stage33-qa-sample-v1", seed, qa["dataset"], qa["qa_id"]]), str(qa["qa_id"])
+
+    selected = [qa for dataset in sorted(pools)
+                for qa in sorted(pools[dataset], key=rank)[:per_dataset]]
+    selection = {"version": "stage33-qa-sample-v1", "method": "sha256_identity_rank",
+        "seed": seed, "per_dataset": per_dataset, "parent_dataset_fingerprint": data["fingerprint"],
+        "population_counts": {dataset: len(pool) for dataset, pool in sorted(pools.items())},
+        "selected_counts": {dataset: per_dataset for dataset in sorted(pools)},
+        "qa_ids": [{"dataset": qa["dataset"], "qa_id": qa["qa_id"]} for qa in selected]}
+    # 新身份隔离全量/不同种子的run，但原件、QA行及其全部依赖保持原样。
+    return data | {"questions": selected, "fingerprint": digest(selection), "qa_selection": selection}
+
+
 @contextmanager
 def run_lock(run):
     """复用系统文件锁，进程退出自动释放；不需要恢复审计框架或清理他人锁。"""
@@ -213,9 +241,12 @@ def run_lock(run):
 
 
 def initialize(run, data, kb_id):
-    """绑定全部输入及独立知识库；恢复只接受同一冻结版本和同一目标。"""
+    """绑定输入、抽样政策及知识库；保存可复验选题清单，拒绝与其他run或种子混算。"""
     value = {"version": VERSION, "dataset_fingerprint": data["fingerprint"], "kb_id": str(UUID(str(kb_id))),
              "document_count": len(data["documents"]), "qa_count": len(data["questions"])}
+    selection = data.get("qa_selection")
+    if selection is not None:
+        value["qa_selection_fingerprint"] = digest(selection)
     path = run / "run.json"
     if path.exists() and read_json(path) != value:
         raise Stage33Error("RUN_IDENTITY_CHANGED")
@@ -223,4 +254,10 @@ def initialize(run, data, kb_id):
         if any(p.name != "run.lock" for p in run.iterdir()):
             raise Stage33Error("OUTPUT_EXISTS")
         write_json(path, value)
+    if selection is not None:
+        selected_path = run / "qa_selection.json"
+        if selected_path.exists() and read_json(selected_path) != selection:
+            raise Stage33Error("QA_SELECTION_CHANGED")
+        if not selected_path.exists():
+            write_json(selected_path, selection)
     return value

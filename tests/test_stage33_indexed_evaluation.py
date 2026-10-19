@@ -226,6 +226,19 @@ def test_indexed_evaluation_reports_full_denominators_and_quality_limits(tmp_pat
     assert len(common.read_json(tmp_path / "retrieval_diagnostics.json")["counts"]) > 0
 
 
+@pytest.mark.parametrize("partial_count,expected", [(0, "SAMPLE_COMPLETED"),
+                                                  (1, "SAMPLE_COMPLETED_WITH_QUALITY_LIMITS")])
+def test_completed_sample_is_not_reported_as_full_qa_acceptance(tmp_path, monkeypatch, partial_count, expected):
+    """四路样本全部执行成功仍标抽样，含PARTIAL时额外保留质量限制和原分组。"""
+    data, kb, calls = common.select_questions(indexed_inputs(), per_dataset=1), UUID(int=999), []
+    rows = indexed_rows(data, kb, partial_count=partial_count)
+    run_mock_evaluation(data, rows, kb, tmp_path, monkeypatch, calls)
+    report = reports.generate(data, tmp_path)
+    assert report["status"] == expected and report["qa_scope"] == "sampled"
+    assert report["full_qa_evaluation"] is False and report["indexed"] == 2
+    assert report["metrics_status"] == "VALID_EXECUTION_RECORDS"
+
+
 def test_quality_change_invalidates_resume_before_model_construction(tmp_path, monkeypatch):
     """只改质量缺页也不能复用旧成绩；索引数据与模型相同仍需新run。"""
     data, kb, calls = indexed_inputs(), UUID(int=999), []
@@ -386,8 +399,9 @@ def test_explicit_import_observation_supersedes_older_index_snapshot(tmp_path):
     assert report["metrics_status"] == "NOT_CERTIFIED"
 
 
-def test_snapshot_cli_does_not_construct_api_or_models(tmp_path, monkeypatch, capsys):
-    """真正覆盖snapshot命令分派：只调用一次只读reader，不需要云许可/API/Worker/模型。"""
+@pytest.mark.parametrize("quota", [None, 1])
+def test_snapshot_cli_does_not_construct_api_or_models(tmp_path, monkeypatch, capsys, quota):
+    """全量和抽样snapshot均只读一次；不需要云许可/API/Worker/模型，抽样清单可保存。"""
     from app.core import business_logging, config
     data, kb, calls = indexed_inputs(), UUID(int=999), []
     rows = indexed_rows(data, kb)
@@ -426,9 +440,13 @@ def test_snapshot_cli_does_not_construct_api_or_models(tmp_path, monkeypatch, ca
     monkeypatch.setattr(business_logging, "configure_logging", quiet)
     monkeypatch.setattr(business_logging, "log_event", quiet)
     monkeypatch.setattr(config, "get_settings", settings)
-    assert cli.main(["--step", "snapshot", "--run", "stage33_run_02", "--kb-id", str(kb), "--execute"]) == 0
+    args = ["--step", "snapshot", "--run", "stage33_run_02", "--kb-id", str(kb), "--execute"]
+    if quota is not None:
+        args += ["--qa-per-dataset", str(quota)]
+    assert cli.main(args) == 0
     assert calls == ["read"] and "INDEX_SNAPSHOT_READY" in capsys.readouterr().out
     folder = tmp_path / "results/stage33/stage33_run_02"
     assert not (folder / "import_checkpoint.json").exists()
     assert not (folder / "evaluation_identity.json").exists()
     assert common.read_json(folder / "summary.json")["indexed"] == 2
+    assert (folder / "qa_selection.json").exists() == (quota is not None)

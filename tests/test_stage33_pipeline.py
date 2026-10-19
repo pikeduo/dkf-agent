@@ -246,12 +246,15 @@ def test_report_preserves_adapter_subreason_without_changing_full_scope(tmp_path
     assert "adapter_diagnostic" in (tmp_path / "import_report.csv").read_text(encoding="utf-8").splitlines()[0]
 
 
-def test_formal_cli_has_no_first_n_or_sample_switch():
-    """范围不能被count/limit参数缩小，max-inflight只是资源控制。"""
+def test_cli_keeps_full_corpus_and_exposes_explicit_qa_sampling():
+    """文档库无前N截断；QA可显式按数据集抽样，默认仍使用全量官方题。"""
     parser = cli.build_parser()
     with pytest.raises(SystemExit):
         parser.parse_args(["--count", "10"])
     assert parser.parse_args(["--max-inflight", "1"]).max_inflight == 1
+    assert parser.parse_args([]).qa_per_dataset is None
+    args = parser.parse_args(["--qa-per-dataset", "50", "--sample-seed", "33"])
+    assert args.qa_per_dataset == 50 and args.sample_seed == 33
 
 
 def recovery_checkpoint(data, rows):

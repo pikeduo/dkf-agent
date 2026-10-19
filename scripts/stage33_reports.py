@@ -54,7 +54,7 @@ def fee_summary(documents):
 
 
 def generate(data, run, *, fatal_code=None):
-    """保留全范围并按真实索引/质量分组；独立报告不访问数据库、模型或云端。"""
+    """保留完整文档库及本run选题，区分抽样/全量成绩；不访问数据库、模型或云端。"""
     from app.services.parse_cache import atomic_write
     checkpoint = run / "import_checkpoint.json"
     imported = read_json(checkpoint) if checkpoint.exists() else {}
@@ -142,8 +142,15 @@ def generate(data, run, *, fatal_code=None):
     status = "PASS" if doc_ready == len(documents) and complete else (
         "COMPLETED_WITH_QUALITY_LIMITS" if policy == "indexed" and indexed == len(documents)
         and complete else "INCOMPLETE")
+    selection = data.get("qa_selection")
+    if selection is not None:
+        status = {"PASS": "SAMPLE_COMPLETED",
+                  "COMPLETED_WITH_QUALITY_LIMITS": "SAMPLE_COMPLETED_WITH_QUALITY_LIMITS"}.get(status, status)
     report = {"version": "stage33-full-v1", "updated_at": datetime.now(UTC).isoformat(),
         "status": status, "fatal_code": fatal_code, "index_policy": policy,
+        "qa_scope": "sampled" if selection is not None else "full", "qa_selection": selection,
+        "population_qa_count": sum(selection["population_counts"].values()) if selection else len(questions),
+        "full_qa_evaluation": selection is None,
         "indexed": indexed, "full_ready_acceptance": doc_ready == len(documents),
         "state_source": "database_snapshot" if snapshot is not None else "import_checkpoint",
         "index_snapshot_at": snapshot.get("captured_at") if snapshot is not None else None,
@@ -160,6 +167,8 @@ def generate(data, run, *, fatal_code=None):
                    "OCB无官方Chunk/页相关性标签，证据Recall不可评分；单列官方reference_files文档代理指标",
                    "OCB expected_assertions全部保持人工待审，未调用LLM/未自动判定答案正确"]}
     report["limits"].append("COMPLETED_WITH_QUALITY_LIMITS仅表示当前可靠索引的全题检索执行完成，不能升级PARTIAL或宣称完整解析")
+    if selection is not None:
+        report["limits"].append(f"本run仅为固定QA抽样成绩，不代表全部{report['population_qa_count']}题或全部题型/文档均已验证")
     baseline = read_json(run / "baseline.json") if (run / "baseline.json").exists() else None
     report["fees"]["newly_observed_cloud_file_submissions_this_run"] = (
         len({tuple(v) for v in report["fees"]["confirmed_file_identities"]}
@@ -207,10 +216,10 @@ def generate(data, run, *, fatal_code=None):
         "evaluation_setup": read_json(run / "evaluation_setup.json") if (run / "evaluation_setup.json").exists() else None,
         "runtime": read_json(run / "timing.json") if (run / "timing.json").exists() else None})
     write_json(run / "summary.json", report)
-    summary_rows = [{"dataset": d, "strategy": s, **r, **r["metrics"],
+    summary_rows = [{"dataset": d, "strategy": s, "qa_scope": report["qa_scope"], **r, **r["metrics"],
         **{"document_" + k: v for k, v in r["document_proxy_metrics"].items()}}
         for d, values in metrics.items() for s, r in values.items()]
-    write_csv(run / "strategy_comparison.csv", summary_rows, ["dataset", "strategy", "total_questions",
+    write_csv(run / "strategy_comparison.csv", summary_rows, ["dataset", "strategy", "qa_scope", "total_questions",
         "executed_successfully", "failed", "not_executed", "scorable_denominator", "successfully_scored",
         "unscorable", "manual_pending", "recall_at_5", "recall_at_10", "mrr_at_20", "document_proxy_metrics",
         "document_recall_at_5", "document_recall_at_10", "document_mrr_at_20", "latency_seconds"])
@@ -222,7 +231,8 @@ def generate(data, run, *, fatal_code=None):
         "executed_successfully", "failed", "not_executed", "scorable_denominator", "unscorable",
         "recall_at_5", "recall_at_10", "mrr_at_20", "document_recall_at_5", "document_recall_at_10",
         "document_mrr_at_20", "latency_seconds"])
-    text = ["# 阶段33全量导入与检索", "", f"状态：{report['status']}；文档 {doc_ready}/{len(documents)} READY；QA范围 {len(questions)}。",
+    title = "# 阶段33抽样检索评测" if selection is not None else "# 阶段33全量导入与检索"
+    text = [title, "", f"状态：{report['status']}；文档 {doc_ready}/{len(documents)} READY；QA范围 {len(questions)}/{report['population_qa_count']}。",
         f"部分索引 PARTIAL_READY：{report['partial_ready']}；存在质量告警：{report['degraded_documents']}。部分索引不计入完整READY。",
         f"索引校验通过：{indexed}/{len(documents)}；评测政策：{policy}；指标状态：{report['metrics_status']}。",
         f"未记录解析质量元数据：{report['quality_not_recorded']}份；不补造COMPLETE。",
@@ -238,8 +248,11 @@ def generate(data, run, *, fatal_code=None):
         text.append("| " + " | ".join(str(value) for value in (row["dataset"], row["strategy"],
             row["document_recall_at_5"], row["document_recall_at_10"], row["document_mrr_at_20"],
             row["latency_seconds"]["mean"], row["latency_seconds"]["p95"])) + " |")
-    text += ["", "指标分母不按成功子集缩小；未全量执行/快照无效时不可宣称正式评测通过。",
+    text += ["", "指标分母不按成功子集缩小；本run选定QA未完整执行或快照无效时，不可宣称评测通过。",
         "质量/格式分组见metrics_breakdown.csv；漏召回及低排名定位见retrieval_diagnostics.csv。",
         "文档代理指标见JSON/CSV，不代表OCB断言正确或LLM问答准确率。金额须人工核对账单。"]
+    if selection is not None:
+        text += ["", f"固定QA抽样：每数据集{selection['per_dataset']}题；种子{selection['seed']}；"
+                 "选题清单见qa_selection.json。文档库保持完整，不能将抽样成绩称为全量QA成绩。"]
     atomic_write(run / "summary.md", ("\n".join(text) + "\n").encode("utf-8"))
     return report

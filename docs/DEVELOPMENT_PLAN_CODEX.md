@@ -3471,7 +3471,7 @@ retrieved_chunks
 
 当前起点：用户确认200份全部入库，2026-10-19 20:04报告118 READY/82 PARTIAL_READY/0 FAILED。MinerU v4基础内容与可选结构增强、质量/来源及旧恢复能力保留；PARTIAL不升级完整READY，不再以批量导入排错为主要任务。专项验收边界仍以[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)为准。
 
-当前正式实现及操作见[阶段33全量评测](STAGE33_EVALUATION.md)。固定读取stage32_run_01的200文件、OHR3588+OCB499=4087题，不抽样/缩减；已有库用只读snapshot观察，不覆盖原导入意图。默认complete要求全200 READY；显式indexed接受全部可靠内容已索引的READY/PARTIAL_READY，向量、来源代次及同模型检查不变，保留质量分组且不冒充完整解析验收。四路为Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker，按格式/质量分组并分析漏召回。pytest、数据库快照和真实GPU评测未由Codex执行；取得基线后优先优化主要问题，再推进阶段34，付费LLM另行确认。
+当前实现及操作见[阶段33评测](STAGE33_EVALUATION.md)。先完整校验stage32_run_01的200文件、OHR3588+OCB499=4087题；用户当前要求每集固定抽50题，共100题，选题清单/种子冻结且报告区分抽样，原QA及200份检索库不缩减。已有库用只读snapshot观察，不覆盖原导入意图。默认complete要求全200 READY；显式indexed接受全部可靠内容已索引的READY/PARTIAL_READY，向量、来源代次及同模型检查不变。四路Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker按格式/质量分组并定位漏召回。pytest及真实GPU评测待用户执行；取得基线后优化主要问题，再推进34，付费LLM另行确认。
 
 正式指标为Recall@5、Recall@10、MRR@20，显式区分总题数、成功执行、可评分总分母、成功评分、失败、未执行、不可评分及人工待审。OHR使用官方0-based→物理1-based页的来源单位；OCB无相关Chunk/页标注时正式证据指标为null，reference_files仅作另列文档代理指标，不把expected_assertions拼成答案或相关性标签。失败不从全量分母删除；尚未执行/快照无效不发布正式分数。原先小题量建议不限制本阶段全量范围。
 

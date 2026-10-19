@@ -1,47 +1,49 @@
 # 阶段33：固定200文档与4087条QA的全量检索评测
 
-## 当前入口：复用已入库200份，完成检索评测
+## 当前入口：完整200份文档库，每数据集抽取50条QA
 
-用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。以下流程优先于后文历史导入排错步骤：复用原知识库与现有向量，先做全题检索基线，不重传、重解析或重建索引，也不自动清除质量警告。
+用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。按用户最新要求，先从OHR、OCB各固定抽取50条QA，共100题/400条策略执行记录；检索范围仍是全部200份。原始4087条QA和已入库向量不改动，不重传、重解析或重建索引，也不自动清除质量警告。以下流程优先于后文历史导入排错步骤。
 
-本轮已编写只读索引快照、显式质量政策、格式/质量分组及漏召回定位。尚未运行pytest、数据库快照查询、GPU检索或生成真实检索分数；测试与评测仍由用户手动执行。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准，真实成绩出来后优先定位召回与重排问题，再推进阶段34。
+已编写只读索引快照、显式质量政策、固定种子抽样、格式/质量分组及漏召回定位。尚未运行本轮pytest、数据库快照查询、GPU检索或生成真实检索分数；测试与评测仍由用户手动执行。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准，真实成绩出来后优先定位召回与重排问题，再推进阶段34。
 
 ### 1. 用户执行定向回归
 
 ```powershell
 Set-Location "D:\python project\dkf-agent"
 conda activate dkf-agent
-python -m pytest tests/test_stage33_indexed_evaluation.py tests/test_stage33_pipeline.py tests/test_stage33_dataset.py -q -ra
+python -m pytest tests/test_stage33_qa_sampling.py tests/test_stage33_indexed_evaluation.py tests/test_stage33_pipeline.py tests/test_stage33_dataset.py -q -ra
 ```
 
 这些用例只使用内存身份及临时评测断点，不读真实原件、不连接数据库/队列、不加载模型、不请求云端。覆盖显式PARTIAL政策、默认严格政策、全部文件及QA分母、索引/质量变化失效、旧检查点保留、只读CLI分派、OCB不可评分及错误类型定位。通过不等于真实检索质量通过。
 
 ### 2. 新建评测run并只读观察当前索引
 
-保留原`stage33_run_01`和其导入意图；以下使用新的`stage33_run_02`。若该编号已存在，恢复同一run须增加`--resume`，需要不同索引/参数的新实验则换未使用的编号，不覆盖旧结果。
+保留原`stage33_run_01/02`；以下抽样使用新的`stage33_run_03`。若该编号已存在，恢复同一run须增加`--resume`。抽样数、种子及索引必须一致，不能把旧全量run改成100题或覆盖旧结果。
 
 ```powershell
 $kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
-$run = "stage33_run_02"
-python scripts/evaluate_stage33.py --step snapshot --run $run --kb-id $kbId --execute
+$run = "stage33_run_03"
+python scripts/evaluate_stage33.py --step snapshot --run $run --kb-id $kbId --execute --qa-per-dataset 50 --sample-seed 33
 if ($LASTEXITCODE -ne 0) { throw "索引快照未通过，先查看本run的summary.md和import_report.csv" }
 ```
 
-`snapshot`只读PostgreSQL并写当前run报告，不构造HTTP客户端、不调用MinerU或LLM、不加载BGE、不发恢复任务。固定清单仍为全部200份、4087题；原件Hash/格式/依赖校验仍执行。当前代次、Block、完整向量、管理终态和模型身份仍是评测前置条件，PARTIAL状态须有相应质量记录。成功显示`INDEX_SNAPSHOT_READY`和`索引校验通过=200/200`，这只说明索引观察完成，此时检索指标仍为null。
+`snapshot`只读PostgreSQL并写当前run报告，不构造HTTP客户端、不调用MinerU或LLM、不加载BGE、不发恢复任务。先完整校验200份/4087题的原件Hash、格式和依赖，再只登记100条选定QA；整个200份索引的来源、Block、完整向量、管理终态和模型身份检查不放宽。PARTIAL须有相应质量记录。成功显示`INDEX_SNAPSHOT_READY`、`索引校验通过=200/200`及`QA登记=100`，此时检索指标仍为null。
+
+`qa_selection.json`冻结选题身份、每集题量、原始池规模及种子。选择仅按种子/数据集/QA身份的SHA256排序，不读取答案、文档质量或检索成绩，不修改原QA。每次snapshot/evaluate/report均须携带相同`--qa-per-dataset 50 --sample-seed 33`。省略抽样参数仍支持全4087题，但须另建全量run；抽样模式不用于import。
 
 新文件`index_snapshot.json`保存观测时间、原file_id→实际doc_id、真实质量及索引身份。报告采用该快照，不修改`import_checkpoint.json`或旧Retry/上传意图。`report`只重新汇总已有本地记录，不查询实时状态；要刷新请再次执行`snapshot --resume`。后续显式`import`会使旧观察和评测资格失效，避免旧快照遮盖新导入状态。
 
-### 3. 用户执行全部4087题的四策略本地评测
+### 3. 用户执行100条抽样QA的四策略本地评测
 
-先确认相关在途任务安全结束，再由用户正常停止同卡GPU Worker及其他推理进程，避免独立CLI重复加载模型挤占显存。保留PostgreSQL和已部署的本地BGE-M3、BGE Reranker及core资源；模型配置须与现有索引一致，不为评测改变已入库身份。不需要MinerU/LLM密钥或云调用许可。
+不需要开启CPU Worker、GPU Worker、API或Redis；只需PostgreSQL运行以及已部署的本地BGE-M3、BGE Reranker和core资源。脚本进程直接加载模型并按已有配置使用GPU，GPU Worker并不是GPU可用的前提。先确认相关在途任务安全结束，再正常停止同卡GPU Worker及其他推理进程，避免重复加载模型挤占显存；不要在评测中修改索引或模型配置。不需要MinerU/LLM密钥或云调用许可。
 
 ```powershell
-python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed
+python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed --qa-per-dataset 50 --sample-seed 33
 ```
 
 `--index-policy indexed`显式评测READY与PARTIAL_READY的可靠索引。默认`complete`仍要求全200份READY；这是实验政策区别，不会改变数据库文档状态。四路保持原始问题、同一全库、Dense/BM25各Top20、原RRF的30候选与Top20重排；不把答案、相关文件或官方页作为检索过滤条件。
 
-每题原子断点，原命令可续跑；已成功题不重复Query。存在检索失败的题默认保留，定位后可由用户显式增加`--retry-failed`重跑该题的四路本地检索。索引代次、质量、文件集合、模型或质量政策变化须新run，不混算旧结果。即使全部题复用断点，结束仍核对索引与模型。
+每题原子断点，原命令可续跑；已成功题不重复Query。存在检索失败的题默认保留，定位后可由用户显式增加`--retry-failed`重跑该题的四路本地检索。索引代次、质量、文件集合、模型、质量政策、抽样数或种子变化须新run，不混算旧结果。即使全部题复用断点，结束仍核对索引与模型。
 
 BM25实例预算沿用100,000 Chunk、256 MiB原文、32,000,000词项。它是整库预算而非前N截断；超限须按报告中的BM25_LIMIT和可用内存评估参数，最大可选预算见下文。现有BM25每题仍读取当前语料并转换Node，首次建索引、完整证据及大库SQL可能较慢；真实耗时和内存待执行测量，不预先宣称性能通过。
 
@@ -58,12 +60,12 @@ Import-Csv "$dir/retrieval_diagnostics.csv" -Encoding UTF8 |
     Group-Object strategy,category | Sort-Object Count -Descending | Format-Table Name,Count -AutoSize
 ```
 
-- `strategy_comparison.csv`：全范围固定分母的四策略对比及耗时。OHR使用官方物理证据页，OCB证据Recall/MRR为null，文档依赖代理指标单列，不能算作答案或断言正确率。
+- `strategy_comparison.csv`：本run固定100题分母的四策略对比及耗时，`qa_scope=sampled`；OHR使用官方物理证据页，OCB证据Recall/MRR为null，文档依赖代理指标单列，不能算作答案或断言正确率。
 - `metrics_breakdown.json/csv`：按依赖质量和格式组合分组。READY但历史质量为空单列`READY_WITHOUT_QUALITY_METADATA`；含PARTIAL的题保留在整体分母。跨格式多文档题只进入一个组合组，不重复增大分母。
 - `retrieval_diagnostics.json/csv`：区分空候选、未召回目标文档、召回文档但证据页未命中、晚命中和多页部分召回，另列官方证据页与已记录缺页的交集。它是事后诊断，不代表已证明原件缺文，不自动重投文件；OCB诊断明确标注文档代理口径。
 - `evaluation_setup.json`和`costs_and_timing.json`：模型初始化耗时单列；Hybrid/重排耗时包含上游分支，不能把四列相加作总时间。快速索引检查未观察解析Job历史时费用历史标未知，不把它误报为零收费。
 
-全题、全策略均成功执行且快照有效时，存在PARTIAL会显示`COMPLETED_WITH_QUALITY_LIMITS`并正常退出；完整READY政策通过仍显示`PASS`。两者均不表示每题召回正确或阶段34问答质量通过。未执行题保留null；失败按固定分母保守计零；无效/变化快照使整体及分组正式指标变null，逐题事实仅供诊断。
+100题、全策略均成功执行且快照有效时，存在PARTIAL显示`SAMPLE_COMPLETED_WITH_QUALITY_LIMITS`，全READY时显示`SAMPLE_COMPLETED`，均正常退出。全量run保留原`COMPLETED_WITH_QUALITY_LIMITS/PASS`。样本报告不能当作4087题完整成绩或全部题型/文档均已覆盖，也不表示每题召回正确或RAG通过。未执行题保留null；失败按样本固定分母保守计零；无效/变化快照使整体及分组正式指标变null。
 
 本阶段真实验收需用户回传`summary.json`、`strategy_comparison.csv`和`retrieval_diagnostics.json`。在没有真实成绩之前，不调整RRF权重、改变切片或宣称某策略优于另一策略。后文保留历史恢复记录与严格READY流程供追溯，不需重新执行导入。
 
@@ -711,8 +713,8 @@ python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id 
 
 ## 指标口径与分母
 
-- 固定总题数始终4087（OHR3588+OCB499），逐题逐策略显示SUCCESS/FAILED/NOT_EXECUTED。未运行不是零分，不发布伪造指标；索引/模型变化或中断标记NOT_CERTIFIED。
-- QA JSONL每题一行，共4087行；QA CSV每题每策略一行，共16348行，是4087×4的执行记录，不是新增题目或评分分母。
+- 全量模式4087题（OHR3588+OCB499）；当前显式抽样模式各50题/共100题，选择在检索前固定，不能事后删除失败题。逐题逐策略显示SUCCESS/FAILED/NOT_EXECUTED；未运行不是零分，索引/模型变化或中断标记NOT_CERTIFIED。
+- QA JSONL每题一行，QA CSV每题每策略一行；全量为4087/16348行，当前抽样为100/400行，四路记录不增加题目数或评分分母。
 - **OHR正式证据指标**：真值单位为官方`(file_id, physical_page)`，页码0-based准确+1；只按返回Chunk真实`source_spans[].page`命中，不靠覆盖很宽的page_start/end猜命中。Recall@5/10为已覆盖真值单位比例，重复Chunk不重复计数；MRR@20为前20内首个真实单位命中的倒数排名。不是凭答案字符串包含判定正确。
 - **OCB无官方相关Chunk/证据页标签**：expected_assertions及weights不能转换成相关性标签，正式证据Recall/MRR为null、不可评分数499（以实际输入/校验为准），断言保留manual_pending。
 - **另列OHR/OCB文档代理指标**：按官方doc_name/reference_files对应的文件集合计算文档Recall@5/10/MRR@20，OCB多文件依赖保持整组，分母为全部依赖文件，重复Chunk只计一次文件。它仅反映是否找到任务依赖文档，**不是OCB答案证据充分、断言正确或问答准确率**。
@@ -729,6 +731,7 @@ python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id 
 | plan.json / run.json | 全200清单、成本参考、输入Hash及KB绑定 |
 | import_checkpoint.json / import_report.json / import_report.csv | 200份逐文件状态、路线/分片Batch、Block/Chunk/向量、管理错误及恢复意图 |
 | index_snapshot.json | 独立当前索引观察，保留全部200份身份/质量；不覆盖旧导入检查点或恢复意图 |
+| qa_selection.json（抽样run） | 固定选定QA身份、种子、每集题量及原始池规模，不改写阶段32输入 |
 | qa_execution.jsonl / qa_execution.csv | 全4087题原字段/断言/依赖、file_id→doc_id、四路状态与评分资格 |
 | retrieval_results.jsonl / retrieval_results.csv | 所有成功检索的Top20原Chunk/Doc/File ID、页/section、原分数及来源；JSONL保留字符来源与Hash，不复制正文 |
 | metrics.json / metrics_ohr.json / metrics_ocb.json / metrics_overall.json / strategy_comparison.csv / summary.json / summary.md | OHR/OCB/整体分母、四路指标和耗时 |
