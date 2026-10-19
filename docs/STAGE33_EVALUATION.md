@@ -2,7 +2,32 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 10月19日00:52快照：剩余10份分组恢复
+## 10月19日01:20快照：剩余4份及原Batch原因诊断
+
+用户报告为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已完成切片/向量/索引，但保留保存快照及外部源未核验质量，不能升级为完整READY。剩余为三份原云failed及`082ebed3…`的XML预算；后者仍按下节单独受控调整及恢复，不自动执行。
+
+三份查询旧输出的REMOTE_FAILED并不能证明接口没有原因。Provider已保留该data_id的err_msg，旧诊断将未知消息合并为通用分类；本轮仅修改CLI，新增`failure_diagnostic.reason_status/source/category/fields`。已知数字码优先；固定中英文短语给安全类别，转换失败不猜-60015/-60016。缺失、null、空白、非法类型与非空但未识别分别显示；未知字符串仅留长度与SHA256，不泄露原文/URL。生产Job、Adapter、数据库、云参数及自动重试均不改，无需重启API/Worker。
+
+由用户执行（Codex未执行测试或真实查询）：
+
+```powershell
+Set-Location 'D:\python project\dkf-agent'
+conda activate dkf-agent
+python -m pytest tests/test_mineru_remote_status.py -q -ra
+# 测试通过后：每份只GET一次原Batch，不申请新解析，也不下载/恢复/改数据库。
+$remoteDocIds = @(
+    '8a3496d6-dd9e-40bd-be60-70b4b701002a',
+    '81f211b8-330f-4015-9ad7-b3d377a7392b',
+    'c8e4ca42-f739-48c4-9c2d-50120f956309'
+)
+foreach ($remoteDocId in $remoteDocIds) {
+    python scripts/mineru_remote_status.py --doc-id $remoteDocId --query-existing
+}
+```
+
+查看`failure_diagnostic`：`KNOWN_CODE / CLASSIFIED_MESSAGE`可据受控类别继续定位，但不表示业务已恢复；`MESSAGE_UNRECOGNIZED`明确代表本地未识别，不能说平台未给原因，指纹本身也不能证明根因；`MESSAGE_MISSING / MESSAGE_NULL / MESSAGE_EMPTY`仅说明这次返回缺少可用消息。各结果仍须`cloud_queries=1`且`cloud_submitted/result_downloaded/database_modified/cache_published/business_recovered=false`。不要把诊断命令再跑一遍当作修复，拿到这三份新诊断后再决定定向处理。
+
+## 10月19日00:52快照：剩余10份分组恢复（历史）
 
 用户三份CSV最终为116 READY、74 PARTIAL_READY、10 FAILED；190份已索引项均有Block、Chunk与向量数相等且无无效向量。新增两份Office为PARTIAL_READY，不等于全部200份完整验收。剩余为六份旧外链预检、三份远端failed、一份XML预算；六份当天只有GET状态，前轮脚本遇到`c8e4ca42…`云失败后停止了组内后续提交，并非六份应用修复后再次失败。
 

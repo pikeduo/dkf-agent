@@ -1,11 +1,15 @@
 """原Batch错误定位与安全持久化回归；仅内存Mock，由用户手动执行。"""
 
 from copy import deepcopy
+import hashlib
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
+import httpx
 import pytest
+from pydantic import SecretStr
 
 from app.services import document_management as management
 from app.services.mineru import jobs
@@ -72,6 +76,134 @@ def test_remote_diagnostic_is_local_by_default_and_query_never_publishes(context
     assert snapshot == (job.parse_options, document.status, job.state, job.batch_id, job.task_id)
 
 
+@pytest.mark.parametrize("payload,status,field_status", [
+    ({}, "MESSAGE_MISSING", "MISSING"),
+    ({"err_msg": None}, "MESSAGE_NULL", "NULL"),
+    ({"err_msg": ""}, "MESSAGE_EMPTY", "EMPTY"),
+    ({"err_msg": " \t\r\n"}, "MESSAGE_EMPTY", "EMPTY"),
+    ({"err_msg": False}, "MESSAGE_INVALID_TYPE", "INVALID_TYPE"),
+    ({"err_msg": ["PRIVATE_BODY"]}, "MESSAGE_INVALID_TYPE", "INVALID_TYPE"),
+    ({"err_msg": {"detail": "PRIVATE_BODY"}}, "MESSAGE_INVALID_TYPE", "INVALID_TYPE"),
+    ({"err_msg": "PRIVATE_BODY"}, "MESSAGE_UNRECOGNIZED", "PRESENT"),
+])
+def test_remote_diagnostic_distinguishes_absent_empty_invalid_and_unrecognized_reason(payload, status, field_status):
+    """不再把无原因与本地未识别混为一谈；非法类型不递归导出，未知正文只留指纹。"""
+    snapshot = deepcopy(payload)
+    report = tool.describe_failure(payload)
+    diagnostic = report["failure_diagnostic"]
+    assert report["cause_code"] == "REMOTE_FAILED"
+    assert diagnostic["reason_status"] == status
+    assert diagnostic["source"] is None and diagnostic["category"] is None
+    assert diagnostic["fields"]["err_msg"]["status"] == field_status
+    assert "PRIVATE" not in json.dumps(report, ensure_ascii=False)
+    assert payload == snapshot
+
+
+@pytest.mark.parametrize("message,category", [
+    ("文件转换失败", "FILE_CONVERSION_FAILED"),
+    ("  FILE CONVERSION FAILED. \n", "FILE_CONVERSION_FAILED"),
+    ("File read failure", "FILE_READ_FAILED"),
+    ("File read timeout", "FILE_READ_TIMEOUT"),
+    ("Unsupported file format, please upload a valid file type", "UNSUPPORTED_FILE_FORMAT"),
+    ("File size exceeds limit", "FILE_SIZE_LIMIT"),
+    ("Page count exceeds limit", "PAGE_COUNT_LIMIT"),
+    ("Model service temporarily unavailable", "SERVICE_UNAVAILABLE"),
+    ("Task submission queue is full", "QUEUE_FULL"),
+    ("Extract failed", "PARSING_FAILED"),
+    ("parsing failed, please try again later", "PARSING_FAILED"),
+    ("File splitting failed", "FILE_SPLITTING_FAILED"),
+    ("Failed to read page count", "PAGE_COUNT_READ_FAILED"),
+])
+def test_remote_diagnostic_classifies_fixed_messages_without_inventing_numeric_code(message, category):
+    """固定中英文原因只得到受控类别，不伪造上游数字码，也不改变生产终态/重试策略。"""
+    report = tool.describe_failure({"err_msg": message})
+    diagnostic = report["failure_diagnostic"]
+    assert diagnostic["reason_status"] == "CLASSIFIED_MESSAGE"
+    assert diagnostic["source"] == "err_msg" and diagnostic["category"] == category
+    assert report["cause_code"] == jobs.result_failure({"err_msg": message}).code
+    if category == "FILE_CONVERSION_FAILED":
+        assert report["cause_code"] == "REMOTE_FAILED" and "转换失败" in report["message"]
+
+
+@pytest.mark.parametrize("payload,source,code,category", [
+    ({"err_code": -60015}, "err_code", "-60015", "FILE_CONVERSION_FAILED"),
+    ({"error_code": "-60016"}, "error_code", "-60016", "FILE_CONVERSION_FAILED"),
+    ({"err_code": -60003, "error_code": -60015, "err_msg": "File conversion failed"},
+     "err_code", "-60003", "FILE_READ_FAILED"),
+    ({"err_code": "PRIVATE_TOKEN", "error_code": -60008, "err_msg": "PRIVATE_BODY"},
+     "error_code", "-60008", "FILE_READ_TIMEOUT"),
+    ({"err_code": True, "error_code": "A0202"}, "error_code", "A0202", None),
+])
+def test_remote_diagnostic_prefers_explicit_known_code_over_message(payload, source, code, category):
+    """已知错误码保持err_code优先级；布尔/未知码不压过有效错误码，不按短语猜转换子码。"""
+    report = tool.describe_failure(payload)
+    diagnostic = report["failure_diagnostic"]
+    assert report["cause_code"] == code
+    assert diagnostic["reason_status"] == "KNOWN_CODE" and diagnostic["source"] == source
+    assert diagnostic["category"] == category and diagnostic["fields"][source]["known_code"] == code
+    assert "PRIVATE" not in repr(report)
+
+
+@pytest.mark.parametrize("message", [
+    "File conversion failed: PRIVATE_BODY https://private.invalid/?token=PRIVATE_TOKEN",
+    "not a failure: File conversion failed",
+    "PRIVATE_BODY\nFile conversion failed",
+    "PRIVATE_BODY " + "x" * 3000,
+    "PRIVATE_BODY\ud800",
+])
+def test_remote_diagnostic_fingerprints_unknown_message_without_substring_guessing_or_leak(message, caplog):
+    """未知长文/带签名URL/换行及异常Unicode仅输出长度与稳定Hash，不能只凭包含关键词分类。"""
+    payload = {"err_msg": message, "err_code": "PRIVATE_TOKEN", "error_code": -999999,
+               "full_zip_url": "https://PRIVATE.invalid/signed", "PRIVATE_FIELD": "PRIVATE_BODY"}
+    snapshot = deepcopy(payload)
+    report = tool.describe_failure(payload)
+    diagnostic = report["failure_diagnostic"]
+    assert diagnostic["reason_status"] == "MESSAGE_UNRECOGNIZED"
+    assert diagnostic["fields"]["err_msg"] == {
+        "status": "PRESENT", "length": len(message),
+        "sha256": hashlib.sha256(message.encode("utf-8", errors="surrogatepass")).hexdigest()}
+    assert diagnostic["fields"]["err_code"]["known_code"] is None
+    assert diagnostic["fields"]["error_code"] == {"status": "PRESENT", "known_code": None}
+    assert tool.describe_failure(payload) == report and payload == snapshot
+    assert "PRIVATE" not in json.dumps(report, ensure_ascii=False) + caplog.text
+
+
+def test_remote_failure_http_fields_reach_diagnostic_with_only_one_mock_get(context, caplog):
+    """贯通Provider到诊断的字段保留，用内存HTTP验证只GET原Batch一次，不上传或发布任何结果。"""
+    settings, document, job, _ = context
+    # 不依赖本地Token；只使用不可用于真实鉴权的值和内存传输。
+    settings = settings.model_copy(update={"mineru_api_token": SecretStr("unit-secret-not-real")})
+    calls = []
+    snapshot = deepcopy(job.parse_options), document.status, job.state, job.batch_id, job.task_id
+
+    def handler(request):
+        """仅接受原Batch的GET，返回其他文档及本项原因，避免错误选取同批次的别项。"""
+        calls.append((request.method, request.url.path))
+        assert request.method == "GET"
+        assert request.url.path == f"/api/v4/extract-results/batch/{job.batch_id}"
+        return httpx.Response(200, json={"code": 0, "trace_id": "trace-test", "data": {
+            "batch_id": job.batch_id, "extract_result": [
+                {"data_id": "other-doc", "state": "failed", "err_msg": "PRIVATE_OTHER_BODY"},
+                {"data_id": job.data_id, "state": "failed", "err_msg": "File conversion failed",
+                 "full_zip_url": "https://PRIVATE.invalid/signed"}]}})
+
+    limiter = MagicMock()
+    provider = tool.MinerUCloudProvider(settings, limiter=limiter,
+        client=httpx.Client(transport=httpx.MockTransport(handler), trust_env=False))
+    try:
+        report = tool.inspect_job(document, job, query=provider.query)
+    finally:
+        provider.close()
+    assert calls == [("GET", f"/api/v4/extract-results/batch/{job.batch_id}")]
+    limiter.reserve.assert_called_once_with("query")
+    assert report["failure_diagnostic"]["category"] == "FILE_CONVERSION_FAILED"
+    assert report["cloud_queries"] == 1 and report["remote_state"] == "failed"
+    assert not any(report[key] for key in ("cloud_submitted", "database_modified", "result_downloaded",
+                                          "cache_published", "business_recovered"))
+    assert snapshot == (job.parse_options, document.status, job.state, job.batch_id, job.task_id)
+    assert "PRIVATE" not in json.dumps(report, ensure_ascii=False) + caplog.text
+
+
 @pytest.mark.parametrize("damage", ["hash", "task", "provider", "split", "batch", "upload"])
 def test_remote_diagnostic_rejects_identity_or_upload_gaps_before_query(context, damage):
     """身份不符、非整份或未确认上传时不访问云端，不靠查询错误任务猜测当前状态。"""
@@ -99,6 +231,7 @@ def test_remote_done_diagnostic_does_not_claim_business_recovery(context):
     _, document, job, _ = context
     report = tool.inspect_job(document, job, query=lambda *args: {"state": "done", "trace_id": None})
     assert report["remote_state"] == "done" and report["business_recovered"] is False
+    assert "failure_diagnostic" not in report
     assert document.status == "PARSING" and job.state == "running"
 
 

@@ -444,6 +444,7 @@ MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000�
 
 - 文档详情是业务状态依据；解析完成为Document=CHUNKING、云job=done，新上传继续经过EMBEDDING/INDEXING至READY。云Celery SUCCESS或delegated_to_mineru只代表短步骤，不代表全链路完成；中间状态可能很快经过。
 - MinerU结构增强失败可保留可靠基础内容并记录`parse_quality`；内容覆盖不足但可靠块已完整索引时终态为`PARTIAL_READY`，不是完整READY。详情/状态返回质量和缺页摘要，Block返回来源指针。可靠块可参与同库检索，未知页码内容只在本地转换产物隔离，不生成假页码或严格证据命中。
+- 原MinerU批次失败可用`python scripts/mineru_remote_status.py --doc-id <文档UUID> --query-existing`只GET一次原Batch。报告`failure_diagnostic`区分未返回/空/非法/未识别的`err_msg`，已知原因给出安全类别；未知原文只留长度和SHA256，不输出原始响应或签名URL。省略查询开关仅查本地只读检查点，不恢复文档或提交新解析，详见[MinerU诊断](docs/MINERU_CLOUD.md#远端失败原因诊断)。
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
 - 新上传失败或编排超时先查`/api/admin/documents/{doc_id}/status`、详情及parse-jobs，修复原因后用文档级`/retry`恢复，不重传或重建全库。旧无编排文档仅UPLOADED/FAILED可通过`/process`重投，活动云任务用`/mineru`恢复；活动管理任务拒绝旧写入口。收费失败且无缓存仍需明确Force，不因普通Retry新增云批次。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
