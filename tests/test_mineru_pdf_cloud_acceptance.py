@@ -214,9 +214,11 @@ def test_default_preview_and_cloud_denial_do_not_create_outputs_or_client(cloud,
     assert not cloud.output.exists() and cloud.state.calls == []
 
 
-def test_saved_raw_result_reuse_and_corruption_never_redownload_or_overwrite(tmp_path):
-    """同来源完整ZIP复用，归档篡改后明确失败；不能静默用云下载覆盖原回执。"""
-    archive = result_zip()
+@pytest.mark.parametrize("items", [None, [{"type": "text"}], [{"type": "text", "text": "未知页码正文"}]],
+                         ids=["complete", "empty-text-without-page", "text-without-page"])
+def test_saved_raw_result_reuse_and_corruption_never_redownload_or_overwrite(tmp_path, items):
+    """缺页码也保留原ZIP供Adapter判定；同来源复用，篡改后拒绝重下载或覆盖。"""
+    archive = result_zip(items)
     calls = []
 
     def download(url):
@@ -231,6 +233,9 @@ def test_saved_raw_result_reuse_and_corruption_never_redownload_or_overwrite(tmp
     original, record = obtain_raw_result(provider, None, settings, **args)
     path = tmp_path / record["zip_path"]
     before = path.stat().st_mtime_ns
+    assert original == path.read_bytes() == archive
+    if items is not None:
+        assert record["content_items"] == len(items)
     assert obtain_raw_result(provider, None, settings, **args) == (original, record)
     assert calls == [1] and path.stat().st_mtime_ns == before
     path.write_bytes(b"CORRUPTED")
@@ -252,9 +257,10 @@ def test_crc_validation_includes_members_other_than_content_list():
     assert error.value.code == "ZIP_INVALID"
 
 
-@pytest.mark.parametrize("archive", [result_zip([]), result_zip([{"type": "text"}])])
-def test_empty_or_invalid_structured_result_is_rejected(archive):
-    """有效容器不代表有效结构化结果；空列表/缺失页码拒绝。"""
+@pytest.mark.parametrize("items", [[], [None], [{}], [{"type": ""}], [{"type": 7}]],
+                         ids=["empty-list", "null-item", "missing-type", "empty-type", "invalid-type"])
+def test_empty_or_invalid_structured_result_is_rejected(items):
+    """归档层拒绝空列表或全无有效结构类型；文字和页码是否可靠由Adapter判定。"""
     with pytest.raises(MinerUError) as error:
-        validate_archive(archive, 1024**2)
+        validate_archive(result_zip(items), 1024**2)
     assert error.value.code == "CONTENT_LIST"

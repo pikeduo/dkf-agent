@@ -98,11 +98,13 @@ def test_unavailable_bbox_never_blocks_known_page_or_invents_coordinates(bbox):
     assert parsed.quality.evidence == "PARTIAL" and parsed.quality.content == "COMPLETE"
 
 
-@pytest.mark.parametrize("page", [-1, True, "1", 99])
-def test_invalid_local_page_is_quarantined_and_other_blocks_remain_usable(page):
-    """局部无可靠页码只保留隔离原文，不能制造page=1或参与来源命中计分。"""
+@pytest.mark.parametrize("page_fields", [{}, {"page_idx": None}, {"page_idx": -1}, {"page_idx": True},
+                                       {"page_idx": "1"}, {"page_idx": 99}],
+                         ids=["missing", "null", "negative", "boolean", "string", "out-of-range"])
+def test_invalid_local_page_is_quarantined_and_other_blocks_remain_usable(page_fields):
+    """缺失或无效页码只保留隔离原文，可靠邻块仍可用且不伪造页码或完整质量。"""
     parsed = convert([{"type": "text", "page_idx": 0, "text": "可靠正文"},
-                      {"type": "text", "page_idx": page, "text": "未确认来源正文"}])
+                      {"type": "text", "text": "未确认来源正文", **page_fields}])
     assert [b.text for b in parsed.blocks] == ["可靠正文"]
     assert parsed.quarantined_content[0]["page"] is None
     assert parsed.quarantined_content[0]["text"] == "未确认来源正文"
@@ -110,8 +112,10 @@ def test_invalid_local_page_is_quarantined_and_other_blocks_remain_usable(page):
 
 
 def test_globally_unmapped_or_empty_content_remains_fatal():
-    """整体无可靠来源或全空仍失败，容错不等于制造成功结果。"""
+    """归档通过后，整体缺失/无效页码或全空仍失败，不能发布空结果或制造业务成功。"""
     for values, code in [([{"type": "text", "page_idx": 99, "text": "无可靠页"}], "PAGE"),
+                         ([{"type": "text", "text": "缺失页码正文"}], "PAGE"),
+                         ([{"type": "text"}], "NO_TEXT"),
                          ([{"type": "text", "page_idx": 0, "text": ""}], "NO_TEXT")]:
         with pytest.raises(MinerUError) as error:
             convert(values)
