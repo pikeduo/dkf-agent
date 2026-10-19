@@ -237,6 +237,7 @@ EVENT_LABELS = {
     "chunk.dispatch_failed": "切片投递确认失败，保留检查点",
     "chunk.rejected": "切片请求状态或检查点校验未通过",
     "chunk.started": "开始按原 Block 阅读顺序切片",
+    "chunk.batch_staged": "切片批次已暂存，尚未提交完整文档事务",
     "chunk.table_split": "长表格已按完整原行分组，尚未提交切片事务",
     "chunk.table_split_skipped": "长表格行边界无法安全确认，保留原表及超目标标记",
     "chunk.persisted": "切片已事务落库，等待向量化",

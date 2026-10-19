@@ -6,12 +6,16 @@
 
 ## 策略与计量边界
 
+新检查点采用`block-chunk-v6`：通过可重复读取工厂先逐块验证全量Hash/顺序，再逐片生成，SQL每次预取1个Block、每256片批量暂存，全部成功后与EMBEDDING同事务提交。整份字符数、Block数或最终Chunk数不再作为新版本拒绝理由；不先构造全篇原子/Chunk列表。原生TSV两遍验证完整逻辑行、按行分组，不收集全部行，原公式/字符/页码/质量不变。单个Block仍需从数据库读取，内存下界包含最大原块；不宣称任意大单块也能恒定内存处理。
+
+v1～v5原算法、预算和成功结果冻结。失败旧代次需用户显式文档Reindex，从原解析缓存建立v6，不重新请求MinerU；普通Retry不偷换旧切片配方。v6继承v5的HTML/rowspan/strong验证，不猜切不可证明的表格行，也不改写不可拆公式；此类单片仍可能由真实Tokenizer明确拒绝。源身份变化、坏结构、磁盘/SQL错误仍失败，不能以部分结果标成功。下文v4/v5预算仅描述旧版本。
+
 MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进入source_spans，Document.parse_quality进入Chunk metadata。未知页码文字只保留本地隔离产物，不造page=1的Chunk；原始Block/公式/字符来源不改。部分覆盖最终只能PARTIAL_READY，详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
 
 - 按从 1 开始的连续 block_index 阅读；未知历史顺序安全失败，不按页码/bbox/UUID 排序。
 - 标题/section 边界优先，不把旧章节的正文重叠带入新章节。后续切片尽量带当前标题（最多估算 100 token）；长标题主内容仍完整保留。
 - 普通正文/image_text 优先空行段落，超长段落按字符/token 区间切分。段落拼接用两个换行；source_spans 精确标识哪些字符来自 Block，拼接分隔符不是原文。
-- 新检查点采用`block-chunk-v5`，继承v4的原生TSV/大表策略，额外接受单元格或其`p`内无属性的`strong`标签；摘要不额外插空格，Chunk仍引用原HTML字符。v1～v4检查点保持原行为，已有v4拒绝的加粗表格只有显式Reindex才会采用新策略，避免同版本不同算法混用身份。
+- v5继承v4的原生TSV/大表策略，额外接受单元格或其`p`内无属性的`strong`标签；摘要不额外插空格，Chunk仍引用原HTML字符。v1～v5检查点保持原行为，只有显式Reindex才采用新策略，避免同版本不同算法混用身份。
 - v4/v5仅对`native_parser`的XLSX/CSV table使用其已知TSV序列化契约：标准`csv.reader`严格读取逻辑记录，字段内引号、Tab和换行不误拆，直接引用原字符区间，不重新序列化、不复制表头。单列/列数不一致/无法读取的格式仍整块保留，不按任意换行猜表格。
 - v4/v5的HTML切片显式使用有限预算：单表1600万字符、2万行、40万单元格、524288个展开网格位置；支持真实缓存中的单元格无属性`p`段落，保留原HTML字符，不按段落拆单元格。表外/嵌套p、未知属性、列宽/rowspan及网格完整性保护保留。Adapter严格增强及v1～v3继续使用`TableHTML`默认的4Mi字符、4096行、65536单元格和262144网格预算，不启用p/strong兼容；v4也不启用strong，不更改解析来源、Hash或质量。
 - 每组引用原HTML外壳和连续原行；首片的HTML前缀、末片的HTML后缀标content，其余重复外壳标context。表题和表下注释各自保留为一次content引用，不复制到每张子表；表体局部区间移回原Block字符偏移，所有原字符主内容恰好覆盖一次。表外纯空白归外壳，不产生空白Chunk；多个/不明表体保留全块。不补写表头/单元格，不改页码或来源。
@@ -37,7 +41,7 @@ Worker 持有文档行锁，检查切片代次和来源解析代次，全部切�
 
 成功重新解析/缓存回放替换 Block 时在同一事务清除旧 Chunk 和切片检查点，避免引用已删除 Block；失败保留旧 Block/Chunk，必须结合 Document 状态辨别旧结果。活动切片检查点未完成时不允许 Reindex/Reparse；切片成功后可 Reindex→缓存 Block→显式 Chunk。改变 CHUNK_SIZE/OVERLAP 不修改正在执行或已完成的冻结参数；用成功 Reindex 建立新的切片检查点，不需要 Force Reparse，不消耗云端。
 
-旧v1～v4检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧整表导致`EMBEDDING_TOO_LONG`时，普通Retry仍消费旧Chunk；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v5切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，先完成缓存恢复，再受控调整XML预算。
+旧v1～v5检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧聚合预算或整表导致失败时，普通Retry仍消费旧配方；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v6切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，不再为切片问题修改XML预算。
 
 定向离线回归由用户手动执行（不需要数据库/模型或云端）：
 

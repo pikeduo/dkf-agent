@@ -448,6 +448,7 @@ MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000�
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
 - 新上传失败或编排超时先查`/api/admin/documents/{doc_id}/status`、详情及parse-jobs，修复原因后用文档级`/retry`恢复，不重传或重建全库。旧无编排文档仅UPLOADED/FAILED可通过`/process`重投，活动云任务用`/mineru`恢复；活动管理任务拒绝旧写入口。收费失败且无缓存仍需明确Force，不因普通Retry新增云批次。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
+- 新切片使用`block-chunk-v6`：大文档逐块切片、分批向量化和入库，不再被整份1600万字符/2万Chunk门槛直接拒绝；完整来源/Hash、真实Token上限及事务校验保留。旧检查点不自动升级；旧聚合预算失败应在任务安全结束、更新API/CPU/GPU Worker后，仅对该文档执行`POST /api/admin/documents/{doc_id}/reindex`，从成功解析缓存重建，不重新请求MinerU。大文档仍可能耗时较长、占用较多磁盘/数据库空间，建议串行；缓存缺失或单片不可安全拆分时明确失败，不宣称一定READY。
 - 旧知识库嵌套`/reindex`保留仅回放到CHUNKING的兼容语义；新文档级`/api/admin/documents/{doc_id}/reindex`自动接续切片、GPU向量化及入库。两者均不重新调用MinerU，缓存缺失/损坏/参数变化明确失败，旧结果保留供诊断，不自动Force。成功回放替换Block时同事务失效旧Chunk。
 - `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY/PARTIAL_READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
 

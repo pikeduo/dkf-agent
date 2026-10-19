@@ -114,14 +114,15 @@ def test_xml_part_budget_reports_counts_before_reading_private_xml(monkeypatch):
 
 
 @pytest.mark.parametrize("version,allowed", [
-    ("block-chunk-v3", False), ("block-chunk-v4", True), ("block-chunk-v5", True),
+    ("block-chunk-v3", False), ("block-chunk-v4", True), ("block-chunk-v5", True), ("block-chunk-v6", True),
 ])
 def test_sql_chunk_budget_matches_frozen_algorithm_before_fetching_body(monkeypatch, version, allowed):
-    """SQL资源预检与纯切片共用版本预算；旧代次拒绝，新代次才允许拉取较大输入。"""
+    """旧代次保留版本预算，v6进入逐块读取；测试在正文边界停止，不产生任何真实切片。"""
     from app.services.chunk import processing, splitter
 
     task_id, parse_id, doc_id = uuid4(), uuid4(), uuid4()
     document = SimpleNamespace(doc_id=doc_id, kb_id=uuid4(), chunk_task_id=task_id, status="CHUNKING",
+        file_type="xlsx", file_hash="a" * 64,
         processing_task_id=parse_id, chunk_config={"options": splitter.ChunkOptions(version=version).snapshot(),
                                                   "source_parse_task_id": str(parse_id)})
     session = MagicMock()

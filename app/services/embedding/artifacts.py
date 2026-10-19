@@ -11,6 +11,7 @@ from uuid import UUID
 from app.services.embedding.service import DIMENSION, MODEL_ID, VERSION, EmbeddingError, validate_vectors
 
 MAX_BYTES = 512 * 1024 * 1024
+MAX_ROW_BYTES = 128 * 1024
 
 
 def digest_json(value) -> str:
@@ -35,7 +36,7 @@ class ArtifactStore:
 
     def ready(self, doc_id: UUID, task_id: UUID, source_hash: str, options_hash: str,
               chunk_ids: list[str]) -> dict | None:
-        """流式校验完成标记、文件校验和、Chunk 顺序、数量与维度；缺失/损坏不能伪装缓存命中。"""
+        """逐行校验完整结果；v2按真实Chunk数推导文件边界，旧v1保留512MiB限制。"""
 
         directory = self.directory(doc_id, task_id)
         manifest = directory / "manifest.json"
@@ -47,7 +48,8 @@ class ArtifactStore:
             data = json.loads(manifest.read_text(encoding="utf-8"))
             if (data.get("doc_id") != str(doc_id) or data.get("task_id") != str(task_id)
                     or data.get("source_hash") != source_hash or data.get("options_hash") != options_hash
-                    or data.get("chunk_count") != len(chunk_ids) or data.get("format") != "dense-jsonl-v1"
+                    or data.get("chunk_count") != len(chunk_ids)
+                    or data.get("format") not in {"dense-jsonl-v1", "dense-jsonl-stream-v2"}
                     or data.get("model", {}).get("dimension") != DIMENSION
                     or data["model"].get("model_name") != MODEL_ID or data["model"].get("version") != VERSION
                     or data["model"].get("normalized") is not True
@@ -55,15 +57,16 @@ class ArtifactStore:
                     or len(data["model"]["model_fingerprint"]) != 64):
                 raise ValueError
             vectors_file = directory / "vectors.jsonl"
-            if not 0 < vectors_file.stat().st_size <= MAX_BYTES or vectors_file.stat().st_size != data["size_bytes"]:
+            limit = len(chunk_ids) * MAX_ROW_BYTES if data["format"] == "dense-jsonl-stream-v2" else MAX_BYTES
+            if not 0 < vectors_file.stat().st_size <= limit or vectors_file.stat().st_size != data["size_bytes"]:
                 raise ValueError
             digest = hashlib.sha256()
             count = total_bytes = 0
             with vectors_file.open("rb") as stream:
                 # 先限制单行读取量，再解析；损坏文件不能一次把超大行全部读入内存。
-                while line := stream.readline(128 * 1024 + 1):
+                while line := stream.readline(MAX_ROW_BYTES + 1):
                     total_bytes += len(line)
-                    if len(line) > 128 * 1024 or count >= len(chunk_ids) or total_bytes > MAX_BYTES:
+                    if len(line) > MAX_ROW_BYTES or count >= len(chunk_ids) or total_bytes > limit:
                         raise ValueError
                     row = json.loads(line)
                     if row.get("chunk_id") != chunk_ids[count] or row.get("chunk_index") != count + 1:
@@ -78,8 +81,8 @@ class ArtifactStore:
             raise EmbeddingError("EMBEDDING_ARTIFACT") from None
 
     @contextmanager
-    def writer(self, doc_id: UUID, task_id: UUID):
-        """用暂存文件流式写批量结果，全部校验完才发布；异常只清本次临时文件，不删除旧结果。"""
+    def writer(self, doc_id: UUID, task_id: UUID, *, streaming=False):
+        """v2逐行限制工作内存而非整份文件大小；仍只在全部完成后原子发布，不删旧结果。"""
 
         directory = self.directory(doc_id, task_id)
         temporary = None
@@ -87,7 +90,7 @@ class ArtifactStore:
             directory.mkdir(parents=True, exist_ok=True)
             with NamedTemporaryFile(mode="wb", dir=directory, prefix=".pending-", delete=False) as stream:
                 temporary = Path(stream.name)
-                writer = VectorWriter(stream)
+                writer = VectorWriter(stream, streaming=streaming)
                 yield writer
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -132,21 +135,22 @@ class ArtifactStore:
 class VectorWriter:
     """按源 Chunk 顺序追加有限数值，仅在任务内使用，不写日志或 Celery 返回值。"""
 
-    def __init__(self, stream):
-        """保存当前文件流和计数器，数量/大小达到上限前可安全中止。"""
+    def __init__(self, stream, *, streaming=False):
+        """保存流式策略及小型计数，不收集向量；默认仍采用旧v1预算。"""
 
         self.stream = stream
+        self.streaming = streaming
         self.count = 0
         self.size_bytes = 0
         self.digest = hashlib.sha256()
 
     def append(self, chunk_id: str, vector: list[float]) -> None:
-        """先严格校验再逐行写入，保持 Chunk ID 与向量一一对应，不序列化任何原文。"""
+        """严格校验后写单行；新策略不会因累计字节数拒绝，单行仍有界且不包含原文。"""
 
         vector = validate_vectors([vector], 1)[0]
         payload = json.dumps({"chunk_id": chunk_id, "chunk_index": self.count + 1, "vector": vector},
                              ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode() + b"\n"
-        if self.size_bytes + len(payload) > MAX_BYTES:
+        if len(payload) > MAX_ROW_BYTES or not self.streaming and self.size_bytes + len(payload) > MAX_BYTES:
             raise EmbeddingError("EMBEDDING_LIMIT")
         self.stream.write(payload)
         self.digest.update(payload)

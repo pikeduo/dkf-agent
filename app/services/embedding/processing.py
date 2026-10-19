@@ -1,6 +1,8 @@
 """GPU 文档向量化检查点和批处理，结果本地保存，阶段 15 前不写入 Chunk.embedding。"""
 
 import logging
+import hashlib
+import json
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -12,31 +14,63 @@ from app.core.config import PROJECT_ROOT, Settings
 from app.models import Document, DocumentChunk, DocumentParseJob
 from app.services.document_processing import transition_document
 from app.services.embedding.artifacts import ArtifactStore, digest_json
-from app.services.embedding.service import DIMENSION, MAX_ITEMS, EmbeddingError, EmbeddingOptions, get_embedding_service
+from app.services.embedding.service import DIMENSION, MAX_ITEMS, MAX_TOTAL_CHARS, EmbeddingError, EmbeddingOptions, get_embedding_service
 
-# 文档按GPU批次流式编码，聚合预算对齐v4大表；Service每次调用仍保留1000万字符限制。
+# 旧检查点保留聚合预算；v6按批次读取，Service每次调用仍保留1000万字符限制。
 MAX_DOCUMENT_TOTAL_CHARS = 16_000_000
 
 
-def read_chunks(session: Session, document: Document) -> list:
-    """以文档级预算读取当前Chunk；超限先记安全计数，来源/顺序及单批模型限制仍严格检查。"""
+def streaming_document(document) -> bool:
+    """仅v6切片使用流式文档策略，旧检查点不静默切换输入契约。"""
+    config = getattr(document, "chunk_config", None)
+    return isinstance(config, dict) and isinstance(config.get("options"), dict) and config["options"].get("version") == "block-chunk-v6"
+
+
+class ChunkRows:
+    """可重复遍历的当前Chunk视图；仅保留计数，每遍有界读取并复核来源/连续序号。"""
+
+    def __init__(self, session, document, query, count):
+        """绑定已持有文档锁的会话和查询，不提前读取所有正文。"""
+        self.session, self.document, self.query, self.count = session, document, query, count
+
+    def __len__(self):
+        """返回已核对的SQL计数，供结果与索引完整性校验。"""
+        return self.count
+
+    def __iter__(self):
+        """每次预取256行，晚到的缺行/坏来源同样抛错，外层事务不能发布部分结果。"""
+        source = str(self.document.processing_task_id) if self.document.processing_task_id else None
+        seen = 0
+        for seen, row in enumerate(self.session.execute(self.query.execution_options(yield_per=256)), 1):
+            if row.chunk_index != seen or row.source_parse_task_id != source or not row.text.strip():
+                raise EmbeddingError("EMBEDDING_SOURCE")
+            yield row
+        if seen != self.count:
+            raise EmbeddingError("EMBEDDING_SOURCE")
+
+
+def read_chunks(session: Session, document: Document) -> list | ChunkRows:
+    """v6返回逐批读取视图，不因整篇字符/Chunk数拒绝；旧版本保留预算和来源规则。"""
 
     predicate = (DocumentChunk.doc_id == document.doc_id, DocumentChunk.kb_id == document.kb_id)
     count, chars = session.execute(select(func.count(), func.coalesce(func.sum(func.length(DocumentChunk.text)), 0))
                                   .select_from(DocumentChunk).where(*predicate)).one()
     if count == 0:
         raise EmbeddingError("EMBEDDING_EMPTY")
-    if count > MAX_ITEMS or chars > MAX_DOCUMENT_TOTAL_CHARS:
+    if not streaming_document(document) and (count > MAX_ITEMS or chars > MAX_DOCUMENT_TOTAL_CHARS):
         chars_exceeded = chars > MAX_DOCUMENT_TOTAL_CHARS
         log_event("embedding.input_rejected", level=logging.ERROR, doc_id=document.doc_id,
             stage="embedding.document_budget", step="TOTAL_CHAR_LIMIT" if chars_exceeded else "CHUNK_COUNT_LIMIT",
             chunk_count=count, item_count=chars if chars_exceeded else count,
             limit_count=MAX_DOCUMENT_TOTAL_CHARS if chars_exceeded else MAX_ITEMS, error_code="EMBEDDING_LIMIT")
         raise EmbeddingError("EMBEDDING_LIMIT")
-    rows = session.execute(select(DocumentChunk.chunk_id, DocumentChunk.text,
+    query = (select(DocumentChunk.chunk_id, DocumentChunk.text,
         DocumentChunk.chunk_metadata["chunk_index"].as_integer().label("chunk_index"),
         DocumentChunk.chunk_metadata["source_parse_task_id"].as_string().label("source_parse_task_id"))
-        .where(*predicate).order_by(DocumentChunk.chunk_metadata["chunk_index"].as_integer().asc().nulls_last())).all()
+        .where(*predicate).order_by(DocumentChunk.chunk_metadata["chunk_index"].as_integer().asc().nulls_last()))
+    if streaming_document(document):
+        return ChunkRows(session, document, query, count)
+    rows = session.execute(query).all()
     source = str(document.processing_task_id) if document.processing_task_id else None
     if any(row.chunk_index != index or row.source_parse_task_id != source or not row.text.strip()
            for index, row in enumerate(rows, 1)):
@@ -45,10 +79,30 @@ def read_chunks(session: Session, document: Document) -> list:
 
 
 def chunks_hash(rows: list) -> str:
-    """冻结有序 Chunk 标识及完整文本摘要，不把正文放入消息或配置快照。"""
+    """增量生成与旧规范JSON完全相同的摘要，不收集整份正文或Hash列表。"""
 
-    return digest_json([{"id": str(row.chunk_id), "index": row.chunk_index,
-                         "text_hash": digest_json(row.text)} for row in rows])
+    digest = hashlib.sha256()
+    digest.update(b"[")
+    for index, row in enumerate(rows):
+        if index:
+            digest.update(b",")
+        value = {"id": str(row.chunk_id), "index": row.chunk_index, "text_hash": digest_json(row.text)}
+        digest.update(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+    digest.update(b"]")
+    return digest.hexdigest()
+
+
+def embedding_batches(rows, batch_size):
+    """同时按批大小和Service单次字符预算分组；总文档再大也不合并成一次模型调用。"""
+    batch, chars = [], 0
+    for row in rows:
+        if batch and (len(batch) >= batch_size or chars + len(row.text) > MAX_TOTAL_CHARS):
+            yield batch
+            batch, chars = [], 0
+        batch.append(row)
+        chars += len(row.text)
+    if batch:
+        yield batch
 
 
 def checked_config(document: Document) -> tuple[dict, EmbeddingOptions]:
@@ -115,7 +169,7 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
 
 
 def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """逐批原子发布；超限记录真实Chunk与token计数，失败不发布结果或写pgvector/READY。"""
+    """逐批读取/编码/写文件；v6不设整份大小门槛，真实Token保护及完整原子发布不变。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -141,9 +195,9 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     if manifest is None:
         service = get_embedding_service(options)
         identity = service.identity()
-        with store.writer(doc_id, task_id) as writer:
-            for offset in range(0, len(rows), options.batch_size):
-                batch = rows[offset:offset + options.batch_size]
+        streamed = streaming_document(document)
+        with store.writer(doc_id, task_id, streaming=streamed) as writer:
+            for batch_index, batch in enumerate(embedding_batches(rows, options.batch_size), 1):
                 try:
                     vectors = service.embed_documents([row.text for row in batch])
                 except EmbeddingError as exc:
@@ -159,8 +213,8 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
                 for row, vector in zip(batch, vectors):
                     writer.append(str(row.chunk_id), vector)
                 log_event("embedding.batch_completed", doc_id=doc_id, task_id=task_id,
-                          batch_index=offset // options.batch_size + 1, item_count=len(batch))
-        manifest = {"format": "dense-jsonl-v1", "doc_id": str(doc_id), "kb_id": str(document.kb_id),
+                          batch_index=batch_index, item_count=len(batch))
+        manifest = {"format": "dense-jsonl-stream-v2" if streamed else "dense-jsonl-v1", "doc_id": str(doc_id), "kb_id": str(document.kb_id),
             "task_id": str(task_id), "source_hash": config["source_hash"], "options_hash": options_hash,
             "source_chunk_task_id": config["source_chunk_task_id"], "model": identity,
             "chunk_count": writer.count, "size_bytes": writer.size_bytes,

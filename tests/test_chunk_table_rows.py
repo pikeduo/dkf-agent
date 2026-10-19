@@ -275,15 +275,17 @@ def test_large_html_new_budget_keeps_adapter_defaults_and_exact_evidence():
 
 
 def test_source_budget_is_versioned_and_keeps_bounded_rejection(monkeypatch):
-    """缩小预算验证v4与旧版各用自己的上限，超预算仍整份失败，不制造半份Chunk。"""
+    """旧v1～v5保留冻结预算；v6不因文档聚合字符数拒绝，避免重试旧代次时偷换策略。"""
     monkeypatch.setattr(splitter, "MAX_SOURCE_CHARS", 100)
     monkeypatch.setattr(splitter, "MAX_V4_SOURCE_CHARS", 200)
     source = block(1, "甲" * 150)
     assert chunks([source])
     with pytest.raises(ChunkError, match="CHUNK_LIMIT"):
         chunks([source], ChunkOptions(version=CAPTION_VERSION))
-    with pytest.raises(ChunkError, match="CHUNK_LIMIT"):
-        chunks([block(1, "甲" * 201)])
+    for version in (splitter.NATIVE_ROW_VERSION, splitter.STRONG_VERSION):
+        with pytest.raises(ChunkError, match="CHUNK_LIMIT"):
+            chunks([block(1, "甲" * 201)], ChunkOptions(version=version))
+    assert chunks([block(1, "甲" * 201)])
 
 
 def test_v4_html_cell_paragraphs_keep_values_raw_markup_and_rowspan():

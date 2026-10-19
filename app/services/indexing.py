@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 from app.core.business_logging import log_event
 from app.models import Document, DocumentChunk, DocumentParseJob
 from app.services.document_processing import transition_document
-from app.services.embedding.artifacts import MAX_BYTES, ArtifactStore, digest_json
-from app.services.embedding.processing import checked_config, chunks_hash, read_chunks
+from app.services.embedding.artifacts import MAX_BYTES, MAX_ROW_BYTES, ArtifactStore, digest_json
+from app.services.embedding.processing import checked_config, chunks_hash, read_chunks, streaming_document
 from app.services.embedding.service import DIMENSION, MAX_ITEMS, MODEL_ID, VERSION, EmbeddingError
 
 INDEX_NAME = "ix_document_chunks_embedding_hnsw"
@@ -49,14 +49,15 @@ class IndexingError(Exception):
 
 
 def input_identity(document: Document) -> dict:
-    """仅从已完成的 GPU 检查点冻结身份；不访问模型、磁盘或外部服务。"""
+    """冻结真实GPU结果；v6可包含任意多批Chunk，旧代次仍保留原数量边界。"""
 
     try:
         config, _ = checked_config(document)
         result = config.get("result")
         if (document.embedding_task_id is None or not isinstance(result, dict)
                 or set(result) != {"chunk_count", "dimension", "model_name", "model_fingerprint", "vectors_sha256"}
-                or type(result["chunk_count"]) is not int or not 1 <= result["chunk_count"] <= MAX_ITEMS
+                or type(result["chunk_count"]) is not int or result["chunk_count"] < 1
+                or not streaming_document(document) and result["chunk_count"] > MAX_ITEMS
                 or result["dimension"] != DIMENSION or result["model_name"] != MODEL_ID
                 or any(not isinstance(result[key], str) or re.fullmatch(r"[0-9a-f]{64}", result[key]) is None
                        for key in ("model_fingerprint", "vectors_sha256"))):
@@ -182,15 +183,16 @@ def checked_vector(vector) -> list[float]:
 
 def vector_batches(store: ArtifactStore, doc_id: UUID, embedding_task_id: UUID,
                    manifest: dict, chunk_ids: list[str]):
-    """有界逐批读取原文件；再次核对身份和校验和，防止预检后文件变化导致半份入库。"""
+    """逐批读取v1/v2文件；v2边界由真实Chunk数推导，末批仍复核全文件与完整来源。"""
 
     count = total_bytes = 0
     digest, batch = hashlib.sha256(), []
+    limit = len(chunk_ids) * MAX_ROW_BYTES if manifest.get("format") == "dense-jsonl-stream-v2" else MAX_BYTES
     try:
         with (store.directory(doc_id, embedding_task_id) / "vectors.jsonl").open("rb") as stream:
-            while line := stream.readline(128 * 1024 + 1):
+            while line := stream.readline(MAX_ROW_BYTES + 1):
                 total_bytes += len(line)
-                if len(line) > 128 * 1024 or total_bytes > MAX_BYTES or count >= len(chunk_ids):
+                if len(line) > MAX_ROW_BYTES or total_bytes > limit or count >= len(chunk_ids):
                     raise IndexingError("INDEX_ARTIFACT")
                 row = json.loads(line)
                 if (not isinstance(row, dict) or set(row) != {"chunk_id", "chunk_index", "vector"}
@@ -224,7 +226,7 @@ def write_batch(session: Session, document: Document, batch: list[dict]) -> None
 
 
 def run_index_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """行锁保护全量向量与 READY 同事务；任一文件、批次或提交失败由任务整体回滚。"""
+    """逐批锁定/写入，全量向量与READY同事务；v6不收集整份正文，后批失败仍整体回滚。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -239,11 +241,16 @@ def run_index_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     config = checked_index_config(document)
     require_vector_index(session)
     try:
-        # 先执行现有数量/字符上限检查，避免异常海量 Chunk 在锁阶段无界读取。
+        # 旧代次保留预算；v6使用可重复的流式视图，每遍仍验证顺序/来源。
         read_chunks(session, document)
         # 文档锁阻止维护/新增引用，Chunk 行锁保护已有行，取得锁后重新读取完整输入。
-        session.execute(select(DocumentChunk.chunk_id).where(DocumentChunk.doc_id == doc_id)
-                        .order_by(DocumentChunk.chunk_id).with_for_update()).all()
+        query = select(DocumentChunk.chunk_id).where(DocumentChunk.doc_id == doc_id).order_by(
+            DocumentChunk.chunk_id).with_for_update()
+        if streaming_document(document):
+            for _ in session.execute(query.execution_options(yield_per=WRITE_BATCH_SIZE)):
+                pass
+        else:
+            session.execute(query).all()
         rows = read_chunks(session, document)
         if (chunks_hash(rows) != config["source_hash"]
                 or len(rows) != config["embedding_result"]["chunk_count"]):

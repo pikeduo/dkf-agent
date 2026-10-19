@@ -2,6 +2,32 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
+## 11:10单文档切片聚合超限与v6分批处理
+
+`082ebed3-a4e9-4b61-934b-4025b472192e`已完成原生4块+云8块落库；Job为`410b876c-d66a-4ed3-ae92-e969ffc929d4`、Batch为`17b673c7-d9d1-4d21-8f97-377dfaea2d8c`。真实失败是`chunk.source_budget / SOURCE_CHAR_LIMIT`：36009492字符超过旧1600万预算，不是MinerU或Adapter失败。
+
+本轮编写v6逐块/逐片处理、每256片暂存；向量化按SQL视图/单批字符预算读取和编码，新JSONL stream v2逐行限量/校验，索引仍256行一批。取消新版本整份聚合拒绝，不提高旧常量；旧v1～v5冻结，不截断正文/公式、不变更Block/页码/质量。内存仍需容纳最大原块和有序ID元数据，磁盘、GPU、事务耗时需真实验收；不可安全拆分结构/单片真实Token超限仍明确失败。无新依赖、环境变量或迁移。
+
+由用户先执行以下定向回归（Codex未执行）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_streaming_pipeline.py tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_processing.py tests/test_embedding_artifacts.py tests/test_indexing.py tests/test_document_management.py tests/test_stage33_office_recovery.py tests/test_business_logging.py -q -ra
+```
+
+通过后暂停新投递，检查`celery inspect active / reserved / scheduled`，确认相关任务安全结束，再正常停止并按README重启API/所有CPU/GPU Worker。只对这一份执行一次文档Reindex，原缓存身份/Hash仍验证；普通Retry继续旧v5不会启用v6。缓存缺失停止，不Force或重新提交云批次：
+
+```powershell
+$base = 'http://127.0.0.1:8000/api/admin/documents/082ebed3-a4e9-4b61-934b-4025b472192e'
+Invoke-RestMethod -Method Post "$base/reindex" -TimeoutSec 120 -ErrorAction Stop
+# 受理后只GET，不重复POST；大文档可能持续运行较长时间。
+Invoke-RestMethod "$base/status" -TimeoutSec 30 -ErrorAction Stop |
+    Select-Object status,block_count,chunk_count,vector_count,invalid_vector_count,error_message,management |
+    ConvertTo-Json -Depth 8
+```
+
+验收需实际新Chunk为`block-chunk-v6`、`chunk_count=vector_count>0`、无无效向量、management=done，终态由真实原质量决定READY/PARTIAL_READY。不能把新代码/测试Stub通过当作该文档已恢复。三份原云失败仍按下节诊断，不批量Reindex其他文档或进入34。
+
 ## 10月19日01:20快照：剩余4份及原Batch原因诊断
 
 用户报告为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已完成切片/向量/索引，但保留保存快照及外部源未核验质量，不能升级为完整READY。剩余为三份原云failed及`082ebed3…`的XML预算；后者仍按下节单独受控调整及恢复，不自动执行。

@@ -157,7 +157,7 @@ $rows = @(
             if ($operation -eq 'reindex' -and $state.chunk_count -gt 0 -and
                 ($state.status -in @('READY','PARTIAL_READY') -or $state.management.stage -in @('embed','index'))) {
                 $sample = Invoke-RestMethod "$apiRoot/documents/$($document.doc_id)/chunks?limit=1&offset=0" -TimeoutSec 30
-                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v5') {
+                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v6') {
                     throw '仍由旧Worker生成切片，停止后续恢复；先安全重启所有消费default_queue的旧Worker。'
                 }
             }

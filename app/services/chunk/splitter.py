@@ -12,7 +12,8 @@ from uuid import UUID, uuid5
 
 from app.core.business_logging import log_event
 
-VERSION = "block-chunk-v5"
+VERSION = "block-chunk-v6"
+STRONG_VERSION = "block-chunk-v5"
 NATIVE_ROW_VERSION = "block-chunk-v4"
 CAPTION_VERSION = "block-chunk-v3"
 ROW_VERSION = "block-chunk-v2"
@@ -39,11 +40,11 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """新切片使用v5单元格加粗兼容；已有v1～v4检查点保持冻结算法。"""
+        """新切片使用v6流式处理；已有v1～v5检查点保持冻结算法。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION)
+                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, STRONG_VERSION, VERSION)
                 or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
@@ -184,9 +185,11 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
     return result
 
 
-def source_char_limit(version: str) -> int:
-    """SQL预检和纯切片共用版本化字符预算，旧检查点不随新默认值扩大。"""
-    return MAX_V4_SOURCE_CHARS if version in (NATIVE_ROW_VERSION, VERSION) else MAX_SOURCE_CHARS
+def source_char_limit(version: str) -> int | None:
+    """v6按块/批处理不以整份字符数拒绝；旧版本保留冻结预算。"""
+    if version == VERSION:
+        return None
+    return MAX_V4_SOURCE_CHARS if version in (NATIVE_ROW_VERSION, STRONG_VERSION) else MAX_SOURCE_CHARS
 
 
 def native_table_units(block: SourceBlock, budget: int) -> list[list[Span]]:
@@ -310,9 +313,12 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
 
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """按冻结版本切片；仅v5增加单元格strong兼容，不改原Block、旧策略或字符证据。"""
+    """纯函数兼容入口；v6消费流式生成器，旧版本保留原算法及全部资源边界。"""
 
     options = options or ChunkOptions()
+    if options.version == VERSION:
+        from app.services.chunk.streaming import iter_chunks
+        return list(iter_chunks(doc_id, kb_id, file_type, lambda: iter(blocks), options))
     config = options.snapshot()
     if not blocks or not any(block.text.strip() for block in blocks):
         raise ChunkError("CHUNK_EMPTY：没有可切片正文")
@@ -335,14 +341,14 @@ def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
     atoms = []
     for block in blocks:
         if block.text.strip():
-            if (block.block_type == "table" and options.version in (NATIVE_ROW_VERSION, VERSION)
+            if (block.block_type == "table" and options.version in (NATIVE_ROW_VERSION, STRONG_VERSION)
                     and block.source == "native_parser" and file_type in {"xlsx", "csv"}):
                 atoms.extend(native_table_units(block, options.size - 100))
-            elif block.block_type == "table" and options.version in (ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION):
+            elif block.block_type == "table" and options.version in (ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, STRONG_VERSION):
                 atoms.extend(table_units(block, options.size - 100,
-                    allow_surrounding=options.version in (CAPTION_VERSION, NATIVE_ROW_VERSION, VERSION),
-                    large_tables=options.version in (NATIVE_ROW_VERSION, VERSION),
-                    cell_strong=options.version == VERSION))
+                    allow_surrounding=options.version in (CAPTION_VERSION, NATIVE_ROW_VERSION, STRONG_VERSION),
+                    large_tables=options.version in (NATIVE_ROW_VERSION, STRONG_VERSION),
+                    cell_strong=options.version == STRONG_VERSION))
             else:
                 atoms.extend([[span] for span in text_spans(block, options.size - 100)]
                              if block.block_type not in {"table", "formula"}

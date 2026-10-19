@@ -3,13 +3,13 @@
 import logging
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.orm import Session
 
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentBlock, DocumentChunk, DocumentParseJob
-from app.services.chunk.splitter import MAX_BLOCKS, ChunkError, ChunkOptions, SourceBlock, build_chunks, source_char_limit
+from app.services.chunk.splitter import MAX_BLOCKS, VERSION, ChunkError, ChunkOptions, SourceBlock, build_chunks, source_char_limit
 from app.services.document_processing import transition_document
 
 
@@ -63,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """记录实际冻结版本并事务切片，识别旧Worker；切片/状态同事务，失败整体回滚。"""
+    """v6逐块读取/每256片写入，同一事务完成；旧版本保留冻结预算和算法。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -79,7 +79,8 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     total_chars, block_count = session.execute(select(
         func.coalesce(func.sum(func.length(DocumentBlock.text)), 0), func.count())
         .select_from(DocumentBlock).where(DocumentBlock.doc_id == doc_id)).one()
-    if total_chars > source_char_limit(options.version) or block_count > MAX_BLOCKS:
+    limit = source_char_limit(options.version)
+    if limit is not None and (total_chars > limit or block_count > MAX_BLOCKS):
         chars_exceeded = total_chars > source_char_limit(options.version)
         log_event("chunk.failed", doc_id=doc_id, task_id=task_id, stage="chunk.source_budget",
                   step="SOURCE_CHAR_LIMIT" if chars_exceeded else "BLOCK_COUNT_LIMIT",
@@ -87,6 +88,8 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
                   limit_count=source_char_limit(options.version) if chars_exceeded else MAX_BLOCKS,
                   error_code="CHUNK_LIMIT")
         raise ChunkError("CHUNK_LIMIT：切片源文本超过本地资源上限")
+    if options.version == VERSION:
+        return result | stream_chunk_step(session, document, options, block_count, total_chars)
     blocks = list(session.scalars(select(DocumentBlock).where(DocumentBlock.doc_id == doc_id)
                                  .order_by(DocumentBlock.block_index.asc().nulls_last())))
     log_event("chunk.started", doc_id=doc_id, kb_id=document.kb_id, task_id=task_id,
@@ -112,6 +115,48 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     return result | {"status": "awaiting_embedding", "document_status": document.status,
                      "chunk_count": len(drafts), "block_count": len(blocks),
                      "oversized_count": sum(draft.metadata["oversized"] for draft in drafts)}
+
+
+def stream_chunk_step(session, document, options, block_count, total_chars):
+    """新版本不收集全部Block/Chunk；任何后批失败由外层事务回滚，来源及质量不变。"""
+    from app.services.chunk.streaming import iter_chunks
+
+    def factory():
+        """在文档行锁内可重复顺序读取原块，每次仅预取少量ORM行。"""
+        query = select(DocumentBlock).where(DocumentBlock.doc_id == document.doc_id).order_by(
+            DocumentBlock.block_index.asc().nulls_last()).execution_options(yield_per=1)
+        for block in session.scalars(query):
+            yield SourceBlock(block.block_id, block.block_index, block.page, block.section,
+                block.block_type, block.text, block.source, block.bbox, getattr(block, "provenance", None))
+
+    log_event("chunk.started", doc_id=document.doc_id, kb_id=document.kb_id, task_id=document.chunk_task_id,
+        block_count=block_count, item_count=total_chars, chunk_size=options.size,
+        chunk_overlap=options.overlap, step=options.version)
+    session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document.doc_id))
+    document.embedding_task_id = document.embedding_config = None
+    document.index_task_id = document.index_config = None
+    batch, count, oversized, batch_index = [], 0, 0, 0
+    for draft in iter_chunks(document.doc_id, document.kb_id, document.file_type, factory, options):
+        metadata = draft.metadata | {"source_parse_task_id": source_generation(document), "file_hash": document.file_hash}
+        if getattr(document, "parse_quality", None):
+            metadata["parse_quality"] = document.parse_quality
+        batch.append({"chunk_id": draft.chunk_id, "doc_id": document.doc_id, "kb_id": document.kb_id,
+            "text": draft.text, "page_start": draft.page_start, "page_end": draft.page_end,
+            "section": draft.section, "chunk_metadata": metadata, "embedding": None})
+        count += 1
+        oversized += int(draft.metadata["oversized"])
+        if len(batch) == 256:
+            session.execute(insert(DocumentChunk), batch)
+            batch, batch_index = [], batch_index + 1
+            # 此事件仅表示批次已暂存，不冒充事务提交或业务成功。
+            log_event("chunk.batch_staged", doc_id=document.doc_id, task_id=document.chunk_task_id,
+                      batch_index=batch_index, item_count=256)
+    if batch:
+        session.execute(insert(DocumentChunk), batch)
+    transition_document(document, "EMBEDDING")
+    session.flush()
+    return {"status": "awaiting_embedding", "document_status": document.status,
+            "chunk_count": count, "block_count": block_count, "oversized_count": oversized}
 
 
 def record_chunk_failure(session: Session, doc_id: UUID, task_id: UUID, message: str, final: bool) -> None:

@@ -956,3 +956,12 @@ def test_preset_import_logs_are_chinese_safe_summaries(events):
     result = records(events)
     assert result[0]["doc_id"] == str(doc_id) and result[1]["failed_count"] == 1
     assert "PRIVATE" not in events.getvalue() and "预置原件已提交" in events.getvalue()
+
+
+def test_chunk_batch_staged_is_safe_and_does_not_claim_transaction_committed(events):
+    """新切片批次仅报告暂存数量，不泄漏正文/SQL/向量，也不冒充整份已提交。"""
+    logs.log_event("chunk.batch_staged", doc_id=uuid4(), task_id=uuid4(), batch_index=2,
+                   item_count=256, text="PRIVATE_BODY", vector=[1.0], sql="PRIVATE_SQL")
+    result = records(events)[0]
+    assert result["batch_index"] == 2 and result["item_count"] == 256
+    assert "PRIVATE" not in events.getvalue() and "尚未提交完整文档事务" in events.getvalue()

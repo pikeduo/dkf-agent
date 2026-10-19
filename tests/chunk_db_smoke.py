@@ -146,10 +146,11 @@ def test_old_generation_is_skipped(context):
 
 
 def test_failure_rolls_back_chunks_and_can_resume_same_task(context, monkeypatch):
-    """替换过程中失败全回滚，安全 FAILED 可沿用检查点恢复，不产半份 Chunk。"""
+    """v6批量替换过程中失败全回滚，旧结果保留，修复后可恢复同一切片任务。"""
 
+    from app.services.chunk import streaming
     task_id = submit(context)
-    original = processing.build_chunks
+    original = streaming.iter_chunks
     with context[2]() as session, session.begin():
         old = DocumentChunk(doc_id=context[1][1], kb_id=context[1][0], text="旧切片",
                             page_start=1, page_end=1)
@@ -160,11 +161,11 @@ def test_failure_rolls_back_chunks_and_can_resume_same_task(context, monkeypatch
     def broken_drafts(*args, **kwargs):
         """模拟生成合法结果后落库类型错误，验证 DELETE 后异常也回滚。"""
 
-        drafts = original(*args, **kwargs)
-        drafts[0].metadata["unserializable"] = object()
-        return drafts
+        for draft in original(*args, **kwargs):
+            draft.metadata["unserializable"] = object()
+            yield draft
 
-    monkeypatch.setattr(processing, "build_chunks", broken_drafts)
+    monkeypatch.setattr(streaming, "iter_chunks", broken_drafts)
     result = execute(context, task_id)
     assert result.state == "FAILURE" and "CHUNK_FAILED" in str(result.result)
     assert "object" not in str(result.result)
@@ -172,7 +173,7 @@ def test_failure_rolls_back_chunks_and_can_resume_same_task(context, monkeypatch
         assert session.get(Document, context[1][1]).status == "FAILED"
         assert session.get(DocumentChunk, old_id) is not None
         assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 1
-    monkeypatch.setattr(processing, "build_chunks", original)
+    monkeypatch.setattr(streaming, "iter_chunks", original)
     assert submit(context) == task_id
     assert execute(context, task_id).state == "SUCCESS"
     with context[2]() as session:
