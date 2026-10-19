@@ -29,18 +29,19 @@ def byte_renderer(bytes_per_page=1):
     return render, calls
 
 
-@pytest.mark.parametrize("pages,last", [(257, 57), (217, 17), (382, 182)])
-def test_page_limit_planner_is_continuous_and_keeps_original(tmp_path, pages, last):
-    """三个页数不依赖文件名；优先200页，余页连续无遗漏/重复，原件只读。"""
+@pytest.mark.parametrize("pages,ranges", [(257, [(1, 180), (181, 257)]),
+    (217, [(1, 180), (181, 217)]), (382, [(1, 180), (181, 360), (361, 382)])])
+def test_page_limit_planner_is_continuous_and_keeps_original(tmp_path, pages, ranges):
+    """新计划优先180页并连续覆盖，382页需三片；原件保持只读。"""
     original = tmp_path / "original.bin"
     original.write_bytes(b"PRIVATE_ORIGINAL")
     before = tool.file_digest(original)
     render, calls = byte_renderer()
     parts = tool.build_parts(pages, tmp_path / "parts", render)
-    assert [(p["page_start"], p["page_end"]) for p in parts] == [(1, 200), (201, pages)]
-    assert [p["size_bytes"] for p in parts] == [200, last]
+    assert [(p["page_start"], p["page_end"]) for p in parts] == ranges
+    assert [p["size_bytes"] for p in parts] == [last - first + 1 for first, last in ranges]
     assert [page for p in parts for page in range(p["page_start"], p["page_end"] + 1)] == list(range(1, pages + 1))
-    assert calls == [(1, 200), (201, pages)]
+    assert calls == ranges
     assert tool.file_digest(original) == before
 
 
@@ -97,7 +98,7 @@ def merge_fixture():
                   for index, (page, kind) in enumerate([(2, "text"), (1, "title"), (1, "table"), (1, "formula")])]
         results.append(ParsedDocument(doc_id=document.doc_id, file_name=document.file_name, file_type="pdf", blocks=blocks))
     manifest = tool.SplitManifest(doc_id=document.doc_id, file_hash=document.file_hash,
-                                 page_count=257, policy=tool.policy(), parts=parts)
+                                 page_count=257, policy=tool.policy(max_pages=200), parts=parts)
     job.parse_options["_pdf_split"] = manifest.model_dump(mode="json")
     return document, job, manifest, results
 
@@ -208,7 +209,7 @@ def test_piece_cache_identity_is_not_original_page_or_doc_identity():
     """完全相同片可跨原件复用，模型/参数/策略变化则隔离。"""
     document, job, manifest, _ = merge_fixture()
     settings = Settings(_env_file=None)
-    job.parse_options["_cache_recipe"] = recipe(document, settings, "mineru_whole", pdf_split_policy=tool.policy())
+    job.parse_options["_cache_recipe"] = recipe(document, settings, "mineru_whole", pdf_split_policy=tool.policy(max_pages=200))
     first = tool.piece_recipe(job, manifest.parts[0])
     same = manifest.parts[0].model_copy(update={"page_start": 201, "page_end": 400})
     assert key_for(first) == key_for(tool.piece_recipe(job, same))

@@ -31,6 +31,7 @@
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |
 | mineru-cache-upgrade-cli | MinerU Cache Upgrade CLI |
 | mineru-split-cli | MinerU Split CLI |
+| office-pdf-cli | Office PDF CLI |
 | dataset-evaluation-cli | Dataset Evaluation CLI |
 | unknown / 未注册角色 | 未知进程 |
 
@@ -53,6 +54,8 @@ v7大HTML表切分记录`chunk.table_split / stage=chunk.html_stream_rows`，仅
 所有写入者必须运行新代码并使用相同的本地 `LOG_DIR`；格式切换后需要重启 API 与所有 Worker，遗留进程可能继续输出 JSON。已有 JSON 历史行不改写、不删除，切换当天同一文件可能同时包含旧 JSON 和新中文文本。旧格式的整行 JSON 读取工具需调整，人工搜索仍可使用事件码或资源 UUID。网络共享盘、多主机锁行为不在保证范围内。旧容量/备份配置废弃，当前无单日容量上限或自动历史清理。旧 PID 文件、已有日期文件均不自动合并/删除，运维应在对应进程停止后自行归档。目录/写盘/锁失败降级终端并安全提示，不改变已提交业务结果；不保证终端与文件双重故障时仍可记录。
 
 ## 主要事件
+
+LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次转换、冻结PDF复用和安全失败；`office.split_authorized`仅表示管理员给定最多新片预算，不代表已提交或已收费。字段只有doc/job、格式、页数、实际大小/限制、耗时及固定错误码；不输出可执行路径、profile、stdout/stderr、正文、应用环境或凭据。CLI本地报告可含打开PDF的路径，不进入业务日志。
 
 阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。
 

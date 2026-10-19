@@ -116,11 +116,13 @@ def list_document_chunks(doc_id: UUID, session: AdminSession, limit: PageLimit =
 
 
 def submit_management(session, doc_id: UUID, operation: str, parse_mode="auto", *,
-                      allow_new_split_parts=False) -> ManagementResponse:
-    """提交管理检查点后投递；仅将管理员显式新片费用许可传入原编排，不在API解析或推理。"""
+                      allow_new_split_parts=False, office_pdf_max_new_parts=0) -> ManagementResponse:
+    """提交管理检查点后投递；API只冻结费用许可，不执行Office转换/解析或推理。"""
     document = require_document(session, doc_id, lock=True)
     try:
         options = {"allow_new_split_parts": True} if allow_new_split_parts else {}
+        if office_pdf_max_new_parts:
+            options["office_pdf_max_new_parts"] = office_pdf_max_new_parts
         task_id, dispatch = prepare_management(session, document, get_settings(), operation, parse_mode=parse_mode, **options)
         result = public_management(document)
         session.commit()
@@ -139,9 +141,12 @@ def submit_management(session, doc_id: UUID, operation: str, parse_mode="auto", 
 @router.post("/{doc_id}/retry", response_model=ManagementResponse, status_code=202,
              summary="恢复失败阶段或原批次；仅显式许可才续交从未提交的PDF片")
 def retry_document(doc_id: UUID, session: AdminSession, parse_mode: Mode = "auto",
-    allow_new_split_parts: Annotated[bool, Query(description="显式确认剩余从未提交PDF分片的云外传及新增费用；不重投已有Batch")] = False):
-    """默认原ZIP离线重放；新片费用必须显式授权，绝不Force或再次解析已有Batch。"""
+    allow_new_split_parts: Annotated[bool, Query(description="显式确认剩余从未提交PDF分片的云外传及新增费用；不重投已有Batch")] = False,
+    office_pdf_max_new_parts: Annotated[int, Query(ge=0, le=128, description="默认0不授权；正数确认失败Office转PDF后的新分片外传及最多收费文件数，不重投原Batch")] = 0):
+    """默认本地恢复；Office改用新PDF输入须单独给出最大新增片数，不执行Force。"""
     options = {"allow_new_split_parts": True} if allow_new_split_parts else {}
+    if office_pdf_max_new_parts:
+        options["office_pdf_max_new_parts"] = office_pdf_max_new_parts
     return submit_management(session, doc_id, "retry", parse_mode, **options)
 
 

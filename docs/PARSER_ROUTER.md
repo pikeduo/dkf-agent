@@ -2,6 +2,8 @@
 
 当前链路为 `Preflight → Decision → Cache / Native / MinerU Whole / Hybrid → Guard`；无法安全处理明确 FAILED，不设置 Review。实际云路由的超限PDF可在Whole内部连续分片，仍是一个原文档/一次完整覆盖策略，不是逐页Native/云混合；全片成功后Guard再接原Chunk/Embedding/Index。见[MinerU分片](MINERU_CLOUD.md#超限-pdf连续分片)、[Selective Hybrid](SELECTIVE_HYBRID.md)与[Parse Cache](PARSER_CONTRACT.md#阶段-12parse-cache-契约与验收)。新增分片待人工验收。
 
+新Whole Office在CPU通过LibreOffice先生成冻结PDF，按实际页数最多180页分片；新云PDF从181页进入分片，旧200页账本不重切。转换后才给原Office signals追加`office_pdf_sha256`与真实页摘要，空字段不进入旧序列化，原Native/XLSX主结果Hash不变。Guard仅凭此已验证摘要扩展Office逻辑页范围，bbox仍NULL、缺页仍PARTIAL；不以Sheet/Slide数量推断。转换、安全及已有失败Whole的显式预算见[Office分页](MINERU_CLOUD.md#libreoffice-office分页与显式恢复)，尚待用户测试/验收。
+
 ## 1. 使用和兼容边界
 
 - 原 `POST /api/admin/knowledge-bases/{kb_id}/documents`：multipart `file` 多选不变，新增可选 Form `parse_mode=auto|native|mineru`。

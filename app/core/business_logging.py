@@ -43,6 +43,7 @@ ROLE_LABELS = MappingProxyType({
     "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
     "mineru-cache-upgrade-cli": "MinerU Cache Upgrade CLI",
     "mineru-split-cli": "MinerU Split CLI",
+    "office-pdf-cli": "Office PDF CLI",
     "dataset-evaluation-cli": "Dataset Evaluation CLI",
     "unknown": "未知进程",
 })
@@ -138,6 +139,11 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "office.pdf_started": "开始LibreOffice本地分页转换，尚未提交云任务",
+    "office.pdf_completed": "Office转换PDF及来源回执已发布，尚未完成业务入库",
+    "office.pdf_reused": "复用已核验的Office转换PDF，未重新运行引擎",
+    "office.pdf_failed": "Office转换或来源校验失败，未提交云任务",
+    "office.split_authorized": "管理员已限定Office新增PDF分片预算，原失败批次保持不变",
     "mineru.exception_frame": "MinerU内部异常调用位置（不含异常原文或局部变量）",
     "dataset_evaluation.started": "开始固定全量数据导入或检索评测",
     "dataset_evaluation.finished": "固定全量评测步骤结束，未完成项保留在报告",

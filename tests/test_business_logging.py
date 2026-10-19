@@ -53,6 +53,18 @@ def records(stream):
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
+def test_office_pdf_events_only_log_safe_summary_with_registered_role(events):
+    """转换CLI角色集中注册，过程/费用许可日志不暴露配置、路径、凭据和引擎输出。"""
+    assert logs.ROLE_LABELS["office-pdf-cli"] == "Office PDF CLI"
+    for event in ("office.pdf_started", "office.pdf_completed", "office.pdf_reused",
+                  "office.pdf_failed", "office.split_authorized"):
+        logs.log_event(event, doc_id=uuid4(), page_count=382, file_count=3, limit_count=3,
+            error_code="OFFICE_PDF_BUDGET", executable="PRIVATE_PATH", profile="PRIVATE_PROFILE",
+            stdout="PRIVATE_BODY", token="PRIVATE_TOKEN", url="PRIVATE_SIGNED_URL")
+    assert "PRIVATE" not in events.getvalue()
+    assert all(item["page_count"] == 382 and item["limit_count"] == 3 for item in records(events))
+
+
 def test_agent_workflow_fields_only_accept_registered_safe_scalars(events):
     """新增Agent观测字段仅允许UUID/固定枚举/有界步数/有限耗时，不开放任意请求内容。"""
     run_id = uuid4()

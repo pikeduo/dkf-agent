@@ -48,7 +48,7 @@ def cloud(tmp_path, monkeypatch):
     def validate(source):
         """只验证占位字节身份；不把Mock样本送进PyMuPDF。"""
         assert split.file_digest(source.path) == source.file_hash
-        return 200 if source.name == "part-0001.pdf" else 57
+        return 180 if source.name == "part-0001.pdf" else 77
 
     def handler(request):
         """模拟真实POST/PUT/异步GET/CDN GET协议，验证对象存储不接收凭据。"""
@@ -113,20 +113,32 @@ def run(cloud, *, max_files=2, timeout=30):
         clock=cloud.clock, wait=cloud.wait)
 
 
+def test_dry_run_minimum_file_budget_uses_180_pages(monkeypatch, tmp_path, capsys):
+    """181页预览至少两片，不再按200页低估新增文件数；不创建客户端或真实PDF。"""
+    from scripts import mineru_pdf_split_acceptance as cli
+
+    monkeypatch.setattr(cli, "inspect_source", lambda *args: (tmp_path / "unused.pdf", "a" * 64, 181))
+    monkeypatch.setattr(cli, "execute", lambda *args, **kwargs: pytest.fail("dry-run不得执行云验收"))
+    assert cli.main(["--pdf", "unused.pdf", "--output", str(tmp_path / "unused")]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "DRY_RUN" and report["minimum_submissions"] == 2
+    assert not (tmp_path / "unused").exists()
+
+
 def test_two_parts_submit_poll_download_and_preserve_exact_archives(cloud):
-    """200+57连续页段分别上传/等待done/下载ZIP；报告不将云ZIP成功冒充业务READY。"""
+    """180+77连续页段分别上传/等待done/下载ZIP；云ZIP成功不冒充业务READY。"""
     report = run(cloud)
     assert report["status"] == "CLOUD_ZIP_PASS"
     assert report["adapter_status"] == "NOT_RUN" and not report["business_parse_success"]
     assert report["business_database_modified"] is False
-    assert [(p["page_start"], p["page_end"]) for p in report["parts"]] == [(1, 200), (201, 257)]
+    assert [(p["page_start"], p["page_end"]) for p in report["parts"]] == [(1, 180), (181, 257)]
     assert report["planned_submissions"] == report["confirmed_submissions"] == report["submission_attempts"] == 2
     assert [p["batch_id"] for p in report["parts"]] == ["batch-1", "batch-2"]
     assert cloud.state.queries == {"batch-1": 3, "batch-2": 3}
     assert sum(method == "POST" for method, _, _ in cloud.state.calls) == 2
     assert sum(method == "PUT" for method, _, _ in cloud.state.calls) == 2
     assert cloud.state.downloads == 2
-    assert [call for call in cloud.state.reserves if call[0] == "submit"] == [("submit", 1, 200), ("submit", 1, 57)]
+    assert [call for call in cloud.state.reserves if call[0] == "submit"] == [("submit", 1, 180), ("submit", 1, 77)]
     from pathlib import Path
     for row in report["parts"]:
         archive = Path(row["zip_path"])

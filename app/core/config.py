@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     mineru_job_timeout_seconds: int = Field(default=7200, ge=60, le=86400)
     mineru_max_retries: int = Field(default=5, ge=0, le=20)
     mineru_result_max_mb: int = Field(default=256, ge=1, le=512)
+    # 由用户安装LibreOffice；仅CPU任务转换，原件不覆盖，不调用Microsoft Office。
+    libreoffice_executable: Path = Path("C:/Program Files/LibreOffice/program/soffice.com")
+    office_pdf_timeout_seconds: int = Field(default=600, ge=30, le=3600)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

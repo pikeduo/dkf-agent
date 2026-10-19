@@ -12,7 +12,7 @@
 - 工作簿的官方`customXml`关系可指向已有包根`customXml/`部件；不再错误要求该元数据也在`xl/`目录内。例外不适用于图片/Chart，不读取外链、不放行缺件、包外路径或URI片段。预检失败的真实错误码优先保存在理由列表，管理/阶段33不会将`XLSX_HYBRID_ENABLED`信息标记误作终止原因。
 - PNG/JPEG 解码前限制尺寸/字节；微小或所有像素完全相同的纯色图过滤。黑白扫描不等于纯色；不会自动断言任意 logo/页眉无知识语义。精确字节 Hash 相同的图片共用一页，结果回插多个 Anchor。
 - 基础 bar/line/pie/doughnut/area Chart 优先提取标题、系列、类别和值引用以及本地原值。公式不计算，不使用缓存值替代原式。组合图、趋势/误差等需要视觉语义时仅提交前转 Whole，不做 GUI 截图。常见样式元数据原样结构化保留，不计算公式缓存值。仅 Chart/过滤图且零视觉页时无需 Token、零云调用。
-- 单源文档/单代次最多一个 Visual Bundle 文件任务；每唯一图片一页，无 OCR 标记。页数/候选数/字节/像素上限配置化；超限 FAILED，不用 Whole 绕过本地资源预算，不生成超限云任务。平台频控、Token、直连、官方 API 路径不改。
+- 单源文档/单代次最多一个Visual Bundle，每唯一图片一页。新Bundle页数取`min(配置,180)`；仅触达180页能力边界时可在提交前转Whole→LibreOffice→分页，尚无云Job/POST，不产生先Bundle再Whole收费。更小的配置预算、字节/像素/候选数超限仍拒绝，不用Whole绕过。旧200页manifest按原policy恢复，不重切已收费Bundle；频控/Token/直连/API不变。
 
 ## 检查点与合并
 
@@ -22,7 +22,7 @@
 
 申请只包含一个 PDF；POST/PUT/GET 沿用检查点，有限重试同 batch，不确定申请不盲重发、不追加 Whole。活动 `/mineru` 恢复同一 Hybrid Job。收费失败无缓存仅 `/reparse?force=true` 可新代次；普通重投不额外收费。
 
-Whole 回退仅发生在尚无云 Job/POST 的本地预检阶段，且原件仍通过平台格式/大小/共享预算限制。同代次最多一个云文件，不会先 Bundle 再 Whole。`_xlsx_primary` 保存 Native 结果 Hash/源 Hash/结构摘要；完成时恢复同样的整 Sheet 表格和原式，随后附 Whole 云块原序。云块的转换逻辑页/章节保留，不伪造原 Sheet/Anchor；来源重复文本不做语义去重，失败不单独提交 Native。
+Whole回退仅发生在尚无云Job/POST的本地预检阶段。新Whole经LibreOffice生成PDF、按180页规划，可能有多片/新增文件费用；不先提交Bundle再追加Whole。`_xlsx_primary`仍冻结Native原式/结果Hash，完成时保留整Sheet原式再附云块，转换逻辑页不冒充Sheet/Anchor，失败不单独提交Native。转换PDF数值不替代原式，不抓外链；见[Office分页](MINERU_CLOUD.md#libreoffice-office分页与显式恢复)。
 
 Bundle 缺失可在真实业务恢复时根据冻结配置重建，但必须源 Hash、Native Hash、manifest 和 Bundle Hash 一致，否则安全失败；原件变化、升级导致恢复差异不绕过检查。未加入新迁移或 Outbox。
 

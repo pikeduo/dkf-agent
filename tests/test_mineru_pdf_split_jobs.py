@@ -107,8 +107,8 @@ def context(tmp_path, monkeypatch):
         trace_id=None, upload_complete=False, submission_attempted=False, submission_started_at=None,
         upload_url=None, upload_expires_at=None, submitted_at=None, created_at=datetime.now(UTC),
         is_active=True, state="waiting-file", retry_count=0, error_code=None, error_message=None, finished_at=None,
-        parse_options=jobs.parse_options(settings) | {"_pdf_split_request": {"policy": split.policy(), "page_count": 257},
-            "_cache_recipe": recipe(document, settings, "mineru_whole", pdf_split_policy=split.policy()),
+        parse_options=jobs.parse_options(settings) | {"_pdf_split_request": {"policy": split.policy(max_pages=200), "page_count": 257},
+            "_cache_recipe": recipe(document, settings, "mineru_whole", pdf_split_policy=split.policy(max_pages=200)),
             "_cache_guard": decision.model_dump(mode="json")})
     session, provider = SessionStub(document, job), ProviderStub()
 
@@ -131,7 +131,7 @@ def context(tmp_path, monkeypatch):
             parts.append(split.PDFPart(ordinal=ordinal, page_start=start, page_end=end,
                 file_hash=digest, size_bytes=len(content), task_id=identity, data_id=f"dkf-{identity.hex}"))
         return split.SplitManifest(doc_id=doc.doc_id, file_hash=doc.file_hash, page_count=257,
-                                   policy=split.policy(), parts=parts)
+                                   policy=split.policy(max_pages=200), parts=parts)
 
     def validate(source):
         """只核对占位片字节 Hash，不声称这些占位是合法 PDF。"""
@@ -546,10 +546,10 @@ def test_explicit_retry_can_resume_never_submitted_next_piece(context, code):
 
 
 @pytest.mark.parametrize("kind,pages,byte_size,needs_split", [("pdf", 257, 100, True), ("pdf", 217, 100, True),
-    ("pdf", 382, 100, True), ("pdf", 200, 100, False), ("pdf", 1, split.MAX_BYTES + 1, True),
-    ("doc", None, 100, False), ("docx", None, 100, False), ("pptx", None, 100, False)])
-def test_create_job_defers_only_oversized_pdf_to_worker(context, monkeypatch, kind, pages, byte_size, needs_split):
-    """仅云PDF超页数/大小登记需求；普通PDF/Office仍原校验，API内不拆文件。"""
+    ("pdf", 382, 100, True), ("pdf", 180, 100, False), ("pdf", 181, 100, True), ("pdf", 200, 100, True),
+    ("pdf", 1, split.MAX_BYTES + 1, True), ("doc", None, 100, True), ("docx", None, 100, True), ("pptx", None, 100, True)])
+def test_create_job_defers_180_page_pdf_and_all_whole_office_to_worker(context, monkeypatch, kind, pages, byte_size, needs_split):
+    """所有Whole Office登记转换需求，PDF在181页进入分片；API只存请求不执行转换。"""
     c = context
     document = deepcopy(c.document)
     document.file_type, document.file_name, document.status = kind, f"unchanged.{kind}", "UPLOADED"
@@ -610,10 +610,16 @@ def test_create_job_defers_only_oversized_pdf_to_worker(context, monkeypatch, ki
     monkeypatch.setattr(jobs, "validate_local_file", validate)
     monkeypatch.setattr(jobs, "lock_keys", lock_keys)
     monkeypatch.setattr(jobs, "claim_miss", claim)
+    from app.services.mineru import office_pdf
+    identity = {"version": office_pdf.VERSION, "source_hash": document.file_hash, "file_type": kind,
+                "engine_sha256": "a" * 64, "profile_sha256": office_pdf.digest(office_pdf.PROFILE)}
+    monkeypatch.setattr(office_pdf, "conversion_request", lambda *args: {
+        "identity": identity, "key": "b" * 64, "executable": "C:/unused/soffice.com", "timeout_seconds": 600})
     session = CreateSession()
     job = jobs.create_job(session, document, c.settings)
     assert ("_pdf_split_request" in job.parse_options) is needs_split
     assert ("pdf_split" in job.parse_options["_cache_recipe"]) is needs_split
+    assert ("_office_pdf_request" in job.parse_options) is (kind != "pdf")
     assert len(calls) == (0 if needs_split else 1)
     assert len(session.added) == 1 and session.added[0].doc_id == document.doc_id
     assert "_pdf_split" not in job.parse_options  # API阶段不执行真实分片。

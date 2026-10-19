@@ -27,7 +27,7 @@ NATIVE_VERSION = "native-v1"
 HASH = re.compile(r"^[0-9a-f]{64}$")
 ARTIFACTS = frozenset({"normalized_document.json", "raw/mineru_result.zip",
     "content_list.json", "full.md", "hybrid/bundle_manifest.json",
-    "hybrid/visual_bundle.pdf", "hybrid/normalized_visual_blocks.json", "pdf_split/manifest.json"})
+    "hybrid/visual_bundle.pdf", "hybrid/normalized_visual_blocks.json", "pdf_split/manifest.json", "office_pdf/receipt.json"})
 OPTION_NAMES = ("model_version", "language", "is_ocr", "enable_table", "enable_formula")
 
 
@@ -77,8 +77,9 @@ def cloud_options(settings: Settings) -> dict:
 
 
 def recipe(document, settings: Settings, strategy: str, *, scope: str = "complete",
-           manifest=None, pdf_split_policy=None, office_snapshot_version: str | None = None) -> dict:
-    """冻结原件/模型/策略；保存快照仅增加显式版本键，其他历史身份保持不变。"""
+           manifest=None, pdf_split_policy=None, office_snapshot_version: str | None = None,
+           office_pdf=None) -> dict:
+    """冻结原件/模型/转换配方；新增键仅作用于新转换任务，旧缓存身份保持不变。"""
 
     if strategy not in {"native", "mineru_whole", "hybrid_bundle"} or scope not in {"complete", "explicit_native_scope"}:
         raise CacheError()
@@ -102,10 +103,18 @@ def recipe(document, settings: Settings, strategy: str, *, scope: str = "complet
             raise CacheError("CACHE_CONFIG_CHANGED")
         value["office_snapshot_version"] = office_snapshot_version
     if pdf_split_policy is not None:
-        from app.services.mineru.pdf_split import policy
-        if document.file_type != "pdf" or strategy != "mineru_whole" or pdf_split_policy != policy():
+        from app.services.mineru.pdf_split import valid_policy
+        if ((document.file_type != "pdf" and office_pdf is None)
+                or strategy != "mineru_whole" or not valid_policy(pdf_split_policy)):
             raise CacheError("CACHE_CONFIG_CHANGED")
         value["pdf_split"] = pdf_split_policy
+    if office_pdf is not None:
+        from app.services.mineru.office_pdf import valid_identity
+        if (not valid_identity(office_pdf) or office_pdf["source_hash"] != document.file_hash
+                or office_pdf["file_type"] != document.file_type or strategy != "mineru_whole"
+                or pdf_split_policy is None):
+            raise CacheError("CACHE_CONFIG_CHANGED")
+        value["office_pdf"] = office_pdf
     if strategy == "hybrid_bundle":
         if manifest is None:
             raise CacheError()
@@ -354,7 +363,7 @@ class ParseCache:
             raise CacheError() from None
 
     def replay(self, document, settings: Settings) -> ParsedDocument:
-        """回放冻结代次及快照质量策略；旧配方不补键，不解析原件或发起云请求。"""
+        """回放冻结代次及Office转换身份，不重新启动引擎、解析原件或发起云请求。"""
 
         pointer = self.path(str(document.doc_id), "latest.json")
         if not pointer.exists():
@@ -364,6 +373,7 @@ class ParseCache:
             current = recipe(document, settings, record.recipe["route_strategy"],
                              scope=record.recipe["coverage_scope"],
                              pdf_split_policy=record.recipe.get("pdf_split"),
+                             office_pdf=record.recipe.get("office_pdf"),
                              office_snapshot_version=record.recipe.get("office_snapshot_version"),
                              manifest=None) if record.recipe["route_strategy"] != "hybrid_bundle" else None
             if current is None:

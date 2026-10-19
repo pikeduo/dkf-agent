@@ -18,8 +18,9 @@ def lock_keys(session, keys: list[str]) -> None:
         session.execute(select(func.pg_advisory_xact_lock(number)))
 
 
-def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_reparse: bool):
-    """miss 检查完整及分片提交历史；当前片尚未提交不抹去前片费用保护。"""
+def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_reparse: bool,
+               authorized_office_source=None):
+    """保留所有收费保护；仅排除已复核并显式授权的单个失败Office源Job，不泛化为Force。"""
 
     from app.services.mineru.pdf_split_jobs import has_submission_history
 
@@ -35,10 +36,10 @@ def claim_miss(session, document, value: dict, visual_keys: list[str], *, force_
         log_event("cache.busy", doc_id=document.doc_id, cache_key=key, error_code="CACHE_IN_PROGRESS")
         raise MinerUError("CACHE_IN_PROGRESS", "相同内容已有活动云任务，未重复提交；完成后重试即可复用缓存")
     # 同代次已有 batch/申请意图包括失败或 done 后本地结果缺失，普通重试不重复花费。
-    if not force_reparse and any(has_submission_history(job) for job in previous):
+    if not force_reparse and any(has_submission_history(job) and job.job_id != authorized_office_source for job in previous):
         raise MinerUError("CACHE_REPARSE_REQUIRED", "相同内容已有云提交历史；请先用原Job的本地ZIP恢复，未自动上传或重新收费")
     legacy = session.scalars(select(DocumentParseJob).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.file_hash == document.file_hash,
         DocumentParseJob.provider == "mineru_cloud")).all()
-    if not force_reparse and any(has_submission_history(job) for job in legacy):
+    if not force_reparse and any(has_submission_history(job) and job.job_id != authorized_office_source for job in legacy):
         raise MinerUError("CACHE_REPARSE_REQUIRED", "该文档已有付费结果历史；请恢复原Job的本地ZIP，不应因Adapter错误强制重解析")

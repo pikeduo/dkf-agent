@@ -80,7 +80,7 @@ def create_job(
     hybrid_context: dict | None = None,
     force_reparse: bool = False,
 ) -> DocumentParseJob:
-    """先查版本隔离缓存，保存快照冻结PARTIAL范围；恢复沿用原批次，不重复提交。"""
+    """新Office冻结LibreOffice转换请求，新PDF采用180页；旧活动Job/缓存不改收费身份。"""
 
     document = session.scalar(
         select(Document)
@@ -173,16 +173,25 @@ def create_job(
             signals=guard_inspection.signals)
         options = options | {"_cache_guard": guard_decision.model_dump(mode="json")}
     manifest = BundleManifest.model_validate(hybrid_context["manifest"]) if hybrid_context else None
-    split_policy = None
+    split_policy, office_request = None, None
     if document.file_type == "pdf" and hybrid_context is None:
-        from app.services.mineru.pdf_split import MAX_BYTES, MAX_PAGES, policy
+        from app.services.mineru.pdf_split import MAX_BYTES, TARGET_PAGES, policy
         page_count = guard_decision.signals.page_count
-        if page_count and (page_count > MAX_PAGES or source_path(document).stat().st_size > MAX_BYTES):
+        if page_count and (page_count > TARGET_PAGES or source_path(document).stat().st_size > MAX_BYTES):
             split_policy = policy()
             options = options | {"_pdf_split_request": {"policy": split_policy, "page_count": page_count}}
             identity = hashlib.sha256(canonical(parse_options(settings) | {"pdf_split": split_policy})).hexdigest()
+    if document.file_type in {"doc", "docx", "xls", "xlsx", "ppt", "pptx"} and hybrid_context is None:
+        from app.services.mineru.office_pdf import conversion_request
+        from app.services.mineru.pdf_split import policy
+        office_request, split_policy = conversion_request(document, settings), policy()
+        options = options | {"_office_pdf_request": office_request,
+                             "_pdf_split_request": {"policy": split_policy, "page_count": None}}
+        identity = hashlib.sha256(canonical(parse_options(settings) | {
+            "pdf_split": split_policy, "office_pdf": office_request["identity"]})).hexdigest()
     cache_recipe = recipe(document, settings, "hybrid_bundle" if hybrid_context else "mineru_whole",
                           manifest=manifest, pdf_split_policy=split_policy,
+                          office_pdf=office_request["identity"] if office_request else None,
                           office_snapshot_version=(OFFICE_SNAPSHOT_VERSION if hybrid_context is None
                               and guard_decision.signals.office_snapshot_rel_count else None))
     cache_key = key_for(cache_recipe)
@@ -193,11 +202,29 @@ def create_job(
     try:
         cached = None if force_reparse else ParseCache(settings).document(document, cache_recipe)
         if cached is not None and hybrid_context is None:
+            if office_request:
+                from app.services.mineru.office_pdf import bound_decision, validate_receipt
+                try:
+                    receipt = json.loads(ParseCache(settings).load(cache_recipe)[1]["office_pdf/receipt.json"])
+                except (KeyError, TypeError, ValueError):
+                    raise CacheError() from None
+                validate_receipt(receipt, office_request["identity"])
+                guard_decision = bound_decision(guard_decision, receipt)
+                options = options | {"_office_pdf": receipt, "_cache_guard": guard_decision.model_dump(mode="json")}
+                if "_route_decision" in options:
+                    options = options | {"_route_decision": guard_decision.model_dump(mode="json")}
             guard_cached(cached, guard_decision)
     except CacheError as exc:
         raise internal_failure(exc, exc.code, str(exc)) from None
     if cached is None:
-        claim_miss(session, document, cache_recipe, visual_keys, force_reparse=force_reparse)
+        from app.services.mineru.office_recovery import checked_authorization
+        permission = checked_authorization(session, document, settings) if office_request else None
+        if permission:
+            options = options | {"_office_pdf_recovery": permission}
+            claim_miss(session, document, cache_recipe, visual_keys, force_reparse=False,
+                       authorized_office_source=UUID(permission["source_job_id"]))
+        else:
+            claim_miss(session, document, cache_recipe, visual_keys, force_reparse=force_reparse)
     options = options | {"_cache_key": cache_key, "_cache_recipe": cache_recipe,
                          "_cache_visual_keys": visual_keys, "_force_reparse": force_reparse}
     job_id = uuid4()
@@ -369,8 +396,8 @@ def check_normalizer_recipe(job: DocumentParseJob) -> None:
             job.parse_options = job.parse_options | {"_adapter_recipe": frozen | {
                 "content_policy_version": CONTENT_POLICY_VERSION}}
     if "_pdf_split_request" in job.parse_options:
-        from app.services.mineru.pdf_split import policy
-        if job.parse_options["_pdf_split_request"].get("policy") != policy():
+        from app.services.mineru.pdf_split import valid_policy
+        if not valid_policy(job.parse_options["_pdf_split_request"].get("policy")):
             raise MinerUError("PDF_SPLIT_CHECKPOINT", "PDF 分片生成器版本已变化，未重新提交")
 
 
@@ -622,8 +649,8 @@ def adapt_raw_result(session, document, job, settings, archive, raw_result, sour
             archive,
             doc_id=document.doc_id,
             file_name=document.file_name,
-            file_type="pdf" if "_hybrid" in job.parse_options else document.file_type,
-            geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options else document.file_type),
+            file_type="pdf" if "_hybrid" in job.parse_options or "_pdf_split" in job.parse_options else document.file_type,
+            geometry=page_geometry(source.path, "pdf" if "_hybrid" in job.parse_options or "_pdf_split" in job.parse_options else document.file_type),
             identity=adapter_identity,
             allow_empty_part="_pdf_split" in job.parse_options or "_hybrid" in job.parse_options,
         )

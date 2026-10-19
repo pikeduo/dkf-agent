@@ -56,9 +56,9 @@
 - PDF 使用真实物理页码，不能用逻辑页替代已知物理页。
 - 超限PDF走MinerU时，片内`page_idx+1`仅为中间页；全片成功后转为`原页起点+局部页-1`，以原doc_id/文件名整体持久化。原件Hash/QA不改，后续Chunk/Evidence仍只消费原物理页；片缓存/恢复见[MinerU分片](MINERU_CLOUD.md#超限-pdf连续分片)。
 - 单张图片使用第 1 页。
-- Native TXT/MD/CSV/DOCX/XLSX 使用逻辑页 1，Sheet 名放 section，不能以工作表序号冒充打印页码。六种 Office 云结果保留 MinerU 转换后的 `page_idx + 1`，是云端逻辑页，不是原始 Office 排版页。后续 Evidence 必须区分页码语义。
+- Native TXT/MD/CSV/DOCX/XLSX 使用逻辑页1，Sheet名放section。旧直传Office保留云转换逻辑页；新Whole Office先经LibreOffice冻结PDF，再按`片起始页+局部页-1`恢复转换逻辑页，不是原Office物理页或Sheet序号。来源指针含`office-pdf/<PDF Hash>/part/...`，原件/派生PDF/分片Hash独立保留，不能用PDF Hash替换原件身份。
 - `bbox` 为 `null` 或四个有限数值组成的数组 `[x0, y0, x1, y1]`，左上角到右下角，要求 `x1 >= x0`、`y1 >= y0`。
-- Native PDF 使用未旋转页面点数坐标；MinerU PDF 使用对应实际渲染视口的点数坐标，图片使用像素。Native TXT/MD/CSV/DOCX/XLSX 及全部云端 Office 无可靠原件坐标映射，bbox 为 `null`。Office 不套用 PDF geometry，即便云端返回归一化 bbox 也不伪造原件尺寸。
+- Native PDF使用未旋转页面点数；MinerU PDF用实际渲染视口点数，图片用像素。Office派生片内部按真实PDF geometry核对，最终映回Office统一清空bbox，不伪造原件尺寸。Native非分页文档、旧直传Office同样bbox=NULL。
 
 ### 标识、序列化与后续入库
 
@@ -146,6 +146,8 @@ data/parsed/
 每个文件有 Hash，先写不可变完整代次，再原子发布 READY/指针；不 extractall、不存签名链接。Markdown 不成为正文替代。ZIP/manifest 是首次云结果的来源归档，跨文档命中时不冒充新的云返回；标准化文档重绑新 doc_id/文件名/稳定 Block ID。Reindex 使用本文档冻结代次，不被其他文档或 Force 发布的新 READY 改换 ID。
 
 Office保存快照仅在受影响的配方增加`office_snapshot_version=office-saved-snapshot-v1`。图表更新源/图片包内副本/工作簿外部引用经预检确认后，Guard明确`PARTIAL / EXTERNAL_SOURCE_UNVERIFIED`；缓存命中及Reindex必须保留该质量，不能将旧COMPLETE结果静默套用新范围。无此分支的旧配方不追加键，Native主结果Hash和旧Job冻结语义不变。不会为缓存miss自动重新提交已有收费Job。
+
+新Whole Office增加`office_pdf`转换identity及180页策略，保存`office_pdf/receipt.json`；实际PDF共享保存在`.office-pdf`，不重复装入每份成功缓存。配方绑定原件Hash/格式、引擎与安全profile摘要，不能命中旧直传缓存；旧成功Reindex按原配方回放，不运行LibreOffice。转换PDF成功不代表Parse Cache/业务成功，Hash/来源损坏不自动重新转换或付费。旧200页PDF缓存/片键保留冻结策略。
 
 新上传/首次无收费历史的 miss 仍正常解析；损坏缓存明确失败，不当成 miss。已有收费历史而缓存缺失/不确定，普通重投为 CACHE_REPARSE_REQUIRED，仅显式 Force Reparse 允许新调用。相同内容/缺失视觉对象由 PostgreSQL advisory 事务锁 + Job 私有摘要保护，活动 owner 为 CACHE_IN_PROGRESS，不并行重复付费；无自动续租/补投。
 

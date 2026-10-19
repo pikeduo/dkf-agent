@@ -13,7 +13,7 @@ class CompletenessError(ParserError):
 
 
 def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
-    """保留身份/范围硬校验；缺页或外部更新快照明确PARTIAL，不冒充完整内容。"""
+    """保留身份/范围校验；Office仅凭已冻结PDF摘要扩展逻辑页范围，缺页仍明确PARTIAL。"""
 
     if parsed.file_type != decision.file_type:
         raise CompletenessError("解析结果格式与路由决策不一致")
@@ -61,8 +61,20 @@ def guard_result(parsed: ParsedDocument, decision: RouteDecision) -> None:
             raise CompletenessError("MinerU 结果来源不一致")
         if decision.file_type in {"jpg", "jpeg", "png"} and pages != {1}:
             raise CompletenessError("图片解析只能使用第 1 页")
-        if decision.file_type in OFFICE_TYPES and any(page > 200 for page in pages):
-            raise CompletenessError("Office 转换后逻辑页超出平台范围")
+        if decision.file_type in OFFICE_TYPES:
+            limit = signals.page_count if signals.office_pdf_sha256 else 200
+            if limit is None or any(page > limit for page in pages):
+                raise CompletenessError("Office 转换后逻辑页超出已冻结范围")
+            if signals.office_pdf_sha256:
+                required = {page.page for page in signals.pages if page.required}
+                if not required.issubset(pages):
+                    if parsed.quality is None:
+                        raise CompletenessError("Office转换PDF缺少要求覆盖的页面")
+                    parsed.quality.content, parsed.quality.missing_pages = "PARTIAL", sorted(required - pages)
+                    if "MISSING_REQUIRED_PAGES" not in parsed.quality.warnings and len(parsed.quality.warnings) < 128:
+                        parsed.quality.warnings.append("MISSING_REQUIRED_PAGES")
+                if parsed.quality is not None:
+                    parsed.quality.covered_pages, parsed.quality.required_pages = sorted(pages), sorted(required)
     else:
         raise CompletenessError("尚未允许的路由结果不能写入最终 Block")
     if signals.office_snapshot_rel_count:

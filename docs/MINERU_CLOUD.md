@@ -4,7 +4,57 @@
 
 当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 默认自动路由与内部 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
 
-已确认的固定英文200页超限消息现归为PAGE_COUNT_LIMIT，本地安全错误-60006；响应即使没有数字码也可明确识别，分类不冒称上游返回了数字码。Office限制针对云转换后的页数，不能以XLSX Sheet/PPTX Slide数猜测。原远端failed仍终态，不自动新POST或把Office套入PDF分片；三份已确认失败的恢复尚需另行授权可追溯转换/分片及新云费用，详见[阶段33](STAGE33_EVALUATION.md)。不再反复GET同一失败Batch当作修复。
+已确认的固定英文200页超限消息现归为PAGE_COUNT_LIMIT，本地安全错误-60006；分类不冒称响应包含数字码。新Whole Office已编写LibreOffice转换PDF/180页分片，仍待人工测试与真实恢复；旧远端failed保持终态，不自动新POST，恢复须另给新片费用预算。不能以Sheet/Slide数猜页数，也不反复GET同一失败Batch当作修复。
+
+## LibreOffice Office分页与显式恢复
+
+适用于新Whole DOC/DOCX/XLS/XLSX/PPT/PPTX，复用原Provider、限流、短任务、分片账本和完整事务，不新增Python转换依赖或Microsoft Office COM。安装/配置见[README](../README.md#libreofficeoffice云解析前的本地分页)。Native完整覆盖时不转云；图片单页；新Hybrid Bundle最多180页，超此已知能力缺口仅在尚未提交前转Whole分页，不以Whole绕过更小的资源预算。
+
+- API只冻结请求，CPU首次转换。原件只读副本、独立profile、固定安全配置Hash；禁宏/活动OLE/DDE/外链更新/强制重算，应用Token/DB环境不继承。`--headless`不是操作系统级网络隔离，不保证字体/公式显示/布局保真；须用受限账户处理不可信文档。启动器/soffice.bin/版本描述Hash不是全系统字体或动态库指纹。
+- 共享 `.office-pdf/<配方Hash>/` 保存不可变PDF/receipt及工作目录；身份绑定原件Hash/格式、引擎Hash、安全配置Hash。冻结后用实际PDF字节/Hash/页摘要，缺失/变化停止，不自动重新渲染。应备份完整PARSED_DIR（含隐藏目录）；失败目录保留，不自动删除。超时只尝试停止本次PID树，不按名称结束其他LibreOffice。
+- 新PDF计划以180页为目标，字节超限继续二分，全片实际Hash/连续覆盖/几何验证后才首POST；原200页计划及缓存键仍按冻结策略恢复。Office原件Hash不换成PDF Hash；PDF/片Hash独立保存，逐片结果按PDF校验后映射为Office逻辑页、bbox=NULL。来源指针含派生PDF Hash，XLSX Native原式保留。
+- Guard使用已冻结转换PDF的真实页范围；缺required页仍PARTIAL，禁止虚构原Office物理页或坐标。`OFFICE_PDF_RENDER_NOT_VERIFIED`只说明渲染保真尚未人工评估，不是已发现缺文，也不据此伪造缺页。READY仍不代表Office排版/语义已证明无损。
+- 普通Retry优先原ZIP/成功片，不能因为新增转换配方重投原Whole。仅管理员正数`office_pdf_max_new_parts`接受同Hash、已上传且明确远端失败的Whole Office；有原ZIP、未知提交、活动任务或已分片任务拒绝。新本地代次保留原Job/Batch，最多N片，实际片数超N在首POST前报OFFICE_PDF_BUDGET。该参数与`allow_new_split_parts`互斥，不是Force；其他收费历史仍阻止提交。
+- 新转换Job尚无任何提交时，准备失败可普通Retry续同Job；已授权预算保留、不扩额。只在尚未提交时可显式调整预算。已有片提交后，不再用此参数创建另一个转换任务；按原账本/ZIP及旧片续交许可处理。非预算类安全错误不可用扩额解决。
+- 安装/路径/转换错误分别保留`OFFICE_PDF_DEPENDENCY/PATH/IDENTITY/CHANGED/TIMEOUT/FAILED/INVALID/BUDGET`，管理cause可见安全码，原始进程输出/私有路径/上游原文不进日志。没有新迁移；不得将代码完成当作三份已恢复。
+
+### 用户执行：测试、本地预览、单份恢复
+
+以下全由用户执行；Codex未运行。先运行纯Mock定向回归（不安装软件也不启动真实转换器，不访问云/GPU/业务数据库）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_office_pdf.py tests/test_office_pdf_recovery.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_pdf_cloud_acceptance.py tests/test_office_saved_snapshot.py tests/test_parse_cache.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+```
+
+安装并核对LibreOffice后，先只处理第一份PPTX，`--prepare`允许本地转换/生成预览片，**没有MinerU请求、业务SQL写入、GPU或恢复POST**：
+
+```powershell
+$officeDocId = '8a3496d6-dd9e-40bd-be60-70b4b701002a'
+$officePlanFile = "results/office_pdf_plan_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
+# 去掉--prepare为dry-run，只检查元数据和本地依赖。
+python scripts/office_pdf_plan.py --doc-id $officeDocId --prepare --output $officePlanFile
+if ($LASTEXITCODE -ne 0) { throw '本地转换/分页未通过，禁止提交云任务' }
+$officePlan = Get-Content $officePlanFile -Raw -Encoding UTF8 | ConvertFrom-Json
+$officePlan | Select-Object status,page_count,target_pages,planned_max_new_files,cloud_submitted,database_modified
+$officePlan.parts | Format-Table ordinal,page_start,page_end,size_bytes -AutoSize
+Invoke-Item -LiteralPath $officePlan.converted_pdf_path
+```
+
+应为`LOCAL_PLAN_READY`、所有页连续覆盖且每片≤180页、flags为false。人工核对PDF字体/页尾/表格/图表；预览的PDF一旦有有效回执，正式Job复用同字节，不重复转换。预览会占用磁盘并保存含正文的派生PDF，报告路径只在本机，不上传公开。缺安装/格式/预检预算/超时先修对应原因；不绕过Hash/必要预检。
+
+**只有确认PDF内容、实际片数、全部新片外传和费用后**，等待队列任务安全结束，用户手动重启API/CPU（Windows solo并发1）加载代码；GPU沿原部署，用于后续真实Embedding。下面是授权收费的单份命令，不是离线测试：
+
+```powershell
+$officeBudget = [int]$officePlan.planned_max_new_files
+if ($officePlan.status -ne 'LOCAL_PLAN_READY' -or $officeBudget -lt 1 -or $officeBudget -gt 128) { throw '先完成单份本地预览' }
+$officeBase = "http://127.0.0.1:8000/api/admin/documents/$officeDocId"
+Invoke-RestMethod -Method Post -Uri "$officeBase/retry?office_pdf_max_new_parts=$officeBudget" -TimeoutSec 120 -ErrorAction Stop
+# 受理不是完成；随后只GET，不重复POST或批量重试。
+Invoke-RestMethod -Uri "$officeBase/status" -ErrorAction Stop | ConvertTo-Json -Depth 8
+```
+
+先验收单份实际Block/Chunk/向量持久化、`chunk_count=vector_count>0`、`invalid_vector_count=0`且management.done；质量为PARTIAL时只能PARTIAL_READY，不改状态凑READY。单份通过后再依次对`81f211b8-330f-4015-9ad7-b3d377a7392b`、`c8e4ca42-f739-48c4-9c2d-50120f956309`重复预览/人工核对/单份预算确认，不能直接复制第一份预算或批量重投。保留旧失败Batch及新片费用凭证。
 
 ## v4基础提取与质量分层
 
@@ -374,7 +424,7 @@ python -c $mineruZipCheck
 
 **离线转换成功不复活原 FAILED Document/Job，不发布 Parse Cache，也不触发 Chunk/Embedding/Index。** 当前没有旧 ZIP 回填或终态批次重放接口；不得修改 SQL 状态假装成功，不通过 Force Reparse 偷换成新收费批次。先反馈以上验证结果，再单独确认只使用原 batch/原文件身份的显式恢复方案。真实云接口的后续复验仍由用户授权并手动执行，本次旧 ZIP 检查不是新 API 调用验收。
 
-### 阶段 11A：Office 格式与页面语义
+### 阶段 11A：历史直传Office格式与页面语义
 
 - [官方批量上传文档](https://mineru.net/apiManage/docs)的 file.name 支持 DOC/DOCX/PPT/PPTX/XLS/XLSX，复用原 POST→PUT→GET 流程；不发送 CSV/TXT/MD。
 - 申请前与上传共用 OOXML/OLE 内容校验，继续检查大小、Hash 和安全标识。现代 Office 校验对应主部件，旧格式用 olefile 检查 CFB 与对应主流；这不是旧 Office 正文 Native 解析。
@@ -639,8 +689,8 @@ Windows句柄修复及首片文本/表格恢复已保留，用户已确认首片
 
 ### 范围、身份和限制
 
-- Router依旧决定Native/Whole/Hybrid；仅最终需要MinerU的PDF超过200页或200 MB时进入分片。分片保守取十进制200,000,000字节，不放宽Provider原边界。完整Native不拆，普通云PDF与Office/图片流程不变。原上传上限默认200MiB（MAX_UPLOAD_SIZE_MB=200）；沿用项目1024²计量，和云端分片限制分别校验，不能借分片绕过上传/预检限制。
-- Worker先为全部原页规划连续闭区间，优先尝试200页；实际生成文件大于200MB时有界二分缩小，每片最多10次尝试。接受前核对实际字节和SHA256，生成器保留原裁剪框/旋转/视口；任何单页仍超限均在第一个云POST之前停止。当前安全上限128片，原Router页数上限仍默认1000、可配置至2000；超限明确失败，不丢页。
+- Router依旧决定Native/Whole/Hybrid；新云PDF超过180页或200 MB时进入分片，新Whole Office先经LibreOffice转换后进入同一机制，见上节。分片保守取十进制200,000,000字节，完整Native不拆、图片单页；上传/必要预检预算不变。
+- Worker先规划全部连续页区间，新计划优先180页，旧200页账本冻结；实际文件大于200MB则有界二分缩小，每片最多10次尝试。接受前核对字节/SHA256和裁剪框/旋转/视口；单页仍超限在首POST前停止。最多128片，原Router页数预算不放宽，超限不丢页。
 - 原件只读，Document.doc_id/file_hash/file_name和官方QA完全不变；无子Document、无新表/迁移/环境变量。一个父Parse Job用现有JSONB的`_pdf_split_request`、`_pdf_split`保存版本/原Hash/总页数/每片原页范围、Hash、字节、状态和收费身份。
 - 每片有稳定的data_id和逻辑task_id；后者不是Celery消息ID。父Job/task_id仍是当前原文档解析代次，父行batch_id/data_id/upload_complete表示**当前片**，历史片必须查账本，不把父Job行数当费用。
 - 文件位于`PARSED_DIR/<doc_id>/pdf_split/<job_id>/part-0001.pdf`，并有manifest.json和同片结果指针。JSONB是收费状态真相，磁盘manifest仅为不含URL/正文的可核对副本；写副本失败记录安全事件，不据副本重建收费身份。仅允许服务自有目录，拒绝链接/越界，不覆盖不匹配的旧片。备份需包含整个PARSED_DIR及数据库。
@@ -673,7 +723,7 @@ conda activate dkf-agent
 python scripts/mineru_pdf_split_acceptance.py --pdf data/uploads/ead578f3-b18d-44c9-befb-ebf24fd9b5f0.pdf --output results/mineru_split_cloud_01 --max-files 2
 ```
 
-预期`DRY_RUN`、257页、原Hash=`9c5de2227534c4d6bf3d805f635bad5d82eddf8e4183a85a3d1311b48b50291d`、最少2个云文件任务。实际按原文件生成200页和57页，每片还要通过实际字节/Hash/几何校验。本次是**全新2个文件、通常2个Batch**，不是复用已有首片Batch；旧首片可能已收费，本次会额外计费，未知提交/超时也不保证未收费。只有用户确认本原件外传、全部两片费用后才执行下一命令；Codex不自行发起：
+预期`DRY_RUN`、257页、原Hash=`9c5de2227534c4d6bf3d805f635bad5d82eddf8e4183a85a3d1311b48b50291d`、最少2个云文件任务。新计划生成180页和77页，旧已冻结200+57计划不变；每片仍须实际字节/Hash/几何校验。本次是**全新2个文件、通常2个Batch**，不是复用已有首片Batch；旧首片可能已收费，本次会额外计费，未知提交/超时也不保证未收费。只有用户确认本原件外传、全部两片费用后才执行下一命令；Codex不自行发起：
 
 ```powershell
 python scripts/mineru_pdf_split_acceptance.py --pdf data/uploads/ead578f3-b18d-44c9-befb-ebf24fd9b5f0.pdf --output results/mineru_split_cloud_01 --max-files 2 --execute --allow-cloud --timeout 7200 --poll-interval 15
@@ -683,7 +733,7 @@ $result.parts | Format-Table ordinal,page_start,page_end,batch_id,upload_status,
 $result.parts | Select-Object ordinal,zip_path,zip_sha256 | Format-List
 ```
 
-预期`CLOUD_ZIP_PASS`、两片`uploaded/done/validated`，分别1～200/201～257页；报告给出ZIP绝对路径、SHA256、大小和结构条目数。`adapter_status=NOT_RUN`、业务库未修改、`business_parse_success=false`是本轮正确边界，不是失败；不能据此宣称Adapter/READY通过。报告每次请求前后更新，按片只POST一次，正常状态GET有界轮询；CLI允许等待，不改变Celery短任务/countdown机制。
+预期`CLOUD_ZIP_PASS`、两片`uploaded/done/validated`，新计划分别1～180/181～257页；报告给出ZIP绝对路径、SHA256、大小和结构条目数。`adapter_status=NOT_RUN`、业务库未修改、`business_parse_success=false`是本轮正确边界，不是失败；不能据此宣称Adapter/READY通过。报告每次请求前后更新，按片只POST一次，正常状态GET有界轮询；CLI允许等待，不改变Celery短任务/countdown机制。
 
 失败返回非零退出码和`INCOMPLETE`，保留已取得的原ZIP/Batch。`JOB_TIMEOUT`只代表本地停止等待，`SUBMIT_UNCERTAIN`可能已收费；**先查报告和MinerU平台，不换目录盲目重跑、不Force Reparse、不改旧SQL状态**。下载/CRC/结构错误单独记入`zip_status/error_code`；第一片转换问题不会阻挡该隔离入口取第二片ZIP，因为本入口完全不调用Adapter。生产主链路依旧严格：Adapter失败则整份失败，不以ZIP成功冒充解析成功。
 

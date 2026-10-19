@@ -71,9 +71,20 @@ def sync_current(document, job, settings, *, error_code=None) -> None:
 
 
 def ensure_plan(session, document, job, settings) -> None:
-    """整份缓存 miss 后才物化计划；任何分片超限/损坏均在首次 POST 之前失败。"""
+    """Office先验证转换PDF再物化180页计划；原件和旧账本不改，首次POST前完成全部检查。"""
     if "_pdf_split" not in job.parse_options:
-        manifest = prepare_manifest(document, job, settings, source_path(document))
+        source = source_path(document)
+        if "_office_pdf_request" in job.parse_options:
+            from app.services.mineru.office_pdf import ensure_conversion, bound_decision
+            source, receipt = ensure_conversion(document, job.parse_options["_office_pdf_request"], settings)
+            decision = RouteDecision.model_validate(job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"])
+            decision = bound_decision(decision, receipt)
+            job.parse_options = job.parse_options | {"_office_pdf": receipt,
+                "_cache_guard": decision.model_dump(mode="json"), "_pdf_split_request":
+                job.parse_options["_pdf_split_request"] | {"page_count": decision.signals.page_count}}
+            if "_route_decision" in job.parse_options:
+                job.parse_options = job.parse_options | {"_route_decision": decision.model_dump(mode="json")}
+        manifest = prepare_manifest(document, job, settings, source)
         activate_part(job, manifest.parts[0])
         save_manifest(job, manifest, settings)
         session.commit()
@@ -81,6 +92,10 @@ def ensure_plan(session, document, job, settings) -> None:
                   file_count=len(manifest.parts), page_count=manifest.page_count)
     else:
         manifest = checked_manifest(document, job)
+        permission = job.parse_options.get("_office_pdf_recovery")
+        if permission is not None and len(manifest.parts) > permission["max_new_parts"]:
+            # 本地计划已物化但还没提交时，调低预算也不能沿旧计划超额送云。
+            raise MinerUError("OFFICE_PDF_BUDGET", "冻结分片数超过本次显式费用预算，未提交新片")
         part = current_part(manifest)
         if part is not None and (part.data_id != job.data_id or part.batch_id != job.batch_id
                 or part.submission_attempted != job.submission_attempted
@@ -89,7 +104,7 @@ def ensure_plan(session, document, job, settings) -> None:
 
 
 def source_for_part(document, job, settings) -> LocalFile:
-    """每次上传/回收前校验当前分片文件大小与 Hash；缺片不悄悄创建新收费输入。"""
+    """每次上传/回收复核原件、Office转换PDF和当前片；缺片不悄悄重渲染或重收费。"""
     manifest = checked_manifest(document, job)
     part = current_part(manifest)
     if part is None or part.data_id != job.data_id:
@@ -98,6 +113,9 @@ def source_for_part(document, job, settings) -> LocalFile:
     path = part_path(cache, document.doc_id, job.job_id, part.ordinal)
     try:
         check_source_hash(document, source_path(document))
+        if "_office_pdf" in job.parse_options:
+            from app.services.mineru.office_pdf import checked_conversion
+            checked_conversion(document, job.parse_options["_office_pdf"], settings)
         if path.stat().st_size != part.size_bytes or file_digest(path) != part.file_hash:
             raise MinerUError("PDF_SPLIT_CHANGED", "PDF 分片 Hash 或实际大小不一致")
     except OSError:
@@ -157,12 +175,15 @@ def complete_cached_piece(session, document, job, settings):
 
 
 def validate_piece(document, job, part, parsed) -> None:
-    """平移真实原页要求；无可靠文字片仅保存PARTIAL，整份仍须有可索引的可靠块。"""
+    """在PDF输入坐标系核对分片，Office的快照/逻辑页约束只在最终映射后应用。"""
     decision = RouteDecision.model_validate(job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"])
     pages = tuple(page.model_copy(update={"page": page.page - part.page_start + 1})
                   for page in decision.signals.pages if part.page_start <= page.page <= part.page_end)
     local = decision.model_copy(update={"signals": decision.signals.model_copy(update={
         "page_count": part.page_end - part.page_start + 1, "pages": pages})})
+    if "_office_pdf" in job.parse_options:
+        local = local.model_copy(update={"file_type": "pdf", "signals": local.signals.model_copy(update={
+            "office_snapshot_rel_count": 0, "office_pdf_sha256": None})})
     if (not parsed.blocks and parsed.file_type == "pdf" and parsed.quality is not None
             and parsed.quality.content == "PARTIAL"
             and (parsed.quarantined_content or parsed.quality.visual_only_count)):
@@ -250,12 +271,15 @@ def authorize_split_continuation(document, job, settings):
 
 
 def finalize_split(session, document, job, settings, manifest):
-    """核对原件、全片输入/结果与完整 Guard 后一次落库；仍由原 Index 流程决定 READY。"""
+    """核对原件/全片/转换来源后整体落库；Office逻辑页、XLSX原式和既有质量均保留。"""
     from app.services.mineru.jobs import finish_job
 
     cache = ParseCache(settings)
     try:
         check_source_hash(document, source_path(document))
+        if "_office_pdf" in job.parse_options:
+            from app.services.mineru.office_pdf import checked_conversion
+            checked_conversion(document, job.parse_options["_office_pdf"], settings)
     except (OSError, ParserError):
         raise MinerUError("FILE_HASH", "PDF 原件无法校验或 Hash 已变化，未发布完整结果") from None
     results = []
@@ -270,14 +294,30 @@ def finalize_split(session, document, job, settings, manifest):
         validate_piece(document, job, part, parsed)
         results.append(parsed)
     merged = merge_parts(document, manifest, results)
+    if "_office_pdf" in job.parse_options:
+        from app.schemas.parsed_document import ParseQuality
+        receipt = job.parse_options["_office_pdf"]
+        merged.quality = merged.quality or ParseQuality(base_block_count=len(merged.blocks))
+        if "OFFICE_PDF_RENDER_NOT_VERIFIED" not in merged.quality.warnings and len(merged.quality.warnings) < 128:
+            merged.quality.warnings.append("OFFICE_PDF_RENDER_NOT_VERIFIED")
+        for block in merged.blocks:
+            if block.provenance:
+                block.provenance.pointer = f"office-pdf/{receipt['pdf_sha256']}/" + block.provenance.pointer
     try:
         guard_result(merged, RouteDecision.model_validate(
             job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"]))
     except CompletenessError:
         raise MinerUError("COMPLETENESS", "PDF 完整原页覆盖不符，未写入部分 Block") from None
+    if "_xlsx_primary" in job.parse_options:
+        from app.services.xlsx_primary import complete_primary
+        merged = complete_primary(document, job.parse_options["_xlsx_primary"], merged,
+            RouteDecision.model_validate(job.parse_options.get("_route_decision") or job.parse_options["_cache_guard"]))
     save_manifest(job, manifest, settings)
+    files = {"pdf_split/manifest.json": canonical(manifest.model_dump(mode="json"))}
+    if "_office_pdf" in job.parse_options:
+        files["office_pdf/receipt.json"] = canonical(job.parse_options["_office_pdf"])
     cache.save_document(document, job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"], merged,
-                        {"pdf_split/manifest.json": canonical(manifest.model_dump(mode="json"))}, job_id=job.job_id)
+                        files, job_id=job.job_id)
     finish_job(session, document, job, merged)
     session.commit()
     log_event("mineru.blocks_persisted", doc_id=document.doc_id, job_id=job.job_id,

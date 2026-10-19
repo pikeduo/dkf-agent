@@ -32,6 +32,7 @@ REASON_CODES = frozenset(
         "HYBRID_UNSUPPORTED_IMAGE_FORMAT",
         "HYBRID_UNSUPPORTED_DRAWING",
         "HYBRID_UNSUPPORTED_SHEET",
+        "HYBRID_UNSUPPORTED_BUNDLE_PAGING",
         "HYBRID_EXTERNAL_ASSET_MISSING",
         "HYBRID_INVALID_PACKAGE",
         "HYBRID_INVALID_IMAGE",
@@ -104,6 +105,8 @@ class StructuralSignals(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     page_count: int | None = Field(default=None, ge=1)
+    # 仅本地LibreOffice已冻结的PDF可使用该摘要，页码仍是转换逻辑页。
+    office_pdf_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     sheet_count: int = Field(default=0, ge=0)
     nonempty_sheet_count: int = Field(default=0, ge=0)
     formula_count: int = Field(default=0, ge=0)
@@ -124,6 +127,8 @@ class StructuralSignals(BaseModel):
         value = handler(self)
         if not self.office_snapshot_rel_count:
             value.pop("office_snapshot_rel_count", None)
+        if self.office_pdf_sha256 is None:
+            value.pop("office_pdf_sha256", None)
         return value
 
     @model_validator(mode="after")

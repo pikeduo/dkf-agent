@@ -22,11 +22,12 @@ from app.services.parse_cache import ParseCache, CacheError, cloud_options, visu
 
 
 def policy_from_settings(settings: Settings) -> HybridPolicy:
-    """冻结本代次保护阈值；Bundle 大小同时服从应用与供应商上限。"""
+    """新Bundle不超过180页；原manifest恢复仍读自己的冻结policy，不热改旧输入。"""
+    from app.core.file_formats import MINERU_SAFE_PAGE_COUNT
 
     return HybridPolicy(
         max_candidates=settings.hybrid_max_candidates,
-        max_pages=settings.hybrid_max_bundle_pages,
+        max_pages=min(settings.hybrid_max_bundle_pages, MINERU_SAFE_PAGE_COUNT),
         min_side=settings.hybrid_min_image_side,
         max_pixels=settings.hybrid_max_image_pixels,
         max_image_bytes=settings.hybrid_max_image_mb * 1024**2,

@@ -16,7 +16,7 @@ from app.services.indexing import prepare_index, publish_index
 from app.services.chunk.splitter import ChunkError
 from app.services.embedding.service import EmbeddingError
 from app.services.indexing import IndexingError
-from app.services.mineru.errors import LOCAL_ADAPTER_ERROR_CODES
+from app.services.mineru.errors import LOCAL_ADAPTER_ERROR_CODES, OFFICE_PDF_ERROR_CODES, PDF_SPLIT_ERROR_CODES
 
 ERRORS = {
     "MANAGEMENT_BUSY": "文档仍有活动任务，请先查询状态；未覆盖现有代次",
@@ -27,6 +27,8 @@ ERRORS = {
     "MANAGEMENT_TIMEOUT": "管理编排等待已超时；未取消后台任务，请查询状态后恢复",
     "DELETE_PATH": "待删除文件路径或所有权无法安全确认，未越界清理",
     "DELETE_STORAGE": "文件清理未完成，文档保留删除检查点，请恢复删除任务",
+    "OFFICE_PDF_RECOVERY": "Office新分片许可只适用于同Hash的已上传远端失败整份Job，未执行Force或新提交",
+    "OFFICE_PDF_RAW_AVAILABLE": "已有可恢复原ZIP，请先本地重放，未授权新Office分片收费",
 }
 STAGES = {"parse", "cloud", "chunk", "embed", "index", "delete", "done"}
 PUBLISHERS = {"chunk": publish_chunk, "embed": publish_embedding, "index": publish_index}
@@ -91,7 +93,8 @@ def safe_cause_code(code):
                                  or api_error(code).code == code):
         return code
     return code if isinstance(code, str) and code in (
-        CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES | LOCAL_ADAPTER_ERROR_CODES) else None
+        CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES | LOCAL_ADAPTER_ERROR_CODES
+        | OFFICE_PDF_ERROR_CODES | PDF_SPLIT_ERROR_CODES) else None
 
 
 def exception_cause(exc):
@@ -124,11 +127,22 @@ def active_job(session, document):
 
 
 def retry_cloud_job(session, document, settings, *, allow_new_split_parts=False):
-    """恢复原ZIP及旧UNKNOWN离线检查点；新片费用仍须管理员单独授权。"""
+    """恢复原ZIP或从未提交的Office准备Job；已收费新片仍按原冻结账本和许可恢复。"""
     from app.services.mineru.jobs import renew_local_wait
     from app.services.mineru.errors import MinerUError
     from app.services.mineru.pdf_split_jobs import resumable_split, sync_current
     job = active_job(session, document)
+    if (job is None and document.status == "FAILED" and not allow_new_split_parts
+            and getattr(document, "file_type", None) in {"doc", "docx", "xls", "xlsx", "ppt", "pptx"}):
+        from app.services.mineru.office_recovery import unsubmitted_job
+        pending = unsubmitted_job(session, document)
+        if pending is not None:
+            renew_local_wait(pending, settings)
+            pending.is_active, pending.state, pending.finished_at = True, "waiting-file", None
+            pending.error_code = pending.error_message = document.error_message = None
+            document.status = "PARSING"
+            sync_current(document, pending, settings)
+            return pending
     if job is None and document.status == "FAILED":
         # 旧Worker把本地编程异常写成UNKNOWN；仅显式离线检查点可进入原ZIP核验，不泛化云重试。
         legacy_local = ((DocumentParseJob.error_code == "UNKNOWN") &
@@ -334,8 +348,12 @@ def publish_ingestion(session, doc_id: UUID, manager_id: UUID) -> None:
 
 
 def prepare_management(session, document, settings, operation: str, *, parse_mode="auto",
-                       allow_new_split_parts=False) -> tuple[UUID, bool]:
-    """行锁内维护原代次；只有Retry显式许可才允许继续尚未提交的PDF片，不覆盖原Batch。"""
+                       allow_new_split_parts=False, office_pdf_max_new_parts=0) -> tuple[UUID, bool]:
+    """行锁内维护代次；新增Office输入须显式费用上限，普通Retry不继承Force或重投旧Batch。"""
+    if office_pdf_max_new_parts:
+        if operation != "retry" or allow_new_split_parts:
+            raise ManagementError("OFFICE_PDF_RECOVERY")
+        return prepare_office_recovery(session, document, settings, office_pdf_max_new_parts)
     if allow_new_split_parts and operation != "retry":
         raise ManagementError("MANAGEMENT_STATE")
     previous = config_for(document)
@@ -409,8 +427,56 @@ def prepare_management(session, document, settings, operation: str, *, parse_mod
         "expires_at": (datetime.now(UTC) + timedelta(seconds=max(600, settings.mineru_job_timeout_seconds))).isoformat()}
     if operation == "delete":
         config["cleanup_roots"] = roots
+    if (operation == "retry" and previous and previous.get("office_pdf_recovery")
+            and previous["source_parse_task_id"] == str(document.processing_task_id)):
+        # 首个CPU阶段因安装缺失等原因失败时保留同一许可；不得扩额或改成Force。
+        config["office_pdf_recovery"] = previous["office_pdf_recovery"]
     document.management_task_id, document.management_config = uuid4(), config
     session.flush()
+    return document.management_task_id, True
+
+
+def prepare_office_recovery(session, document, settings, maximum):
+    """显式创建Office转换代次或仅调整尚未提交的新片预算；原远端失败Job/Batch保持不变。"""
+    from app.services.mineru.office_recovery import source_permission, unsubmitted_job
+
+    require_idle(session, document)
+    if document.status != "FAILED" or any(getattr(document, field) is not None for field in (
+            "chunk_task_id", "embedding_task_id", "index_task_id")):
+        raise ManagementError("OFFICE_PDF_RECOVERY")
+    pending = unsubmitted_job(session, document)
+    if pending is None:
+        source = session.scalar(select(DocumentParseJob).where(DocumentParseJob.doc_id == document.doc_id,
+            DocumentParseJob.task_id == document.processing_task_id).with_for_update())
+    else:
+        try:
+            source_id = UUID(pending.parse_options["_office_pdf_recovery"]["source_job_id"])
+        except (KeyError, TypeError, ValueError):
+            # 普通新上传任务不能借预算调整入口变成已有失败Whole的授权。
+            raise ManagementError("OFFICE_PDF_RECOVERY") from None
+        source = session.get(DocumentParseJob, source_id)
+    permission = source_permission(document, source, settings, maximum)
+    if pending is None:
+        document.processing_task_id, document.status, document.error_message = uuid4(), "UPLOADED", None
+        stage, stage_id = "parse", None
+    else:
+        pending.parse_options = pending.parse_options | {"_office_pdf_recovery": permission}
+        pending.is_active, pending.state, pending.finished_at = True, "waiting-file", None
+        pending.error_code = pending.error_message = document.error_message = None
+        document.status, stage, stage_id = "PARSING", "cloud", str(pending.job_id)
+        from app.services.mineru.jobs import renew_local_wait
+        from app.services.mineru.pdf_split_jobs import sync_current
+        renew_local_wait(pending, settings)
+        sync_current(document, pending, settings)
+    document.management_task_id = uuid4()
+    document.management_config = {"version": "document-management-v1", "operation": "retry",
+        "parse_operation": "ingest", "parse_mode": "mineru", "source_parse_task_id": str(document.processing_task_id),
+        "state": "running", "stage": stage, "stage_task_id": stage_id, "dispatched": False, "resume_failed": False,
+        "office_pdf_recovery": permission, "expires_at": (datetime.now(UTC) + timedelta(
+            seconds=max(600, settings.mineru_job_timeout_seconds))).isoformat()}
+    session.flush()
+    log_event("office.split_authorized", doc_id=document.doc_id, job_id=source.job_id,
+              limit_count=maximum, operation="retry")
     return document.management_task_id, True
 
 

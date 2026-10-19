@@ -54,6 +54,8 @@
 
 管理员可另行显式调用`/retry?allow_new_split_parts=true`，确认冻结PDF账本中从未提交的剩余片外传与新增费用。当前已收费片仍本地重放；只有没有Batch/提交意图/上传完成/结果的片可续交，不能重投旧Batch。默认false，普通新一次Retry撤销未使用许可；活动任务409，不运行中换许可。不适用于Whole/Office，也不允许因缺旧ZIP再收费。该可选参数不改变原有不带参数的API行为。
 
+新增独立`/retry?office_pdf_max_new_parts=N`（0～128，默认0）：仅对同Hash、已上传远端失败且无原ZIP的Whole Office，显式授权LibreOffice转换后最多N个新PDF片；与`allow_new_split_parts`互斥、不使用Force。原Job/Batch不改，新转换在CPU运行，实际片数超预算在首POST前拒绝。新Job从未提交时可续本地准备/显式调预算；已有收费片按原账本恢复，不借此再建一轮。正数许可也不豁免Hash/来源/其他收费历史。先执行离线预览核对PDF与片数，再确认单文档费用，步骤见[Office分页与显式恢复](MINERU_CLOUD.md#libreoffice-office分页与显式恢复)。旧片续交开关不用于将历史Whole转换为新任务。
+
 MANAGEMENT_STAGE_FAILED保留原外部错误码；若原文档错误具有合法ROUTER_FAILED前缀，cause_code另保留注册Router原因（如PREFLIGHT_LIMIT），不覆盖原文档错误。历史记录不批量回填；阶段33只读快照也能从原有安全前缀恢复原因。新增PDF预检拒绝事件只记资源限制种类、页和计数，不放宽预检预算。
 
 Chunk/Embedding/Index准备阶段的固定服务异常同样记录`MANAGEMENT_STAGE_FAILED`、真实准备阶段及`cause_code`，不再一律包装为`MANAGEMENT_CHECKPOINT`；真正代次不符仍拒绝。准备失败不会伪造子任务ID或改变原Block/Chunk/向量。日志及Celery安全错误补充阶段/固定原因，原异常内容不外传。尤其`status=EMBEDDING, embedding_task_id=null, management.state=failed`表示GPU准备失败，普通Retry可在修复后接续原Chunk；不需要重走Parser。

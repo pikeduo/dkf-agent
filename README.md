@@ -214,6 +214,30 @@ CPU Worker 应显示 default_queue、manage_document、process_document、chunk_
 
 自动模式默认可能生成 XLSX 的 PDF Bundle，因此 Windows 使用上面的串行 Worker；不要同时保留旧 threads Worker 消费该队列。
 
+### LibreOffice：Office云解析前的本地分页
+
+新的 DOC/DOCX/XLS/XLSX/PPT/PPTX Whole 云任务先通过 LibreOffice 无界面导出 PDF，再以最多 **180 页**一片提交；不使用 Microsoft Office COM。可完整 Native 解析的文件不转换、不增加云费用；XLSX Hybrid 保留其局部增强流程。LibreOffice 是单独安装的软件，不是 `pip` 包，请由用户从[官方下载页](https://www.libreoffice.org/download/)安装 Windows x64 版，保持维护更新，并准备原件使用的合法字体。
+
+`.env` 与示例新增以下配置；非默认安装位置需修改入口，API/CPU Worker共用配置和存储：
+
+```dotenv
+LIBREOFFICE_EXECUTABLE=C:/Program Files/LibreOffice/program/soffice.com
+OFFICE_PDF_TIMEOUT_SECONDS=600
+```
+
+用户安装后检查入口，再等待相关任务安全结束，手动重启API/CPU Worker加载代码与配置：
+
+```powershell
+Test-Path "C:\Program Files\LibreOffice\program\soffice.com"
+& "C:\Program Files\LibreOffice\program\soffice.com" --version
+```
+
+转换使用原件副本、独立profile，禁用宏/活动OLE/DDE、外链更新及主动重算；不会改写保存的原件。但headless不是系统网络沙箱，也不保证与Microsoft Office排版完全一致。不可信文档须使用受限账户/隔离转换环境，生产部署另行验收；字体、图表、分页、隐藏内容及保存公式结果仍需人工核对。XLSX Native原式另外保留，不用PDF数值替代原式。
+
+转换PDF、双端Hash和页摘要保存在共享 `PARSED_DIR/.office-pdf/`，首次有效回执后只读复用，缺失/篡改明确停止、不自动重新渲染。回执没有宣称语义保真；Office结果页码仍是转换逻辑页，bbox为空。成功Parse Cache的Reindex不启动LibreOffice。转换/工作目录需额外磁盘并随整个PARSED_DIR备份，不自动清理。
+
+旧远端失败Whole不会因安装LibreOffice而自动重投。管理员可先用 `python scripts/office_pdf_plan.py --help` 本地预览，检查转换PDF与实际片数，再显式使用 `/retry?office_pdf_max_new_parts=N` 授权最多N个新片的外传/费用；默认0不授权，与旧片续交开关互斥，不使用Force、保留原Job/Batch。具体命令见[Office分页与单文档恢复](docs/MINERU_CLOUD.md#libreoffice-office分页与显式恢复)。
+
 ### 本地 BGE-M3 与 GPU Worker
 
 新上传自动入库需要已部署BGE-M3及GPU Worker；缺失时不能达到READY，修复部署后使用文档级Retry恢复，不需要重传。历史逐阶段入口仅做解析时仍无需模型。向量化使用 [BAAI/bge-m3 官方模型](https://huggingface.co/BAAI/bge-m3) 的 Dense 1024 维输出，文档和 Query 共用 `sentence_transformers.SentenceTransformer`，不是 FlagEmbedding.BGEM3FlagModel；不启用 Sparse/ColBERT。固定 `local_files_only=True`、`trust_remote_code=False`，缺文件报错，Worker 不自动下载或降级 CPU。
@@ -434,7 +458,7 @@ curl.exe --noproxy "*" -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/
 
 Native 文本严格解码 UTF-8、BOM UTF-16/32、GB18030；CSV 支持引号字段、空值，不支持不等宽行。DOCX 提取正文/表格；XLSX 按 Sheet 提取单元格、保留公式不执行，不解析图片/图表。Native Office/文本为逻辑页 1，PDF 为物理页；云 Office 为转换后逻辑页、bbox 为空，不声称原件排版坐标。
 
-MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000字节）。**只有实际走 MinerU 的超限 PDF** 才由 CPU Worker 按连续原页自动分片；每片按生成文件实际字节校验，所有片成功后以原 doc_id/物理页整体入库。Native 可完整解析的 PDF 不拆；Office/图片不套用 PDF 分片。原始上传仍受 `MAX_UPLOAD_SIZE_MB`（默认200，单位MiB）和 Router 资源限制；上传限制与云端分片限制分别校验。分片会增加云文件任务/费用，须先确认整份原件外传及全部分片预算；失败不降级 Native、不盲目补发收费批次。
+MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000字节）。新云PDF超过180页即连续分片；新的Whole Office先经LibreOffice生成可计页PDF，再采用同一180页策略。每片按实际字节/Hash校验，全片完成才以原doc_id整体入库；PDF仍为原物理页，Office为转换逻辑页、bbox=NULL。Native完整可读文件不强制转云，图片天然单页。旧200页收费账本保持冻结，不为预留余量重切/重投。原上传/Router预算不因分片放宽，新增云文件数与费用须确认；失败不盲目补发批次。
 
 分片文件和检查点位于共享 `PARSED_DIR/<doc_id>/pdf_split/<job_id>/`，需额外磁盘空间并随完整缓存备份；Windows CPU Worker 使用 `--pool=solo --concurrency=1`，更新后由用户重启。接口仍只返回原文档，原页码/文件 Hash 不变。恢复、费用核对与验收见 [超限 PDF 分片](docs/MINERU_CLOUD.md#超限-pdf连续分片)。复杂 XLSX 的 Native/云质量仍须单独对照，不能从其他格式推断。
 

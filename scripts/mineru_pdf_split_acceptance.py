@@ -19,7 +19,7 @@ from app.core.business_logging import configure_logging, log_event
 from app.core.config import get_settings
 from app.services.mineru.errors import MinerUError
 from app.services.mineru.jobs import parse_options, result_failure
-from app.services.mineru.pdf_split import file_digest, part_path, policy, prepare_manifest
+from app.services.mineru.pdf_split import TARGET_PAGES, file_digest, part_path, policy, prepare_manifest
 from app.services.mineru.provider import LocalFile, MinerUCloudProvider, validate_local_file
 from app.services.mineru.raw_results import obtain_raw_result
 from app.services.parse_cache import CacheError, ParseCache, atomic_write, canonical
@@ -138,7 +138,7 @@ def execute(path, digest, pages, directory, settings, *, max_files, timeout, pol
 
 
 def main(argv=None):
-    """默认只打印预览；双显式云许可和文件预算才执行，已有输出目录一律拒绝。"""
+    """默认按180页策略预览；双显式云许可和文件预算才执行，已有输出目录一律拒绝。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pdf", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -157,7 +157,7 @@ def main(argv=None):
         path, digest, pages = inspect_source(args.pdf)
         if not args.execute:
             print(json.dumps({"status": "DRY_RUN", "page_count": pages, "file_hash": digest,
-                "minimum_submissions": max(1, math.ceil(pages / 200)), "max_files": args.max_files,
+                "minimum_submissions": max(1, math.ceil(pages / TARGET_PAGES)), "max_files": args.max_files,
                 "note": "仅检查页数和Hash；按实际分片字节数最终确认数量。未生成分片/联网/操作数据库。"},
                 ensure_ascii=False, indent=2))
             return 0

@@ -26,6 +26,8 @@ FileType = Literal[
 FILE_TYPES = frozenset(get_args(FileType))
 OFFICE_TYPES = frozenset({"doc", "docx", "ppt", "pptx", "xls", "xlsx"})
 MINERU_TYPES = OFFICE_TYPES | {"pdf", "jpg", "jpeg", "png"}
+# 新云分页输入预留20页余量；平台硬上限及历史已收费200页账本不改写。
+MINERU_SAFE_PAGE_COUNT = 180
 OOXML_PARTS = {
     "docx": "word/document.xml",
     "pptx": "ppt/presentation.xml",

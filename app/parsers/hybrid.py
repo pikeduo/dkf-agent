@@ -18,6 +18,7 @@ from openpyxl.utils.cell import range_boundaries
 from openpyxl.formula.translate import Translator
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.file_formats import MINERU_SAFE_PAGE_COUNT
 from app.parsers.common import NoTextError, ParserError
 from app.parsers.routing.inspector import xml_part
 from app.parsers.xlsx import XlsxParser
@@ -38,6 +39,7 @@ class HybridPreflightError(ParserError):
         "HYBRID_UNSUPPORTED_CHART", "HYBRID_UNSUPPORTED_IMAGE_TRANSFORM",
         "HYBRID_UNSUPPORTED_IMAGE_FORMAT", "HYBRID_UNSUPPORTED_DRAWING",
         "HYBRID_UNSUPPORTED_SHEET",
+        "HYBRID_UNSUPPORTED_BUNDLE_PAGING",
     })
 
     def __init__(self, code: str = "HYBRID_UNSUPPORTED_STRUCTURE") -> None:
@@ -342,12 +344,12 @@ def sheet_cells(tree, strings: list[str]) -> dict[str, str]:
 
 
 def build_bundle(images: list[bytes], policy: HybridPolicy) -> bytes:
-    """运行时把唯一知识图片整页嵌入一份 PDF，不绘制 OCR 标记，不逐图请求 API。"""
+    """新Bundle超过180页须在提交前转Whole分页；旧冻结policy仍按旧页数恢复。"""
 
     if not images:
         return b""
     if len(images) > policy.max_pages:
-        raise HybridPreflightError("HYBRID_RESOURCE_LIMIT")
+        raise HybridPreflightError("HYBRID_UNSUPPORTED_BUNDLE_PAGING" if policy.max_pages == MINERU_SAFE_PAGE_COUNT else "HYBRID_RESOURCE_LIMIT")
     try:
         with pymupdf.open() as document:
             for content in images:
@@ -365,7 +367,7 @@ def build_bundle(images: list[bytes], policy: HybridPolicy) -> bytes:
 
 def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolicy,
                    visual_lookup: Callable[[str], list[ParsedBlock] | None] | None = None) -> HybridPlan:
-    """读取主结果和候选；过滤后先查精确视觉缓存，仅未命中图片进入一份 Bundle。"""
+    """读取主结果和候选；新Bundle超过180页可在提交前转Whole分页，旧冻结policy不改。"""
 
     try:
         native = XlsxParser().parse(doc_id=doc_id, file_path=path, file_name=file_name, file_type="xlsx")
@@ -515,7 +517,8 @@ def prepare_hybrid(doc_id: UUID, path: Path, file_name: str, policy: HybridPolic
                                 entries.append(entry)
                                 continue
                             if len(images) >= policy.max_pages:
-                                raise HybridPreflightError("HYBRID_RESOURCE_LIMIT")
+                                # 仅平台安全分页缺口可在提交前转Whole；其他资源限制不泛化为回退。
+                                raise HybridPreflightError("HYBRID_UNSUPPORTED_BUNDLE_PAGING" if policy.max_pages == MINERU_SAFE_PAGE_COUNT else "HYBRID_RESOURCE_LIMIT")
                             if sum(len(image) for image in images) + len(content) > policy.max_bundle_bytes:
                                 raise HybridPreflightError("HYBRID_RESOURCE_LIMIT")
                             images.append(content)

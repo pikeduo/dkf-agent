@@ -41,7 +41,9 @@ $sample.items[0].metadata | Select-Object chunker_version
 
 用户已私有导出第一份原Batch的完整固定原因；三份此前78字符的SHA256完全相同，均为超过200页。对应`8a3496d6…`（PPTX）、`81f211b8…`及`c8e4ca42…`（DOCX）。这不是Adapter故障或原件损坏，也不是HTTP查询失败。固定完整短语现映射为本地安全类别PAGE_COUNT_LIMIT及-60006；明确是消息分类，不冒称响应包含数字码，未知长消息仍只留指纹。
 
-不再反复GET相同Batch或要求平台补原因。原远端failed保持终态，普通Retry不能使超页原件通过；没有成功原ZIP可供本地回放。现有生产只支持PDF分片，不能把Office直接套入PDF账本。三份尚未恢复；后续需要明确授权并实现/验收保留原件Hash、转换来源和逻辑页映射的Office转换/分片流程，以及另行确认新增云外传/费用。本轮不转换、不新提交、不Force，也不改冻结200原件/4087QA。
+用户已明确选择LibreOffice，不使用Microsoft Office COM。本轮已编写Whole Office→冻结PDF→最多180页分片、双端Hash/来源/逻辑页、缓存隔离及单文档显式预算入口；旧200页账本/原Job/Batch不变，Native可完整覆盖文件不转云。三份仍未真实恢复，Codex未安装软件、运行转换/测试、提交新云任务或写业务数据，不改冻结200原件/4087QA。
+
+按[Office分页与显式恢复](MINERU_CLOUD.md#libreoffice-office分页与显式恢复)执行：先Mock回归，安装并核对LibreOffice，再对`8a3496d6…`生成本地预览/检查PDF/确认实际新片费用，安全重启后只POST该单份`office_pdf_max_new_parts=N`。真实向量和管理done通过后再依次两份DOCX；不批量重投、不复制第一份预算、不反复GET同一失败Batch或Force。超预算在首POST前失败，无法验证Hash或缺原ZIP不以新收费掩盖。
 
 01:20历史快照仍为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已真实索引但保留原PARTIAL质量。后续082的XML及聚合门槛已越过，最新失败与单文档验证步骤以上节为准；不能把历史XML操作再执行一遍当作修复。
 

@@ -90,7 +90,8 @@ def test_real_257_page_offline_split_is_continuous_and_hash_verified(tmp_path):
             """仅调用本次修复的本地复制/保存函数，不创建Document或Parse Job。"""
             tool.render_range(document, first, last, target)
 
-        parts = tool.build_parts(document.page_count, directory, render)
+        # 此回归冻结旧200页文件字节，默认新计划180页另由纯Mock覆盖。
+        parts = tool.build_parts(document.page_count, directory, render, max_pages=200)
         assert [(p["page_start"], p["page_end"]) for p in parts] == [(1, 200), (201, 257)]
         pages = []
         for part in parts:

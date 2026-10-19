@@ -11,21 +11,31 @@ import pymupdf
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.business_logging import log_event
+from app.core.file_formats import MINERU_SAFE_PAGE_COUNT
 from app.schemas.parsed_document import ParsedBlock, ParsedDocument
 from app.services.mineru.errors import MinerUError
 from app.services.parse_cache import ParseCache, ReadyRecord
 
 VERSION = "pdf-split-v1"
 MAX_PAGES = 200
+# 新计划预留20页余量；历史200页账本仍按原冻结策略恢复，不能重切已收费片。
+TARGET_PAGES = MINERU_SAFE_PAGE_COUNT
 # 保守采用十进制200MB，不把项目其他MB配置的MiB换算误用于平台文件上限。
 MAX_BYTES = 200_000_000
 MAX_PARTS = 128
 
 
-def policy() -> dict:
-    """冻结生成器版本和平台限制，恢复时不悄悄生成另一份收费输入。"""
-    return {"version": VERSION, "max_pages": MAX_PAGES, "max_bytes": MAX_BYTES, "max_parts": MAX_PARTS,
+def policy(*, max_pages=TARGET_PAGES) -> dict:
+    """新计划默认180页；显式200仅用于核对旧账本，不改写其收费输入。"""
+    return {"version": VERSION, "max_pages": max_pages, "max_bytes": MAX_BYTES, "max_parts": MAX_PARTS,
             "generator": pymupdf.VersionBind}
+
+
+def valid_policy(value):
+    """只允许当前180页和历史200页的精确冻结策略，未知参数/生成器变化仍拒绝。"""
+    return (isinstance(value, dict) and type(value.get("max_pages")) is int
+            and value["max_pages"] in {TARGET_PAGES, MAX_PAGES}
+            and value == policy(max_pages=value["max_pages"]))
 
 
 class PDFPart(BaseModel):
@@ -64,11 +74,13 @@ class SplitManifest(BaseModel):
 
     @model_validator(mode="after")
     def continuous(self):
-        """要求从第一页到末页连续无重叠；成功片必须构成前缀且有校验结果指针。"""
+        """按本账本冻结180/200页策略核对连续覆盖；成功片必须为有结果的前缀。"""
+        if not valid_policy(self.policy):
+            raise ValueError("PDF 分片策略不可识别")
         expected, pending, identities = 1, False, set()
         for ordinal, part in enumerate(self.parts, 1):
             if (part.ordinal != ordinal or part.page_start != expected
-                    or not 0 <= part.page_end - part.page_start < MAX_PAGES
+                    or not 0 <= part.page_end - part.page_start < self.policy["max_pages"]
                     or part.state not in {"waiting-file", "pending", "running", "converting", "done", "failed"}
                     or part.data_id in identities):
                 raise ValueError("PDF 分片检查点不连续或身份重复")
@@ -89,7 +101,7 @@ def checked_manifest(document, job) -> SplitManifest:
     try:
         value = SplitManifest.model_validate(job.parse_options["_pdf_split"])
         if (value.doc_id != document.doc_id or value.file_hash != document.file_hash
-                or value.file_hash != job.file_hash or value.policy != policy()):
+                or value.file_hash != job.file_hash or not valid_policy(value.policy)):
             raise ValueError
         for part in value.parts:
             identity = uuid5(job.job_id, f"{VERSION}:{part.ordinal}:{part.page_start}:{part.page_end}:{part.file_hash}")
@@ -162,8 +174,8 @@ def render_range(pdf, first: int, last: int, target: Path) -> None:
 
 
 def build_parts(page_count: int, directory: Path, render, *, max_bytes=MAX_BYTES,
-                max_pages=MAX_PAGES) -> list[dict]:
-    """优先试最大连续段，再有界二分；只按实际文件大小接受，单页超限立即失败。"""
+                max_pages=TARGET_PAGES) -> list[dict]:
+    """新计划优先180页并按实际字节二分；旧账本调用方显式传入冻结200页。"""
     if page_count < 1 or not 1 <= max_pages <= MAX_PAGES or not 0 < max_bytes <= MAX_BYTES:
         raise MinerUError("PDF_SPLIT_LIMIT", "PDF 分片资源限制无效")
     directory.mkdir(parents=True, exist_ok=True)
@@ -213,11 +225,12 @@ def build_parts(page_count: int, directory: Path, render, *, max_bytes=MAX_BYTES
 
 
 def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
-    """缓存miss后只读原件规划全片；MuPDF底层异常安全分类，失败不得开始云提交。"""
+    """按冻结原件或Office转换PDF规划全片，首次POST前核对来源和全部分片费用预算。"""
     cache = ParseCache(settings)
     directory = part_path(cache, document.doc_id, job.job_id, 1).parent
     request = job.parse_options["_pdf_split_request"]
-    if request["policy"] != policy() or file_digest(path) != document.file_hash:
+    expected_hash = job.parse_options.get("_office_pdf", {}).get("pdf_sha256", document.file_hash)
+    if not valid_policy(request["policy"]) or file_digest(path) != expected_hash:
         raise MinerUError("PDF_SPLIT_CHANGED", "PDF 原件或分片生成配置已变化")
     try:
         with pymupdf.open(path) as pdf:
@@ -228,14 +241,17 @@ def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
                 """绑定只读原件供有界分片规划使用，不接触业务数据集。"""
                 render_range(pdf, first, last, target)
 
-            rows = build_parts(pdf.page_count, directory, render)
-        if file_digest(path) != document.file_hash:
+            rows = build_parts(pdf.page_count, directory, render, max_pages=request["policy"]["max_pages"])
+        if file_digest(path) != expected_hash:
             raise MinerUError("FILE_HASH", "PDF 分片过程中原件 Hash 已变化")
+        permission = job.parse_options.get("_office_pdf_recovery")
+        if permission is not None and len(rows) > permission["max_new_parts"]:
+            raise MinerUError("OFFICE_PDF_BUDGET", "实际分片数超过本次显式费用预算，尚未提交任何新片")
         for row in rows:
             identity = uuid5(job.job_id, f"{VERSION}:{row['ordinal']}:{row['page_start']}:{row['page_end']}:{row['file_hash']}")
             row.update(data_id=f"dkf-{identity.hex}", task_id=identity)
         return SplitManifest(doc_id=document.doc_id, file_hash=document.file_hash,
-                             page_count=request["page_count"], policy=policy(), parts=rows)
+                             page_count=request["page_count"], policy=request["policy"], parts=rows)
     except (pymupdf.mupdf.FzErrorBase, OSError, ValueError, RuntimeError) as exc:
         log_event("mineru.split_io_failed", error_code="PDF_SPLIT_IO", error_type=type(exc).__name__,
                   stage="pdf_split.prepare_manifest", step="read_or_plan")
@@ -243,10 +259,10 @@ def prepare_manifest(document, job, settings, path: Path) -> SplitManifest:
 
 
 def piece_recipe(job, part: PDFPart) -> dict:
-    """片缓存不含 doc_id/原页偏移，可复用完全相同的分片；不与整份成功缓存混淆。"""
+    """片缓存绑定实际PDF字节及冻结策略，Office转换片不冒充原Office格式或整份结果。"""
     value = dict(job.parse_options.get("_adapter_recipe") or job.parse_options["_cache_recipe"])
-    value.update(file_hash=part.file_hash, route_strategy="mineru_pdf_part",
-                 pdf_split=policy(), coverage_scope="pdf_part", page_count=part.page_end - part.page_start + 1)
+    value.update(file_hash=part.file_hash, file_type="pdf", route_strategy="mineru_pdf_part",
+                 pdf_split=job.parse_options["_pdf_split"]["policy"], coverage_scope="pdf_part", page_count=part.page_end - part.page_start + 1)
     return value
 
 
@@ -292,7 +308,7 @@ def load_piece(cache: ParseCache, job, part: PDFPart) -> ParsedDocument | None:
 
 
 def merge_parts(document, manifest: SplitManifest, parsed_parts: list[ParsedDocument]) -> ParsedDocument:
-    """仅全片成功才合并：原物理页排序、同页稳定原序，结构块整体保留且 ID 幂等。"""
+    """全片成功才合并；PDF保留物理页，Office只映射转换逻辑页并清空原件不可用坐标。"""
     if len(parsed_parts) != len(manifest.parts) or any(p.state != "done" for p in manifest.parts):
         raise MinerUError("PDF_SPLIT_INCOMPLETE", "PDF 分片尚未全部成功，未写入部分 Block")
     blocks = []
@@ -304,6 +320,8 @@ def merge_parts(document, manifest: SplitManifest, parsed_parts: list[ParsedDocu
             values = block.model_dump()
             values.update(page=part.page_start + block.page - 1,
                           block_id=uuid5(document.doc_id, f"{VERSION}:{manifest.file_hash}:{part.result['key']}:{part.page_start}:{index}:{block.page}:{block.block_type}"))
+            if document.file_type != "pdf":
+                values["bbox"] = None
             if values.get("provenance"):
                 values["provenance"]["pointer"] = f"part/{part.ordinal}/" + values["provenance"]["pointer"]
             blocks.append(ParsedBlock.model_validate(values))
@@ -332,5 +350,5 @@ def merge_parts(document, manifest: SplitManifest, parsed_parts: list[ParsedDocu
             for asset in parsed.quality.visual_assets]
     quarantine = [value | {"part_ordinal": part.ordinal} for part, parsed in zip(manifest.parts, parsed_parts)
                   for value in parsed.quarantined_content]
-    return ParsedDocument(doc_id=document.doc_id, file_name=document.file_name, file_type="pdf",
+    return ParsedDocument(doc_id=document.doc_id, file_name=document.file_name, file_type=document.file_type,
                           title=parsed_parts[0].title, blocks=blocks, quality=quality, quarantined_content=quarantine)

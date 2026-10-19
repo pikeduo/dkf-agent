@@ -272,17 +272,22 @@ def test_snapshot_route_log_only_emits_safe_count(monkeypatch):
 
 @pytest.mark.parametrize("kind", ["docx", "pptx", "xlsx"])
 def test_job_freezes_snapshot_cache_policy_before_any_cloud_submission(monkeypatch, kind):
-    """Mock提交前Job创建，确认保存快照版本和范围同时冻结，不读取真实Office或访问云。"""
+    """Mock提交前冻结保存快照及转换配方，不执行LibreOffice/真实Office或云调用。"""
     from io import BytesIO
     from app.services.mineru import jobs
     from app.services import document_management
 
     settings = Settings(_env_file=None)
+    from app.services.mineru import office_pdf
     document = SimpleNamespace(doc_id=uuid4(), file_name="snapshot." + kind, file_type=kind,
         file_hash=parse_cache.digest(b"only-source-stub"), processing_task_id=uuid4(), status="FAILED")
     inspection = Inspection(signals=StructuralSignals(office_snapshot_rel_count=1),
                             risks=("OFFICE_SAVED_SNAPSHOT",))
     decision = decide_route(kind, "auto", inspection)
+    identity = {"version": office_pdf.VERSION, "source_hash": document.file_hash, "file_type": kind,
+                "engine_sha256": "a" * 64, "profile_sha256": parse_cache.digest(office_pdf.PROFILE)}
+    monkeypatch.setattr(office_pdf, "conversion_request", lambda *args: {
+        "identity": identity, "key": "b" * 64, "executable": "C:/unused/soffice.com", "timeout_seconds": 600})
     session = MagicMock()
     session.scalar.side_effect = [document, None]
     monkeypatch.setattr(jobs, "source_path", lambda doc: SimpleNamespace(

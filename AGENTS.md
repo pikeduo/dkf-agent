@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：01:20用户快照116 READY/80 PARTIAL_READY/4 FAILED。082ebed3的v6已生成5614片，三张HTML表超旧整表预算退为巨片，前5608片编码后触发单片字符EMBEDDING_LIMIT。已编写v7有界HTML行扫描/完整rowspan组切片及GPU前巨片定位；v1～v6冻结，单文档缓存Reindex/测试/GPU待用户，未声称恢复。三份Office云失败的私有原消息已确认转换后超200页，补固定消息分类；现有仅PDF分片，不自动转换/新收费或Force。PARTIAL缺口仍待验收，不进入34，冻结200/4087不改。**
+当前阶段：**33全量导入排错中：01:20快照116 READY/80 PARTIAL_READY/4 FAILED。082ebed3的v7大HTML行扫描修复待用户缓存Reindex/GPU验收，旧配方冻结。用户已选择LibreOffice，已编写Whole Office→冻结PDF→180页分片与单文档显式预算恢复，旧200页账本/失败Batch保留；软件安装、测试、转换、三份新云任务及真实向量入库均未执行。PARTIAL缺口仍待验收，不进入34，冻结200/4087不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -58,7 +58,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 01:20快照116 READY/80 PARTIAL_READY/4 FAILED；082ebed3最新为v6三张巨型HTML片触发EMBEDDING_LIMIT，补v7行扫描与GPU前定位，未运行测试/恢复；三份Office已知超200页但尚无获授权的转换/分片恢复，PARTIAL缺口未解决 |
+| 33 | 01:20快照116 READY/80 PARTIAL_READY/4 FAILED；v7巨表切片及LibreOffice/180页分片代码已编写，三份Office显式预算入口/只读本地预览就绪；未运行测试/转换/云恢复，PARTIAL缺口未解决 |
 | 34 及后续 | 未执行，等待用户确认 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
@@ -155,8 +155,10 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 
 - 仅官方精准解析 API V4，不用轻量 Agent API、本地 MinerU、火山/百度 OCR；HTTP 只在 MinerUCloudProvider，申请链接 → 签名 PUT → 批次 GET。
 - 固定 `trust_env=False` 直连 API/上传/下载，无代理回退、保持 TLS 校验，不绕过 VPN/TUN 或修改系统网络。对象存储不带 API Token、不设上传 Content-Type、不跟随重定向，只接受官方 HTTPS 签名域名。
-- Token 仅本地 `MINERU_API_TOKEN`，SecretStr 遮盖、不自动刷新。校验 Hash、实际格式及大小：平台 200 MB/200 页，应用取更小限制，Office 未知页数由平台检查，不猜 Sheet/Slide 页数。
-- 仅实际云路由的超限PDF可连续分片，Native可完整覆盖则不拆；一个原doc_id/hash，JSONB私有分片账本及PARSED_DIR持久文件。每片按实际字节/页数/Hash校验，单页超限失败；意图/Batch先提交、沿用共享限流，成功片不重复收费。只有全片Guard通过才整体写Block/CHUNKING，原页=`片起始页+局部页-1`；Chunk/Evidence不暴露局部页。非PDF不套用；原件/QA不改，Codex不得自行执行真实分片/收费验收。详见[MinerU分片](docs/MINERU_CLOUD.md#超限-pdf连续分片)。
+- Token仅本地`MINERU_API_TOKEN`，SecretStr遮盖。平台200 MB/200页；新云PDF及Office派生PDF最多180页一片，旧200页收费账本冻结。Office必须先实际转换计页，不以Sheet/Slide数猜页数；旧直传恢复保持原输入。
+- 新Whole Office用已获用户确认的LibreOffice无界面导出，不用Microsoft Office COM；安装/真实转换仍由用户执行。原件副本、独立禁宏/活动内容/外链更新/重算profile、最小继承环境；headless不是网络沙箱，生产隔离与保真待验收。转换PDF/原Hash/引擎Hash/profileHash/页摘要在PARSED_DIR/.office-pdf冻结，缺失/篡改不自动重渲染；成功Reindex不启动引擎。
+- 仅实际云路由文件分页，Native完整可读不转云，图片单页。沿用一个原doc_id/hash和私有分片账本，派生PDF与片Hash独立；全部实际字节/页/Hash/预算验证后才首POST，意图/Batch先提交，成功片不重复收费。全片完成才整体写Block/CHUNKING；PDF物理页/Office转换逻辑页均按起点平移，Office最终bbox=NULL，XLSX保留Native原式。原件/QA不改，Codex不得自行转换/分片/收费验收。详见[Office分页](docs/MINERU_CLOUD.md#libreoffice-office分页与显式恢复)。
+- 旧远端失败Whole Office仅显式`retry?office_pdf_max_new_parts=N`允许同Hash新PDF输入、最多N个新片费用；默认0不授权，与allow_new_split_parts互斥。已有ZIP优先本地，未知提交/活动任务/其他收费历史不绕过，原Job/Batch不改，不使用Force；先单文档预览确认PDF和实际片数。尚未提交的新转换Job可续准备/显式调预算，已有收费片继续原账本保护。新Hybrid Bundle取min(配置,180)，仅180页能力边界可提交前转Whole分页，旧manifest和其他资源预算不改。
 - 保留 Redis Lua 共享原子限流：50 文件/分钟、1000 查询/分钟、5000 文件/天，安全系数 0.9；滚动 24 小时日额度，1000 优先页仅按 UTC 日观测。按文件/查询数计量，同账户共用 Redis/命名空间，Redis 故障关闭云调用。
 - submit/check 为短任务，一次检查后 countdown；禁止 while/sleep 轮询。临时错误有限退避、抖动、尊重 Retry-After，总等待有上限；永久错误立即 FAILED。
 - POST 前保存意图、PUT 前保存 batch，恢复沿用检查点；POST 响应丢失禁止盲目申请。保留活动身份唯一约束、参数快照和代次检查；task_id 是本地代次，不是外部任务或整份 Celery 结果。
@@ -175,7 +177,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - Guard 在写块前检查正文、PDF 非空页、XLSX 有效 Sheet、source、逻辑页与 Office 空 bbox，不改排序/ID、不补文字；结构检测不证明视觉/语义完全正确。
 - PDF覆盖仍独立使用`pdf-coverage-v2`，不因云缺页改变required；装饰证明及冻结比较规则不变。Native缺页仍严格失败；MinerU v4有可靠内容但缺required页时保留缺口并标PARTIAL，不冒充完整。诊断显式覆盖比较仅操作副本，与Normalizer许可独立，不改Job/缓存或投递云任务。详见[覆盖比较](docs/MINERU_CLOUD.md#pdf-页面完整性装饰横线与冻结覆盖比较)。
 - 云交接保持行锁/代次检查、提交后投递；路由拒绝为 Document=FAILED、Celery=FAILURE，固定安全理由可追踪，无新 Block/云调用。交接成功不等于解析成功，查询 Document/Parse Job。
-- 云费用按 doc_id/job_id/batch_id 去重：普通Whole/Bundle计划1，PDF分片计划数以实际物化manifest为准；每个确认Batch的文件计1，片缓存命中计0，不直接累加重复日志。提交不确定不等于未计费，须平台核对。
+- 云费用按doc_id/job_id/batch_id去重：旧直传Whole/Bundle计划1，新PDF/Office派生分片数以实际manifest为准；确认Batch的文件计1，片缓存命中计0，不累加重复日志。提交不确定不等于未计费，须平台核对。
 
 ### XLSX Selective Hybrid
 
