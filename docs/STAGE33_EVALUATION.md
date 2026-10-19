@@ -1,8 +1,75 @@
 # 阶段33：固定200文档与4087条QA的全量检索评测
 
-代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
+## 当前入口：复用已入库200份，完成检索评测
 
-## 11:52单文档大HTML表回退巨片与v7修复（待人工验证）
+用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。以下流程优先于后文历史导入排错步骤：复用原知识库与现有向量，先做全题检索基线，不重传、重解析或重建索引，也不自动清除质量警告。
+
+本轮已编写只读索引快照、显式质量政策、格式/质量分组及漏召回定位。尚未运行pytest、数据库快照查询、GPU检索或生成真实检索分数；测试与评测仍由用户手动执行。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准，真实成绩出来后优先定位召回与重排问题，再推进阶段34。
+
+### 1. 用户执行定向回归
+
+```powershell
+Set-Location "D:\python project\dkf-agent"
+conda activate dkf-agent
+python -m pytest tests/test_stage33_indexed_evaluation.py tests/test_stage33_pipeline.py tests/test_stage33_dataset.py -q -ra
+```
+
+这些用例只使用内存身份及临时评测断点，不读真实原件、不连接数据库/队列、不加载模型、不请求云端。覆盖显式PARTIAL政策、默认严格政策、全部文件及QA分母、索引/质量变化失效、旧检查点保留、只读CLI分派、OCB不可评分及错误类型定位。通过不等于真实检索质量通过。
+
+### 2. 新建评测run并只读观察当前索引
+
+保留原`stage33_run_01`和其导入意图；以下使用新的`stage33_run_02`。若该编号已存在，恢复同一run须增加`--resume`，需要不同索引/参数的新实验则换未使用的编号，不覆盖旧结果。
+
+```powershell
+$kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
+$run = "stage33_run_02"
+python scripts/evaluate_stage33.py --step snapshot --run $run --kb-id $kbId --execute
+if ($LASTEXITCODE -ne 0) { throw "索引快照未通过，先查看本run的summary.md和import_report.csv" }
+```
+
+`snapshot`只读PostgreSQL并写当前run报告，不构造HTTP客户端、不调用MinerU或LLM、不加载BGE、不发恢复任务。固定清单仍为全部200份、4087题；原件Hash/格式/依赖校验仍执行。当前代次、Block、完整向量、管理终态和模型身份仍是评测前置条件，PARTIAL状态须有相应质量记录。成功显示`INDEX_SNAPSHOT_READY`和`索引校验通过=200/200`，这只说明索引观察完成，此时检索指标仍为null。
+
+新文件`index_snapshot.json`保存观测时间、原file_id→实际doc_id、真实质量及索引身份。报告采用该快照，不修改`import_checkpoint.json`或旧Retry/上传意图。`report`只重新汇总已有本地记录，不查询实时状态；要刷新请再次执行`snapshot --resume`。后续显式`import`会使旧观察和评测资格失效，避免旧快照遮盖新导入状态。
+
+### 3. 用户执行全部4087题的四策略本地评测
+
+先确认相关在途任务安全结束，再由用户正常停止同卡GPU Worker及其他推理进程，避免独立CLI重复加载模型挤占显存。保留PostgreSQL和已部署的本地BGE-M3、BGE Reranker及core资源；模型配置须与现有索引一致，不为评测改变已入库身份。不需要MinerU/LLM密钥或云调用许可。
+
+```powershell
+python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed
+```
+
+`--index-policy indexed`显式评测READY与PARTIAL_READY的可靠索引。默认`complete`仍要求全200份READY；这是实验政策区别，不会改变数据库文档状态。四路保持原始问题、同一全库、Dense/BM25各Top20、原RRF的30候选与Top20重排；不把答案、相关文件或官方页作为检索过滤条件。
+
+每题原子断点，原命令可续跑；已成功题不重复Query。存在检索失败的题默认保留，定位后可由用户显式增加`--retry-failed`重跑该题的四路本地检索。索引代次、质量、文件集合、模型或质量政策变化须新run，不混算旧结果。即使全部题复用断点，结束仍核对索引与模型。
+
+BM25实例预算沿用100,000 Chunk、256 MiB原文、32,000,000词项。它是整库预算而非前N截断；超限须按报告中的BM25_LIMIT和可用内存评估参数，最大可选预算见下文。现有BM25每题仍读取当前语料并转换Node，首次建索引、完整证据及大库SQL可能较慢；真实耗时和内存待执行测量，不预先宣称性能通过。
+
+### 4. 查看策略对比、质量分组及问题清单
+
+```powershell
+$dir = "results/stage33/$run"
+Get-Content "$dir/summary.md" -Encoding UTF8
+Import-Csv "$dir/strategy_comparison.csv" -Encoding UTF8 |
+    Format-Table dataset,strategy,total_questions,executed_successfully,recall_at_5,recall_at_10,mrr_at_20,document_recall_at_5 -AutoSize
+Import-Csv "$dir/metrics_breakdown.csv" -Encoding UTF8 |
+    Format-Table dimension,group,strategy,total_questions,recall_at_5,document_recall_at_5 -AutoSize
+Import-Csv "$dir/retrieval_diagnostics.csv" -Encoding UTF8 |
+    Group-Object strategy,category | Sort-Object Count -Descending | Format-Table Name,Count -AutoSize
+```
+
+- `strategy_comparison.csv`：全范围固定分母的四策略对比及耗时。OHR使用官方物理证据页，OCB证据Recall/MRR为null，文档依赖代理指标单列，不能算作答案或断言正确率。
+- `metrics_breakdown.json/csv`：按依赖质量和格式组合分组。READY但历史质量为空单列`READY_WITHOUT_QUALITY_METADATA`；含PARTIAL的题保留在整体分母。跨格式多文档题只进入一个组合组，不重复增大分母。
+- `retrieval_diagnostics.json/csv`：区分空候选、未召回目标文档、召回文档但证据页未命中、晚命中和多页部分召回，另列官方证据页与已记录缺页的交集。它是事后诊断，不代表已证明原件缺文，不自动重投文件；OCB诊断明确标注文档代理口径。
+- `evaluation_setup.json`和`costs_and_timing.json`：模型初始化耗时单列；Hybrid/重排耗时包含上游分支，不能把四列相加作总时间。快速索引检查未观察解析Job历史时费用历史标未知，不把它误报为零收费。
+
+全题、全策略均成功执行且快照有效时，存在PARTIAL会显示`COMPLETED_WITH_QUALITY_LIMITS`并正常退出；完整READY政策通过仍显示`PASS`。两者均不表示每题召回正确或阶段34问答质量通过。未执行题保留null；失败按固定分母保守计零；无效/变化快照使整体及分组正式指标变null，逐题事实仅供诊断。
+
+本阶段真实验收需用户回传`summary.json`、`strategy_comparison.csv`和`retrieval_diagnostics.json`。在没有真实成绩之前，不调整RRF权重、改变切片或宣称某策略优于另一策略。后文保留历史恢复记录与严格READY流程供追溯，不需重新执行导入。
+
+以下为导入与恢复过程的历史记录，当前操作以本页顶部入口为准，不能据此认定仍有未入库文件或再次执行恢复。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样；始终登记全部200份和4087题，仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
+
+## 11:52单文档大HTML表回退巨片与v7修复（历史）
 
 `082ebed3-a4e9-4b61-934b-4025b472192e`的原Job为`410b876c-d66a-4ed3-ae92-e969ffc929d4`、Batch为`17b673c7-d9d1-4d21-8f97-377dfaea2d8c`。日志确认v6已运行，12块/36009492字符生成5614片；其中三张HTML表仍因旧TableHTML整表预算回退为巨片，最终在11:52:40报EMBEDDING_LIMIT，不是旧Worker或MinerU/Adapter失败。
 
@@ -556,16 +623,16 @@ python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id 15
 
 ## 运行前置条件
 
-- 现有PostgreSQL 17/pgvector、Redis、当前数据库迁移已由用户部署；本工具不安装/迁移/启动服务。
-- 独立ACTIVE知识库，仅允许本次200种Hash，不能使用默认库或混入其他文件。评测前必须全部200份READY、Block>0、chunk_count=vector_count>0、无非法向量、模型/代次有效一致。
+- 现有PostgreSQL 17/pgvector和数据库迁移已由用户部署；只读snapshot/evaluate不需要Redis、API或Worker，本工具不安装/迁移/启动服务。
+- 独立ACTIVE知识库，仅允许本次200种Hash，不能使用默认库或混入其他文件。默认complete要求全READY；显式indexed允许READY/PARTIAL_READY，但全部200份均须Block>0、chunk_count=vector_count>0、无非法向量、模型/来源代次有效一致。PARTIAL须保留相应质量记录，不能假作完整解析。
 - 已部署本地BGE-M3和BGE Reranker，Query编码身份须与已入库向量一致。无自动下载、CPU回退或重编码文档。
-- 有效MinerU Token/共享Redis限流；用户确认**全部200份文件**的合法使用、外传权限及所有潜在分片费用。公开下载不等于获得云端外传授权。
-- 8GB显存：导入时仅一个GPU Worker，batch建议用户在新任务建立前评估1～2；既有冻结参数不能直接改配置后期待生效。评测时停止GPU Worker及其他模型进程，避免另载一份BGE。Reranker仍保留完整原文，超模型长度明确失败，不截断表格凑通过。
+- 只有首次导入才需要有效MinerU Token/共享Redis限流、原API/双队列Worker以及用户对全部原件外传和潜在分片费用的确认。公开下载不等于获得云端外传授权；已有索引评测不需要这些云配置。
+- 8GB显存：导入时仅一个GPU Worker，batch建议用户在新任务建立前评估1～2；既有冻结参数不能直接改配置后期待生效。评测前确认相关任务安全结束，再正常停止同卡GPU Worker及其他模型进程，避免重复占用显存。Reranker仍保留完整原文，超模型长度明确失败，不截断表格凑通过。
 - 全量BM25/证据报告需要较多系统内存和磁盘。建议预留至少数GB报告空间及足够缓存/向量磁盘；实际大小和耗时须由真实执行测量，不能给未经测量的完成时间保证。
 
-## 正式操作命令
+## 既有导入及严格READY操作命令
 
-全部命令由用户确认后手动执行。下列两个步骤覆盖**全200份、全4087题**，没有小样本阶段。
+全部命令由用户手动执行。下列流程供新建导入及complete政策参考，覆盖全200份、全4087题；当前已有索引应使用本页顶部新run/snapshot/indexed命令，不重建库或重新导入。
 
 ### 1. 服务及目标库
 
@@ -621,7 +688,7 @@ python scripts/evaluate_stage33.py --step import --run stage33_run_01 --kb-id $k
 
 ### 3. 全4087题、四策略评测
 
-先确认`import_report.csv`中200份均READY。停止GPU Worker/其他推理进程，保留PostgreSQL；评测本身不需要API、CPU Worker、Redis或MinerU。进入独立CLI进程加载本地两模型：
+以下为默认complete的严格示例，须当前只读快照中200份均READY；当前含PARTIAL时使用本页顶部indexed流程。先确认相关队列任务安全结束，再正常停止同卡GPU Worker/其他推理进程，保留PostgreSQL；评测不需要API、CPU Worker、Redis或MinerU。进入独立CLI进程加载本地两模型：
 
 ```powershell
 python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id $kbId --execute --resume
@@ -650,7 +717,8 @@ python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id 
 - **OCB无官方相关Chunk/证据页标签**：expected_assertions及weights不能转换成相关性标签，正式证据Recall/MRR为null、不可评分数499（以实际输入/校验为准），断言保留manual_pending。
 - **另列OHR/OCB文档代理指标**：按官方doc_name/reference_files对应的文件集合计算文档Recall@5/10/MRR@20，OCB多文件依赖保持整组，分母为全部依赖文件，重复Chunk只计一次文件。它仅反映是否找到任务依赖文档，**不是OCB答案证据充分、断言正确或问答准确率**。
 - 四策略分别展示总题目、成功执行、可评分总分母、成功评分、失败、未执行、不可评分、manual_pending及成功条件指标。完整执行后，失败题以0进入固定可评分总分母的保守端到端指标，另给仅成功执行的条件指标供诊断，不用后者掩盖失败。未执行题/未完成范围的正式指标保持null。
-- 总体证据指标只合并具备同口径官方证据的题目（当前主要OHR）；总体文档代理指标单列。不能把不同相关性单位混合后当作官方全量准确率。耗时含原检索/融合/重排各阶段，复用分支不重复运行但组合耗时按组成阶段累加；首次模型/索引冷启动计入记录。
+- 总体证据指标只合并具备同口径官方证据的题目（当前主要OHR）；总体文档代理指标单列。不能把不同相关性单位混合后当作官方全量准确率。模型初始化单列在evaluation_setup.json；各策略耗时包含组成分支，不相加为四次独立执行总耗时，首次BM25构建包含在该题BM25耗时内。
+- 按依赖质量和原件格式组合另列指标，多文档混合格式题只进入一个组合，分母不重复。缺失官方证据页仅作事后诊断，既不删除题目，也不证明其他未命中题必然是解析错误。
 
 ## 产出及查看
 
@@ -660,11 +728,13 @@ python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id 
 |---|---|
 | plan.json / run.json | 全200清单、成本参考、输入Hash及KB绑定 |
 | import_checkpoint.json / import_report.json / import_report.csv | 200份逐文件状态、路线/分片Batch、Block/Chunk/向量、管理错误及恢复意图 |
+| index_snapshot.json | 独立当前索引观察，保留全部200份身份/质量；不覆盖旧导入检查点或恢复意图 |
 | qa_execution.jsonl / qa_execution.csv | 全4087题原字段/断言/依赖、file_id→doc_id、四路状态与评分资格 |
 | retrieval_results.jsonl / retrieval_results.csv | 所有成功检索的Top20原Chunk/Doc/File ID、页/section、原分数及来源；JSONL保留字符来源与Hash，不复制正文 |
 | metrics.json / metrics_ohr.json / metrics_ocb.json / metrics_overall.json / strategy_comparison.csv / summary.json / summary.md | OHR/OCB/整体分母、四路指标和耗时 |
+| metrics_breakdown.json / .csv / retrieval_diagnostics.json / .csv | 格式组合/质量分组、空结果/错文档/错页/低排名等事后定位 |
 | failures_and_unscorable.json / .csv | 失败、未执行、不可评分及待人工审查清单 |
-| costs_and_timing.json / baseline.json / timing.json | 去重文件提交数、开始后新观察提交、缓存命中可观测部分及总步骤耗时 |
+| costs_and_timing.json / baseline.json / timing.json / evaluation_setup.json | 去重历史提交、缓存可观测部分、模型初始化及步骤耗时；未读取费用历史不记作零收费 |
 | cases/ / evaluation_identity.json / evaluation_validity.json | 逐题断点、实际模型/索引身份及快照有效性 |
 
 ```powershell
@@ -686,9 +756,9 @@ python scripts/evaluate_stage33.py --step report --run stage33_run_01 --kb-id $k
 仅编写Mock，用户手动执行；用例不访问真实冻结数据/数据库/模型/云端：
 
 ```powershell
-python -m pytest tests/test_stage33_dataset.py tests/test_stage33_pipeline.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_stage33_indexed_evaluation.py tests/test_stage33_dataset.py tests/test_stage33_pipeline.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_business_logging.py -q -ra
 ```
 
 覆盖固定200/4087、依赖与原字段/页码、全范围分批/断点/提交未知、重复导入、隔离与模型、去重Recall及失败分母、OCB不可评分、报告未执行null、原BM25排序兼容及显式预算拒绝截断。测试尚未运行；真实Worker/分片/缓存/超时、GPU长证据、SQL成本和正式指标待用户验收。
 
-`PASS`仅指全范围文档及四策略执行完毕，并非每题召回成功、解析语义完全正确或RAG通过。阶段34可直接读取本run的qa_execution.jsonl、检索JSONL与file_id/doc_id映射，在独立授权后做答案/断言评测；当前不实现或运行阶段34。
+`PASS`仅指全READY政策下全范围四策略执行完毕；`COMPLETED_WITH_QUALITY_LIMITS`表示含PARTIAL的当前索引评测执行完成。两者均非每题召回成功、解析语义完全正确或RAG通过。先根据真实检索结果优化主要问题，再按后续阶段计划推进34；可复用本run的qa_execution.jsonl、检索JSONL与file_id/doc_id映射，真实付费问答仍单独确认许可和预算。

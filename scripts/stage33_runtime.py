@@ -1,5 +1,6 @@
 """阶段33复用上传/管理API及只读观察；不实现Parser、任务主体或另一套索引。"""
 
+from datetime import UTC, datetime
 from time import monotonic, sleep
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -28,7 +29,7 @@ def cache_route(document):
 
 def read_snapshot(kb_id, *, detailed=True):
     """读取整个独立知识库的短一致快照及统计；不截断200份、不导出向量/私有配置。"""
-    from sqlalchemy import func, or_, select, text
+    from sqlalchemy import String, cast, func, or_, select, text
     from sqlalchemy.orm import Session
     from app.db.seed import DEFAULT_KB_ID
     from app.db.session import get_engine
@@ -55,8 +56,11 @@ def read_snapshot(kb_id, *, detailed=True):
                 .group_by(DocumentBlock.doc_id)).all())
             invalid = or_(func.vector_dims(DocumentChunk.embedding) != 1024,
                 func.abs(func.vector_norm(DocumentChunk.embedding) - 1) > 1e-4)
+            current_source = (DocumentChunk.chunk_metadata["source_parse_task_id"].as_string()
+                              == cast(Document.processing_task_id, String))
             counts = {r[0]: r[1:] for r in session.execute(select(DocumentChunk.doc_id, func.count(),
-                func.count(DocumentChunk.embedding), func.count().filter(invalid)).join(Document,
+                func.count(DocumentChunk.embedding), func.count().filter(invalid),
+                func.count().filter(current_source)).join(Document,
                     Document.doc_id == DocumentChunk.doc_id).where(Document.kb_id == kb_id,
                         DocumentChunk.kb_id == kb_id).group_by(DocumentChunk.doc_id))}
             jobs = list(session.scalars(select(DocumentParseJob).join(Document,
@@ -85,7 +89,16 @@ def read_snapshot(kb_id, *, detailed=True):
             for doc in documents:
                 if doc.file_hash in result:
                     raise Stage33Error("DUPLICATE_TARGET_HASH")
-                chunks, vectors, bad = counts.get(doc.doc_id, (0, 0, 0))
+                chunks, vectors, bad, current_chunks = counts.get(doc.doc_id, (0, 0, 0, 0))
+                config = doc.index_config or {}
+                # 数量相等仍可能属于旧代次，按生产检索的配置/来源条件核对当前索引。
+                index_current = (config.get("version") == "pgvector-index-v1"
+                    and all(value is not None for value in (doc.index_task_id, doc.processing_task_id,
+                                                           doc.chunk_task_id, doc.embedding_task_id))
+                    and config.get("source_parse_task_id") == str(doc.processing_task_id)
+                    and config.get("source_chunk_task_id") == str(doc.chunk_task_id)
+                    and config.get("embedding_task_id") == str(doc.embedding_task_id)
+                    and current_chunks == chunks)
                 management = public_management(doc)
                 current = [j for j in by_doc.get(doc.doc_id, []) if j["task_id"] == str(doc.processing_task_id)]
                 error = next((j["error_code"] for j in current if j["error_code"]), None)
@@ -96,12 +109,14 @@ def read_snapshot(kb_id, *, detailed=True):
                     "status": doc.status, "block_count": block_counts.get(doc.doc_id, 0),
                     "parse_quality": getattr(doc, "parse_quality", None),
                     "chunk_count": chunks, "vector_count": vectors, "invalid_vector_count": bad,
+                    "index_current": index_current,
                     "management": management.model_dump(mode="json") if management else None,
                     "error_code": error or (parser_causes[0] if parser_causes else None)
                         or (management.cause_code or management.error_code if management else None),
                     "parser_reason_codes": parser_causes,
                     "adapter_diagnostic": next((j["adapter_diagnostic"] for j in current if j["adapter_diagnostic"]), {}),
                     "parse_jobs": by_doc.get(doc.doc_id, []),
+                    "parse_job_history_observed": detailed,
                     "route_strategy": route or next((j["route"] for j in current if j["route"]), None),
                     "parse_cache_present": present,
                     "parse_cache_hit": True if any(j["whole_cache_replay_observed"] for j in current) else None,
@@ -116,8 +131,8 @@ def read_snapshot(kb_id, *, detailed=True):
         raise Stage33Error("DATABASE_SNAPSHOT") from None
 
 
-def check_scope(data, rows, kb_id, *, ready=False):
-    """独立库不得混入额外文档；评测要求全部200份READY及完整向量，不取部分成功子集。"""
+def check_scope(data, rows, kb_id, *, ready=False, allow_partial_ready=False):
+    """核对全部冻结文件；显式索引评测可含PARTIAL，但不放宽向量、来源或模型校验。"""
     expected = {d["sha256"]: d for d in data["documents"]}
     if ready and data.get("file_issues"):
         raise Stage33Error("FROZEN_FILES_INVALID")
@@ -127,30 +142,82 @@ def check_scope(data, rows, kb_id, *, ready=False):
         if (row["kb_id"] != str(kb_id) or row["file_hash"] != sha
                 or row["file_type"] != expected[sha]["file_type"]):
             raise Stage33Error("TARGET_IDENTITY")
-        if ready and not is_ready(row):
-            raise Stage33Error("ALL_200_READY_REQUIRED")
+        if ready and not (is_indexed(row) if allow_partial_ready else is_ready(row)):
+            raise Stage33Error("ALL_200_INDEXED_REQUIRED" if allow_partial_ready else "ALL_200_READY_REQUIRED")
     if ready and (len({digest(row["model_identity"]) for row in rows.values()}) != 1
                   or any(not row.get("model_identity") for row in rows.values())):
         raise Stage33Error("INDEX_MODEL_IDENTITY")
 
 
-def is_ready(row):
-    """READY必须同时具备Block、完整1024维单位向量及结束的已有编排。"""
+def is_indexed(row):
+    """可靠内容已全量索引才可评测；PARTIAL状态须有对应质量记录，不能假作完整READY。"""
     management = row.get("management")
-    return (row["status"] == "READY" and row["block_count"] > 0
-        and (row.get("parse_quality") or {}).get("content") != "PARTIAL"
-        and row["chunk_count"] == row["vector_count"] > 0 and row["invalid_vector_count"] == 0
+    content = (row.get("parse_quality") or {}).get("content")
+    return (row.get("status") in {"READY", "PARTIAL_READY"} and row.get("block_count", 0) > 0
+        and (content == "PARTIAL" if row["status"] == "PARTIAL_READY" else content != "PARTIAL")
+        and row.get("chunk_count", 0) == row.get("vector_count", 0) > 0 and row.get("invalid_vector_count") == 0
+        and row.get("index_current", True) is True
         and (management is None or management["state"] == "done"))
 
 
+def is_ready(row):
+    """完整READY保留原严格验收口径，旧质量字段为空不补造COMPLETE。"""
+    return row["status"] == "READY" and is_indexed(row)
+
+
 def scope_identity(rows):
-    """冻结文档集合/代次/向量数量，避免恢复后混算不同索引快照。"""
+    """冻结集合、代次、向量和质量；管理退出成功状态或来源失效也使快照失效。"""
     values = {sha: {k: row[k] for k in ("doc_id", "status", "block_count", "chunk_count",
         "vector_count", "invalid_vector_count", "index_identity")} for sha, row in sorted(rows.items())}
     for sha, row in rows.items():
         if row.get("parse_quality"):
             values[sha]["parse_quality"] = row["parse_quality"]
+        # 未提供该字段的历史记录保持原指纹；新数据库快照必须核对实际代次。
+        if "index_current" in row:
+            values[sha]["index_current"] = row["index_current"]
+        values[sha]["management_state"] = (row.get("management") or {}).get("state")
+        values[sha]["model_identity"] = row.get("model_identity")
     return digest(values)
+
+
+def save_index_snapshot(data, run, kb_id, rows):
+    """只写本run的独立观察快照，不改导入意图/业务库；缺失文件仍保留在全量清单。"""
+    from scripts.stage33_common import read_json
+    check_scope(data, rows, kb_id)
+    scope = scope_identity(rows)
+    state = {}
+    for doc in data["documents"]:
+        row = rows.get(doc["sha256"])
+        if row is None:
+            state[doc["file_id"]] = {"execution_status": "NOT_PRESENT", "error_code": "DOCUMENT_NOT_PRESENT"}
+            continue
+        status = row["status"]
+        valid = is_indexed(row)
+        execution = status if valid or status == "FAILED" else (
+            "INDEX_VALIDATION_FAILED" if status in {"READY", "PARTIAL_READY"} else "WAITING")
+        state[doc["file_id"]] = dict(row, execution_status=execution)
+        if execution == "INDEX_VALIDATION_FAILED":
+            state[doc["file_id"]]["error_code"] = "INDEX_VALIDATION_FAILED"
+    snapshot = {"dataset_fingerprint": data["fingerprint"], "kb_id": str(kb_id), "scope": scope,
+                "captured_at": datetime.now(UTC).isoformat(), "documents": state}
+    # 只读刷新也不能让旧题目在变化后的索引上继续显示VALID。
+    identity_path = run / "evaluation_identity.json"
+    if identity_path.exists() and read_json(identity_path).get("scope") != scope:
+        write_json(run / "evaluation_validity.json", {"status": "STALE_INDEX", "scope": scope})
+    write_json(run / "index_snapshot.json", snapshot)
+    return snapshot
+
+
+def refresh_index_snapshot(data, run, kb_id, *, reader=read_snapshot):
+    """只读一次并保存完整观察；失败撤销旧成绩资格，不把旧成功快照当作本次查询成功。"""
+    try:
+        rows = reader(kb_id)
+        snapshot = save_index_snapshot(data, run, kb_id, rows)
+        check_scope(data, rows, kb_id, ready=True, allow_partial_ready=True)
+        return snapshot
+    except BaseException:
+        write_json(run / "evaluation_validity.json", {"status": "SNAPSHOT_FAILED"})
+        raise
 
 
 class API:
@@ -234,7 +301,7 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
                retry_failed=False, retry_failed_only=False, reader=read_snapshot, clock=monotonic, pause=sleep):
     """全量登记、有界调度；失败项恢复模式仅Retry原失败身份，绝不上传缺失文件。
 
-    Retry仍由原管理接口核对归档和收费历史；意图不明不重发，不改变成功文档。
+    Retry仍由原管理接口核对归档和收费历史；新的导入观察取代旧评测快照，不改变成功文档。
     """
     state_path = run / "import_checkpoint.json"
     from scripts.stage33_common import read_json
@@ -251,6 +318,12 @@ def import_all(data, run, kb_id, api, *, max_inflight=2, timeout=86400, poll_int
     original_ids = {fid: state[fid].get("doc_id") for fid in targets}
     if retry_failed_only:
         retry_failed = True
+    snapshot_path = run / "index_snapshot.json"
+    if snapshot_path.exists():
+        snapshot = read_json(snapshot_path)
+        snapshot["superseded_by_import"] = True
+        write_json(snapshot_path, snapshot)
+        write_json(run / "evaluation_validity.json", {"status": "IMPORT_OBSERVATION_CHANGED"})
     deadline = clock() + timeout
     retried = set()
     write_json(state_path, state)

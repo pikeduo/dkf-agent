@@ -3,9 +3,9 @@
 > 项目名称：数知融问智能体（DKF-Agent）  
 > 当前开发范围：`knowledge-service` 非结构化知识问答模块  
 > 使用对象：Codex / 开发人员  
-> 开发原则：**从零开始，严格按依赖顺序开发；一次只完成一个阶段，人工测试通过后再进入下一阶段。**
+> 开发原则：**复用已有功能，以实际效果和依赖关系安排阶段内工作；后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准，部署与测试权限遵守AGENTS第0节。**
 >
-> 当前进度以最新代码与 AGENTS 为准：**阶段32已冻结OHR/OCB各100原件/4087题；阶段33全量导入与四策略检索评测代码已实现，Mock仅编写、真实执行待授权。** 此前未完成的业务验收保留，不进入34～36。\
+> 当前进度以最新代码与 AGENTS 为准：**用户确认200份全部入库；阶段33转入4087题检索评测，已补只读索引快照、显式PARTIAL评测政策和质量/格式分组。测试及真实检索成绩待用户执行。** 此前未完成的专项验收保留，获得检索基线后推进34及后续工作。\
 > 文档解析策略：**Native Parser + MinerU 云端精准解析 API + 完整性优先 Parser Router；必要时采用受控 Selective Hybrid Visual Enhancement。**  
 > RAG 编排策略：**DKF-Agent 自主管理 Parse / Chunk / Embedding / PostgreSQL + pgvector，LlamaIndex 仅作为 Retrieval / Fusion / Rerank / Response Synthesis 编排层。**  
 > Agent 编排策略：**LangGraph 作为 Knowledge Agent / 后续 Coordinator Agent 的状态机与工作流框架；LangChain 仅按需提供 Prompt / Tool / Runnable / Message / Model Adapter 等标准组件，不再建立第二套 RAG、Vector Store 或 Agent Runtime。**  
@@ -3469,9 +3469,9 @@ retrieved_chunks
 
 # 39. 阶段 33：Retrieval 评测
 
-当前增量：MinerU v4基础内容与可选结构增强分离，质量/来源可追溯；用户确认PARTIAL_READY及0009迁移文件。原ZIP本地Retry、全失败项只读回放、200份/4087题及完整READY验收分母保留。迁移、Mock、真实ZIP和恢复均待用户执行，未推进34。具体规则以[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)为准，历史v3全局严格失败描述不再用于基础正文入库。
+当前起点：用户确认200份全部入库，2026-10-19 20:04报告118 READY/82 PARTIAL_READY/0 FAILED。MinerU v4基础内容与可选结构增强、质量/来源及旧恢复能力保留；PARTIAL不升级完整READY，不再以批量导入排错为主要任务。专项验收边界仍以[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)为准。
 
-当前正式实现及操作见[阶段33全量评测](STAGE33_EVALUATION.md)。固定读取stage32_run_01的200文件、OHR3588+OCB499=4087题，不抽样/缩减；通过原上传API/管理编排入库，可有界分批与断点续跑。全200 READY及同模型/索引身份才运行全题Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker，保留完整来源。模型/云/数据库真实执行与测试未由Codex执行，等待用户授权；不开发阶段34。
+当前正式实现及操作见[阶段33全量评测](STAGE33_EVALUATION.md)。固定读取stage32_run_01的200文件、OHR3588+OCB499=4087题，不抽样/缩减；已有库用只读snapshot观察，不覆盖原导入意图。默认complete要求全200 READY；显式indexed接受全部可靠内容已索引的READY/PARTIAL_READY，向量、来源代次及同模型检查不变，保留质量分组且不冒充完整解析验收。四路为Dense、BM25、原RRF Hybrid、Hybrid+BGE Reranker，按格式/质量分组并分析漏召回。pytest、数据库快照和真实GPU评测未由Codex执行；取得基线后优先优化主要问题，再推进阶段34，付费LLM另行确认。
 
 正式指标为Recall@5、Recall@10、MRR@20，显式区分总题数、成功执行、可评分总分母、成功评分、失败、未执行、不可评分及人工待审。OHR使用官方0-based→物理1-based页的来源单位；OCB无相关Chunk/页标注时正式证据指标为null，reference_files仅作另列文档代理指标，不把expected_assertions拼成答案或相关性标签。失败不从全量分母删除；尚未执行/快照无效不发布正式分数。原先小题量建议不限制本阶段全量范围。
 
@@ -3492,7 +3492,7 @@ Hybrid
 Hybrid + Reranker
 ```
 
-目标是证明方案有效，而不是盲目堆算法。
+目标是量化检索效果和主要边界，用真实基线决定优化，不预先宣称任何策略更优。
 
 ---
 

@@ -818,6 +818,6 @@ Adapter校验通过后若本地缓存/落库仍异常，检查`mineru.exception_
 
 ## 6. 开发文档
 
-固定OHR/OCB全量数据的导入、资源要求、断点续跑及检索指标说明见[阶段33运行手册](docs/STAGE33_EVALUATION.md)。默认只读预览；真实导入需先确认全部原件外传及MinerU费用，评测不调用LLM。沿用上述API/CPU solo/GPU solo入口，不创建第二套索引。
+固定OHR/OCB全量数据的导入、资源要求、断点续跑及检索指标说明见[阶段33运行手册](docs/STAGE33_EVALUATION.md)。默认只读预览；已有索引可用`--step snapshot`观察当前状态，显式`--index-policy indexed`将READY/PARTIAL_READY纳入检索评测并保留质量限制，不上传、重解析或重建向量。评测仅需现有PostgreSQL和本地模型，不调用MinerU或LLM；首次导入仍需原API/Worker及外传费用确认。
 
-[开发规则](AGENTS.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [Dense Retrieval](docs/DENSE_RETRIEVAL.md) · [预置导入](docs/PRESET_IMPORT.md) · [业务日志](docs/BUSINESS_LOGGING.md)
+[开发规则](AGENTS.md) · [后续阶段计划](docs/KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md) · [路线与验收标准](docs/DEVELOPMENT_PLAN_CODEX.md) · [Parser 契约](docs/PARSER_CONTRACT.md) · [MinerU Cloud](docs/MINERU_CLOUD.md) · [Parser Router](docs/PARSER_ROUTER.md) · [Selective Hybrid](docs/SELECTIVE_HYBRID.md) · [Chunk](docs/CHUNK.md) · [Embedding](docs/EMBEDDING.md) · [pgvector 入库](docs/PGVECTOR_INDEX.md) · [LlamaIndex Adapter](docs/LLAMA_INDEX_ADAPTER.md) · [Dense Retrieval](docs/DENSE_RETRIEVAL.md) · [预置导入](docs/PRESET_IMPORT.md) · [业务日志](docs/BUSINESS_LOGGING.md)

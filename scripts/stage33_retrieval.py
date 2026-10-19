@@ -6,7 +6,7 @@ from statistics import mean
 from time import perf_counter
 
 from scripts.stage33_common import STRATEGIES, Stage33Error, digest, read_json, write_json
-from scripts.stage33_runtime import check_scope, scope_identity
+from scripts.stage33_runtime import check_scope, save_index_snapshot, scope_identity
 
 
 class Backends:
@@ -125,15 +125,19 @@ def score_units(hits, units, *, document_only=False):
 
 
 def safe_service_error(error):
-    """只复用项目固定错误注册表，保留BM25预算/模型/SQL根因，不回显异常字符串。"""
+    """只输出固定分类；缺依赖/未知异常不再导入框架，避免错误处理再次失败或回显原文。"""
     if isinstance(error, Stage33Error):
         return error.code
+    if isinstance(error, ImportError):
+        return "RETRIEVAL_DEPENDENCY"
+    code = getattr(error, "code", None)
+    if not isinstance(code, str):
+        return "RETRIEVAL_SERVICE_ERROR"
     from app.services.rag.bm25 import ERRORS as bm25_errors
     from app.services.rag.dense import ERRORS as dense_errors
     from app.services.reranking import ERRORS as rerank_errors
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.rag.llama_index.hybrid_retriever import ERRORS as fusion_errors
-    code = getattr(error, "code", None)
     return code if isinstance(code, str) and code in set(bm25_errors) | set(dense_errors) | set(
         rerank_errors) | set(embedding_errors) | set(fusion_errors) else "RETRIEVAL_SERVICE_ERROR"
 
@@ -174,23 +178,38 @@ def evaluate_question(qa, documents, kb_id, backend):
     return {"dataset": qa["dataset"], "qa_id": qa["qa_id"], "truth": truth(qa), "strategies": results}
 
 
-def run_evaluation(data, run, kb_id, reader, *, backend_factory=Backends, retry_failed=False):
-    """遍历全部QA；每题原子检查点可恢复，索引/模型/输入变化拒绝混算，不加载模型直至全库READY。"""
+def run_evaluation(data, run, kb_id, reader, *, backend_factory=Backends, retry_failed=False,
+                   index_policy="complete"):
+    """全题断点评测；显式indexed政策接受可靠部分索引，仍冻结全库/质量/模型且禁止云调用。"""
+    if index_policy not in {"complete", "indexed"}:
+        raise Stage33Error("INDEX_POLICY")
     # 预检/模型身份失败也必须撤销本次正式指标资格，不能沿用上次VALID冒充当前通过。
     write_json(run / "evaluation_validity.json", {"status": "CHECKING"})
     rows = reader(kb_id)
-    check_scope(data, rows, kb_id, ready=True)
+    save_index_snapshot(data, run, kb_id, rows)
+    check_scope(data, rows, kb_id, ready=True, allow_partial_ready=index_policy == "indexed")
     scope = scope_identity(rows)
     documents = {row["doc_id"]: doc for doc in data["documents"] for row in [rows[doc["sha256"]]]}
+    config_path = run / "evaluation_identity.json"
+    # 先拒绝旧索引/旧政策的续跑，再考虑加载本地模型，避免无效运行占用GPU。
+    if config_path.exists():
+        previous = read_json(config_path)
+        if (previous.get("dataset") != data["fingerprint"] or previous.get("scope") != scope
+                or previous.get("index_policy", "complete") != index_policy):
+            raise Stage33Error("EVALUATION_IDENTITY_CHANGED")
+    setup_started = perf_counter()
     backend = backend_factory(kb_id)
     identity = backend.identity()
     if identity["embedding"] != next(iter(rows.values()))["model_identity"]:
         raise Stage33Error("QUERY_INDEX_MODEL_MISMATCH")
-    config = {"dataset": data["fingerprint"], "scope": scope, "backend": identity}
-    config_path = run / "evaluation_identity.json"
+    config = {"dataset": data["fingerprint"], "scope": scope, "backend": identity,
+              "index_policy": index_policy}
     if config_path.exists() and read_json(config_path) != config:
         raise Stage33Error("EVALUATION_IDENTITY_CHANGED")
     write_json(config_path, config)
+    write_json(run / "evaluation_setup.json", {"model_setup_seconds": perf_counter() - setup_started,
+        "index_policy": index_policy, "scope": scope, "cloud_calls": 0,
+        "note": "模型初始化单列；各策略耗时包含组成分支，不能相加当作四次独立运行总耗时。"})
     try:
         for index, qa in enumerate(data["questions"], 1):
             path = run / "cases" / (digest([qa["dataset"], qa["qa_id"]]) + ".json")
@@ -209,6 +228,9 @@ def run_evaluation(data, run, kb_id, reader, *, backend_factory=Backends, retry_
             result.update(qa_sha256=digest(qa), evaluation_identity=digest(config))
             write_json(path, result)
             print(f"QA已登记：{index}/{len(data['questions'])}；数据集={qa['dataset']}")
+        # 即使所有题目复用断点，也要在结束时确认当前索引/模型仍与原结果一致。
+        if scope_identity(reader(kb_id)) != scope or backend.identity() != identity:
+            raise Stage33Error("INDEX_OR_MODEL_CHANGED")
         write_json(run / "evaluation_validity.json", {"status": "VALID", "scope": scope})
     except BaseException:
         write_json(run / "evaluation_validity.json", {"status": "BLOCKED_OR_INTERRUPTED", "scope": scope})

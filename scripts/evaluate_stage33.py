@@ -16,8 +16,8 @@ if str(ROOT) not in sys.path:
 from scripts.stage33_common import (DATASET, Stage33Error, initialize, load_dataset, plain_path,
                                    read_json, run_lock, write_json)
 from scripts.stage33_reports import generate
-from scripts.stage33_runtime import API, import_all, read_snapshot
-from scripts.stage33_retrieval import Backends, run_evaluation
+from scripts.stage33_runtime import API, import_all, read_snapshot, refresh_index_snapshot
+from scripts.stage33_retrieval import Backends, run_evaluation, safe_service_error
 
 
 def initial_plan(data):
@@ -36,7 +36,7 @@ def initial_plan(data):
 def build_parser():
     """正式CLI无count/limit/前N参数，inflight只控制资源，不缩小总范围。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--step", choices=["plan", "import", "evaluate", "report"], default="plan")
+    parser.add_argument("--step", choices=["plan", "import", "snapshot", "evaluate", "report"], default="plan")
     parser.add_argument("--run", default="stage33_run_01")
     parser.add_argument("--kb-id", type=UUID)
     parser.add_argument("--execute", action="store_true")
@@ -49,6 +49,8 @@ def build_parser():
     parser.add_argument("--max-inflight", type=int, default=2)
     parser.add_argument("--timeout", type=int, default=86400, help="导入CLI总等待秒数；不修改已有Job冻结窗口")
     parser.add_argument("--poll-interval", type=int, default=10)
+    parser.add_argument("--index-policy", choices=["complete", "indexed"], default="complete",
+                        help="complete要求全READY；indexed显式评测READY/PARTIAL_READY，质量缺口仍完整报告")
     parser.add_argument("--bm25-max-chunks", type=int, default=100_000)
     parser.add_argument("--bm25-max-mb", type=int, default=256)
     parser.add_argument("--bm25-max-tokens", type=int, default=32_000_000)
@@ -56,7 +58,7 @@ def build_parser():
 
 
 def main(argv=None):
-    """只在显式执行后写新run/调用服务；所有完成/中断均尝试生成完整清单，不自动推进34。"""
+    """显式执行后写本run；snapshot仅查库，evaluate仅做本地检索，不触发上传或云恢复。"""
     args = build_parser().parse_args(argv)
     data, run, error_code = None, None, None
     try:
@@ -105,29 +107,40 @@ def main(argv=None):
                             retry_failed_only=args.retry_failed_only)
                     finally:
                         api.close()
+                elif args.step == "snapshot":
+                    refresh_index_snapshot(data, run, args.kb_id)
                 elif args.step == "evaluate":
                     from app.services.rag.bm25 import CorpusLimits
                     limits = CorpusLimits(args.bm25_max_chunks, args.bm25_max_mb * 1024**2, args.bm25_max_tokens)
                     run_evaluation(data, run, args.kb_id, partial(read_snapshot, detailed=False), retry_failed=args.retry_failed,
-                                   backend_factory=partial(Backends, corpus_limits=limits))
+                                   backend_factory=partial(Backends, corpus_limits=limits),
+                                   index_policy=args.index_policy)
             except BaseException as error:
                 error_code = error.code if isinstance(error, Stage33Error) else (
-                    "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else "LOCAL_OR_SERVICE_ERROR")
+                    "INTERRUPTED" if isinstance(error, KeyboardInterrupt) else
+                    safe_service_error(error) if args.step == "evaluate" else "LOCAL_OR_SERVICE_ERROR")
             timing["executions"].append({"step": args.step, "finished_at": datetime.now(UTC).isoformat(),
                                         "duration_seconds": perf_counter() - started, "error_code": error_code})
             write_json(run / "timing.json", timing)
             report = generate(data, run, fatal_code=error_code)
+            display_status = report["status"]
+            if args.step == "snapshot":
+                display_status = ("INDEX_SNAPSHOT_READY" if not error_code
+                    and report.get("indexed") == report["fixed_document_count"] else "INDEX_SNAPSHOT_INCOMPLETE")
             log_event("dataset_evaluation.finished", kb_id=args.kb_id, stage=args.step,
-                status=report["status"], file_count=report["ready"], item_count=report["fixed_qa_count"],
+                status=display_status, file_count=report["ready"], item_count=report["fixed_qa_count"],
                 error_code=error_code, duration_ms=(perf_counter() - started) * 1000)
-            print(f"{report['status']}：READY={report['ready']}/{report['fixed_document_count']}；"
+            print(f"{display_status}：READY={report['ready']}/{report['fixed_document_count']}；"
                   f"PARTIAL_READY={report.get('partial_ready', 0)}；"
+                  f"索引校验通过={report.get('indexed', 0)}/{report['fixed_document_count']}；"
                   f"QA登记={report['fixed_qa_count']}；报告={run / 'summary.md'}；运行器错误={error_code or '-'}")
             if args.step == "import" and report["ready"] != report["fixed_document_count"]:
                 print("存在失败或未完成文档；运行器无异常不代表恢复成功，逐文件原因见import_report.json。")
             if error_code:
                 return 1
-            return 0 if args.step in {"plan", "report"} or (args.step == "import" and report["ready"] == 200) or report["status"] == "PASS" else 1
+            if args.step == "snapshot":
+                return 0 if report.get("indexed") == report["fixed_document_count"] else 1
+            return 0 if args.step in {"plan", "report"} or (args.step == "import" and report["ready"] == 200) or report["status"] in {"PASS", "COMPLETED_WITH_QUALITY_LIMITS"} else 1
     except (Stage33Error, OSError, ValueError, KeyError, TypeError) as error:
         code = error.code if isinstance(error, Stage33Error) else "INPUT_OR_OUTPUT"
         print(f"STAGE33_STOPPED：{code}；未缩减固定范围或自动重试收费任务。")
