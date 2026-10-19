@@ -13,7 +13,7 @@ from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
 from app.core.config import get_settings
 from app.models import DocumentParseJob
-from app.services.mineru.errors import MinerUError, internal_failure
+from app.services.mineru.errors import MinerUError, internal_failure, terminal_failure_message
 from app.services.mineru.jobs import check_step, record_error, submit_step, restore_cached_result
 from app.services.mineru.provider import MinerUCloudProvider
 from app.services.parse_cache import CacheError
@@ -86,7 +86,7 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
 
 
 def execute_step(task, job_id: str, step: str) -> dict:
-    """执行短步骤并保留脱敏异常栈和远端固定根因；本地重放不访问云端。"""
+    """执行短步骤，终态明确解析失败并保留安全根因/脱敏调用栈；本地重放不访问云端。"""
 
     try:
         identifier = UUID(job_id)
@@ -215,7 +215,7 @@ def execute_step(task, job_id: str, step: str) -> dict:
         **(internal["frames"][-1] if internal and internal["frames"] else {}),
         duration_ms=round((perf_counter() - started) * 1000, 2),
     )
-    raise DocumentProcessingError(str(error)) from None
+    raise DocumentProcessingError(terminal_failure_message(error)) from None
 
 
 @celery_app.task(

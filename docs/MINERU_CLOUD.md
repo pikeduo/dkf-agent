@@ -455,6 +455,16 @@ python -c $mineruZipCheck
 
 未完成仅执行一次检查，countdown 再投递。明确 429、临时服务 / 网络错误指数退避加 0～5 秒抖动，尊重 Retry-After，默认最多重试 5 次；总等待默认 7200 秒。远端明确 failed 终止本代次，不自动重建收费 batch；未知 err_msg 不透传。
 
+文件本地输入校验失败、HTTP永久拒收、业务拒收及远端failed最终都以Document=`FAILED`、Job=`failed/is_active=false`结束。终态文档/Job及MinerU任务错误统一为`安全原因码：文件解析失败：固定中文说明`；路由远端失败的Job仍保留`ROUTED_REMOTE_FAILED`收费保护码，展示前缀沿用实际已知原因，例如`-60006`，不改变普通Retry权限。HTTP 413仅说明请求大小超接收限制，不猜具体字节阈值；415说明媒体类型不支持。未知原因仍为REMOTE_FAILED/固定摘要，不输出响应正文。
+
+管理异常在事务退出前冻结原失败阶段和安全原因，日志/任务结果显示`文件解析失败；阶段=cloud；原因=...`，公共status/详情直接返回Document的FAILED与具体error_message。已有Block/向量计数不代表本次解析成功；不覆盖旧证据或伪造READY。临时重试期间仍为处理中，不显示终态“文件解析失败”，耗尽才终止；已落库的业务失败优先于管理等待超时。没有新字段或数据库迁移，历史错误不批量回填，需用户待任务安全结束后重启API/CPU Worker加载代码。
+
+本轮定向回归由用户手动执行，Codex未运行：
+
+```powershell
+python -m pytest tests/test_mineru_remote_status.py tests/test_mineru_provider.py tests/test_management_task.py tests/test_admin_documents.py tests/test_document_management.py tests/test_mineru_post_adapter.py -q -ra
+```
+
 远端终态的安全根因独立保存为`_remote_failure`（已知代码、Batch/Data/trace标识），路由的`ROUTED_REMOTE_FAILED`仍阻止普通Retry重投。识别既有白名单数字码或固定原因映射，未知原因只报REMOTE_FAILED；不保存或输出err_msg。管理cause及失败日志保留安全分类。历史原因缺失可由用户执行`python scripts/mineru_remote_status.py --doc-id <UUID>`只读查看当前Job；只有显式`--query-existing`才用原Provider GET一次原Batch，沿用TLS/身份/共享限流，不POST/PUT、下载结果、调用Adapter、改Job或发布缓存。该查询不是恢复或完整性验收；原批次即使done也不据此写READY。
 
 ### 远端失败原因诊断

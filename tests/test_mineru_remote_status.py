@@ -14,7 +14,7 @@ from pydantic import SecretStr
 
 from app.services import document_management as management
 from app.services.mineru import jobs
-from app.services.mineru.errors import MinerUError
+from app.services.mineru.errors import MinerUError, api_error, terminal_failure_message
 from scripts import mineru_remote_status as tool
 from test_mineru_recovery import context
 
@@ -36,9 +36,12 @@ def test_remote_failure_preserves_known_code_without_exporting_raw_message(paylo
 @pytest.mark.parametrize("payload,cause", [
     ({"err_code": -60007, "err_msg": "PRIVATE_TOKEN PRIVATE_BODY"}, "-60007"),
     ({"err_msg": "number of pages exceeds limit (200 pages), please split the file and try again"}, "-60006"),
+    ({"err_code": -60005, "err_msg": "PRIVATE_BODY"}, "-60005"),
+    ({"err_code": -60003, "err_msg": "PRIVATE_BODY"}, "-60003"),
+    ({"err_msg": "PRIVATE_UNKNOWN_REASON"}, "REMOTE_FAILED"),
 ])
 def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, monkeypatch, payload, cause):
-    """远端临时或页数分类均终止原任务；安全原因到管理层，不新POST/自动Office分片。"""
+    """远端明确失败一律终止并显示解析失败；已知原因保留，未知不猜测、不新POST。"""
     settings, document, job, session = context
     job.parse_options = {"_route_decision": {"existing": True}}
     provider = SimpleNamespace(query=MagicMock(return_value={"state": "failed", "trace_id": "trace-test", **payload}))
@@ -51,6 +54,8 @@ def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, mo
     assert job.parse_options["_remote_failure"] == {
         "cause_code": cause, "batch_id": job.batch_id, "data_id": job.data_id, "trace_id": "trace-test"}
     assert job.error_code == "ROUTED_REMOTE_FAILED" and job.is_active is False
+    assert document.status == "FAILED" and job.state == "failed"
+    assert "文件解析失败：" in document.error_message and job.error_message == document.error_message
     assert document.error_message.startswith(cause + "：") and "PRIVATE" not in document.error_message
     assert payload["err_msg"] not in document.error_message
     document.management_task_id = uuid4()
@@ -60,9 +65,60 @@ def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, mo
     assert document.management_config["cause_code"] == cause
 
 
-@pytest.mark.parametrize("code", ["PRIVATE_TOKEN", "https://private.invalid/?secret=PRIVATE", "-999999"])
+@pytest.mark.parametrize("code,message", [
+    ("FILE_SIZE", "MinerU 文件大小超过 200 MB"),
+    ("FILE_TYPE", "MinerU 不支持该文件类型"),
+    ("HTTP_413", "MinerU 拒绝接收文件，请求大小超过接收限制"),
+    ("HTTP_415", "MinerU 拒绝接收文件，提交的媒体类型不受支持"),
+    ("HTTP_401", "MinerU 鉴权失败，请检查本地 Token 配置"),
+])
+def test_permanent_input_rejection_is_failed_with_safe_cause_and_no_resubmit(context, monkeypatch, code, message):
+    """本地输入或HTTP永久拒收明确FAILED，原因到管理层，原批次/代次不变且不调度重投。"""
+    settings, document, job, session = context
+    identity = job.job_id, job.batch_id, job.data_id, document.processing_task_id
+    assert not jobs.record_error(session, job.job_id, MinerUError(code, message), settings)
+    assert document.status == "FAILED" and job.state == "failed" and not job.is_active
+    assert document.error_message == job.error_message == f"{code}：文件解析失败：{message}"
+    assert session.commits == 1 and job.finished_at is not None
+    assert (job.job_id, job.batch_id, job.data_id, document.processing_task_id) == identity
+    document.management_task_id = uuid4()
+    monkeypatch.setattr(management, "config_for", lambda doc: {"state": "running", "operation": "retry"})
+    monkeypatch.setattr(session, "scalar", lambda statement: document)
+    management.mark_failed(session, document.doc_id, document.management_task_id, "MANAGEMENT_STAGE_FAILED")
+    assert document.management_config["cause_code"] == code
+
+
+def test_transient_rejection_only_reports_failure_after_retry_exhaustion(context):
+    """限流重试期间保留处理中；耗尽才显示解析失败，原Batch/提交意图不变。"""
+    settings, document, job, session = context
+    identity = job.batch_id, job.submission_attempted
+    error = MinerUError("HTTP_429", "MinerU 服务限流或暂时不可用", retryable=True)
+    assert jobs.record_error(session, job.job_id, error, settings)
+    assert document.status == "PARSING" and job.is_active and job.retry_count == 1
+    assert "文件解析失败" not in document.error_message
+    job.retry_count = settings.mineru_max_retries
+    assert not jobs.record_error(session, job.job_id, error, settings)
+    assert document.status == "FAILED" and not job.is_active
+    assert document.error_message.startswith("HTTP_429：文件解析失败：")
+    assert (job.batch_id, job.submission_attempted) == identity
+
+
+def test_terminal_failure_summary_is_idempotent_and_keeps_remote_cause():
+    """重复格式化不叠加前缀，路由终态码保留而展示使用真实安全原因。"""
+    source = api_error(-60006)
+    error = MinerUError("ROUTED_REMOTE_FAILED", f"{source.code}：{source}；远端任务已终止")
+    error.remote_failure = {"cause_code": source.code}
+    message = terminal_failure_message(error)
+    assert message.startswith("-60006：文件解析失败：") and "200 页" in message
+    assert error.code == "ROUTED_REMOTE_FAILED" and not error.retryable
+    repeated = MinerUError("-60006", message)
+    assert terminal_failure_message(repeated) == message and message.count("文件解析失败：") == 1
+
+
+@pytest.mark.parametrize("code", ["PRIVATE_TOKEN", "https://private.invalid/?secret=PRIVATE", "-999999",
+                                  "HTTP_413_PRIVATE", "HTTP_200", "HTTP_999"])
 def test_management_still_rejects_unknown_remote_cause(code):
-    """允许受控云错误码不等于允许任意供应商错误文本或未知数字码。"""
+    """安全云错误码及HTTP失败状态不能夹带任意原文、成功状态或未知数字码。"""
     assert management.safe_cause_code(code) is None
 
 

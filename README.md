@@ -368,7 +368,7 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 
 API/Worker 业务日志为 UTF-8 中文可读摘要，共用 `LOG_DIR`，每天一份 `knowledge-service-YYYY-MM-DD.log`，重启继续追加；框架原始日志仍在终端。默认 INFO，记录接口、上传、解析、重试及结果数量，不记录正文或密钥；解析质量仍需对照原件。
 
-MinerU远端failed会保留已知错误码或固定类别，管理`cause_code`可显示安全根因；未知供应商原文不输出，终态不自动追加收费批次。历史记录缺少原因时，用户可运行`python scripts/mineru_remote_status.py --doc-id <文档UUID>`只读检查当前Job；显式增加`--query-existing`仅GET一次原Batch，不上传、下载ZIP、写业务库或恢复任务。输出`remote_state=done`也不等于业务READY。Worker修改须待相关队列任务安全结束后由用户重启API/CPU Worker生效。
+MinerU永久拒收（如文件/页数超限、格式、鉴权或权限错误）及远端`failed`均以文档`status=FAILED`、Job=`failed`终止，详情和`GET /api/admin/documents/{doc_id}/status`的`error_message`明确显示`错误码：文件解析失败：安全具体原因`。管理`cause_code`及Worker错误保留原失败阶段/原因，迟到管理检查不以等待超时掩盖已落库的业务失败；未知原因只给固定摘要，不输出上游原文。429/网络/服务临时错误仍有限重试，耗尽才标FAILED，终态不自动追加收费批次。HTTP 202仅表示本地受理，不代表MinerU接收或解析成功。历史记录不批量回填；缺少原因时，可运行`python scripts/mineru_remote_status.py --doc-id <文档UUID>`只读检查当前Job，显式`--query-existing`仅GET一次原Batch，不上传、下载ZIP、写业务库或恢复任务。Worker修改须待相关队列任务安全结束后由用户重启API/CPU Worker生效。
 
 遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT`及触发页、实际计数和限制数量。历史`PDF_OBJECT_LIMIT`是本地图片条目预算，不表示PDF损坏；新预检中，图片与绘图合计超过5000只记录`router.preflight_geometry_limited`（图片条目超5000为`PDF_VISUAL_DETAIL_LIMIT`，其余为`PDF_DRAWING_DETAIL_LIMIT`），保留真实计数、图片面积和必需覆盖页，停止绘图几何细查并继续检查后续页。auto仍走MinerU，Office转换PDF可继续冻结及180页分片；不会忽略图片内容或放宽Hash/损坏/页数/文本行数及云端限制。CLI重新运行即可加载新代码；API/CPU Worker须待队列任务安全结束后由用户重启。此前未创建云Job的文档经业务Retry可能首次提交收费任务。
 

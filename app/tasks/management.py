@@ -29,7 +29,7 @@ def save_management_failure(doc_id: UUID, task_id: UUID, code: str, cause_code=N
 @celery_app.task(bind=True, name="app.tasks.management.manage_document", max_retries=17280,
                  acks_late=True, reject_on_worker_lost=True)
 def manage_document(self, doc_id: str) -> dict:
-    """短编排保留真实准备失败阶段/原因；不执行解析/模型，不将已知资源错误伪报为代次冲突。"""
+    """短编排保留真实失败阶段/原因，解析或云拒收明确失败；不执行解析、模型或扩大重试。"""
     try:
         identifier, task_id = UUID(doc_id), UUID(self.request.id)
     except (ValueError, TypeError, AttributeError):
@@ -78,15 +78,19 @@ def manage_document(self, doc_id: str) -> dict:
     except Exception as exc:
         # 编排不主动重试未知投递失败/费用；文件局部清理失败也保留DB删除检查点供用户恢复。
         cause = exception_cause(exc)
-        stage = exception_stage(exc) if cause is not None else None
+        stage = exception_stage(exc)
         code = exc.code if isinstance(exc, ManagementError) else (
             "MANAGEMENT_STAGE_FAILED" if cause is not None else "MANAGEMENT_CHECKPOINT")
         save_management_failure(identifier, task_id, code, cause, stage=stage)
         log_event("management.failed", level=logging.ERROR, doc_id=identifier, task_id=task_id,
                   error_code=code, error_type=type(exc).__name__, stage=stage, step=cause)
         message = str(ManagementError(code))
+        if code == "MANAGEMENT_STAGE_FAILED" and stage in {"parse", "cloud"}:
+            message = f"{code}：文件解析失败"
+        if stage is not None:
+            message += f"；阶段={stage}"
         if cause is not None:
-            message += f"；阶段={stage}；原因={cause}"
+            message += f"；原因={cause}"
         raise DocumentProcessingError(message) from None
     # 仅用户启动的管理任务查询本地DB状态，有持久化截止时间；不轮询MinerU HTTP或占用Worker睡眠。
     raise self.retry(countdown=5, throw=False) from None

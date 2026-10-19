@@ -1,6 +1,7 @@
 """编排任务的内存数据库/消息Stub；不执行真实解析、GPU或供应商步骤。"""
 
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from celery.exceptions import Retry
@@ -130,6 +131,30 @@ def test_failed_stage_and_timeout_stop_without_dispatch_or_success(context, monk
     result = worker.manage_document.apply(args=[str(document.doc_id)], task_id=str(document.management_task_id))
     assert result.state == "FAILURE" and not calls
     assert document.management_config["error_code"] == "MANAGEMENT_STAGE_FAILED"
+
+
+@pytest.mark.parametrize("cause", ["-60006", "-60005", "HTTP_413", "FILE_TYPE", "REMOTE_FAILED"])
+@pytest.mark.parametrize("expired", [False, True])
+def test_cloud_rejection_reports_parse_failure_and_original_cause(context, monkeypatch, cause, expired):
+    """云拒收明确解析失败及原原因；迟到管理检查不以超时掩盖失败，也不覆盖详细说明。"""
+    document, session = context
+    document.status = "FAILED"
+    message = document.error_message = f"{cause}：文件解析失败：固定安全原因"
+    document.management_config = document.management_config | {
+        "stage": "cloud", "resume_failed": False, "dispatched": True}
+    if expired:
+        document.management_config = document.management_config | {
+            "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat()}
+    dispatch, events = [], []
+    monkeypatch.setattr(worker, "dispatch_action", lambda *args: dispatch.append(args))
+    monkeypatch.setattr(worker, "log_event", lambda name, **fields: events.append((name, fields)))
+    result = worker.manage_document.apply(args=[str(document.doc_id)], task_id=str(document.management_task_id))
+    assert result.state == "FAILURE" and not dispatch
+    assert f"文件解析失败；阶段=cloud；原因={cause}" in str(result.result)
+    assert document.status == "FAILED" and document.error_message == message
+    assert document.management_config["state"] == "failed"
+    assert document.management_config["cause_code"] == cause
+    assert events[-1][1]["stage"] == "cloud" and events[-1][1]["step"] == cause
 
 
 def test_busy_gpu_row_retries_short_check_without_marking_business_failed(context, monkeypatch):

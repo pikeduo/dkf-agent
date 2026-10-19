@@ -15,6 +15,18 @@ LOCAL_ADAPTER_ERROR_CODES = frozenset({"MERGE_EVIDENCE", "EMPTY_BLOCK", "CONTENT
     "LOCAL_RESULT_REQUIRED", "CONTENT_LIMIT", "CACHE_REPARSE_REQUIRED", "CACHE_CONFIG_CHANGED", "CACHE_INVALID",
     "LOCAL_PIPELINE_ERROR"})
 
+# 云提交前的固定原件拒绝类别；只用于说明原因，不授予重投或跳过校验的权限。
+INPUT_ERROR_CODES = frozenset({"FILE_TYPE", "EMPTY_FILE", "FILE_SIZE", "FILE_CHANGED",
+    "FILE_DAMAGED", "PAGE_LIMIT", "FILE_MISSING", "FILE_FORMAT", "FILE_IO"})
+HTTP_REJECTION_MESSAGES = {
+    400: "MinerU 拒绝请求，请检查文件及提交参数",
+    401: "MinerU 鉴权失败，请检查本地 Token 配置",
+    403: "MinerU 拒绝访问，请检查账号及任务权限",
+    413: "MinerU 拒绝接收文件，请求大小超过接收限制",
+    415: "MinerU 拒绝接收文件，提交的媒体类型不受支持",
+    422: "MinerU 无法接受提交参数或文件，请核对输入要求",
+}
+
 
 class MinerUError(Exception):
     """供应商错误分类及建议延迟；消息只能来自受控映射。"""
@@ -112,3 +124,19 @@ def api_error(code: object) -> MinerUError:
         ),
         retryable=value in RETRY_CODES,
     )
+
+
+def terminal_failure_message(error: MinerUError) -> str:
+    """终态统一显示文件解析失败并保留安全原因前缀；不读取供应商响应或扩大重试权限。"""
+    code = error.code
+    remote = getattr(error, "remote_failure", None)
+    cause = remote.get("cause_code") if isinstance(remote, dict) else None
+    if isinstance(cause, str) and (cause == "REMOTE_FAILED" or api_error(cause).code == cause):
+        code = cause
+    message = str(error)
+    prefix = f"{code}："
+    if message.startswith(prefix):
+        message = message[len(prefix):]
+    if not message.startswith("文件解析失败："):
+        message = f"文件解析失败：{message}"
+    return prefix + message

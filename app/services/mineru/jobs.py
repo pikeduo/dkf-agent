@@ -23,7 +23,7 @@ from app.services.document_processing import (
     transition_document,
 )
 from app.services.mineru.adapter import MinerUResultAdapter, page_geometry, safe_merge_diagnostic
-from app.services.mineru.errors import MinerUError, api_error, internal_failure
+from app.services.mineru.errors import MinerUError, api_error, internal_failure, terminal_failure_message
 from app.services.mineru.provider import LocalFile, validate_local_file
 from app.services.mineru.raw_results import obtain_raw_result, load_raw_result
 from app.services.hybrid_processing import bundle_file, checked_context, complete_hybrid, metrics
@@ -766,7 +766,7 @@ def save_cloud_cache(document, job, settings, parsed, visual, archive, source) -
 def record_error(
     session: Session, job_id: UUID, error: MinerUError, settings: Settings
 ) -> bool:
-    """独立事务保存固定错误及无正文调用栈；保留原ZIP和成功片，不覆盖旧代次。"""
+    """独立保存失败原因及无正文调用栈；终态明确解析失败，临时重试保留处理中及原收费身份。"""
 
     locked = lock_job(session, job_id)
     if not locked:
@@ -780,6 +780,7 @@ def record_error(
     ):
         job.submission_attempted = False
     retry = error.retryable and job.retry_count < settings.mineru_max_retries
+    message = str(error) if retry else terminal_failure_message(error)
     if retry:
         job.retry_count += 1
     else:
@@ -787,7 +788,7 @@ def record_error(
         job.finished_at = datetime.now(UTC)
         if "_pdf_split" not in job.parse_options:
             job.upload_url = None
-        transition_document(document, "FAILED", str(error))
+        transition_document(document, "FAILED", message)
         if "_hybrid" in job.parse_options:
             try:
                 manifest = BundleManifest.model_validate(job.parse_options["_hybrid"]["manifest"])
@@ -799,7 +800,7 @@ def record_error(
                 # 检查点损坏也必须记录失败，不能因账本校验再次阻断安全错误持久化。
                 ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
             job.parse_options = job.parse_options | {"_hybrid_result": ledger}
-    job.error_code, job.error_message = error.code, str(error)
+    job.error_code, job.error_message = error.code, message
     remote = getattr(error, "remote_failure", None)
     if remote:
         # 主事务已回滚，在独立失败事务保存白名单类别和原收费身份，不保存err_msg。
@@ -823,7 +824,8 @@ def record_error(
         retry = False
         job.state, job.is_active, job.finished_at = "failed", False, datetime.now(UTC)
         job.error_code = "PDF_SPLIT_CHECKPOINT"
-        job.error_message = "PDF 分片检查点无效，请核对原批次，未重新提交"
+        job.error_message = terminal_failure_message(MinerUError(job.error_code,
+            "PDF 分片检查点无效，请核对原批次，未重新提交"))
         transition_document(document, "FAILED", job.error_message)
         log_event("mineru.split_checkpoint_invalid", doc_id=document.doc_id, job_id=job_id,
                   error_code=job.error_code)

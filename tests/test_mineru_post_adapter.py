@@ -72,7 +72,7 @@ def test_guard_log_reaches_cache_block_persistence_and_commit(context, monkeypat
 
 @pytest.mark.parametrize("boundary", ["cache", "persistence"])
 def test_post_adapter_exception_keeps_safe_stack_and_fails_without_cloud(context, monkeypatch, boundary):
-    """后置异常保留真实类型/项目调用位置且独立记错，不再变成无原因UNKNOWN。"""
+    """后置异常保留真实类型/位置并独立记错，任务和文档明确解析失败且使用相同安全原因。"""
     settings, document, job, session, _ = post_adapter_context(context, monkeypatch)
     events = []
 
@@ -100,6 +100,8 @@ def test_post_adapter_exception_keeps_safe_stack_and_fails_without_cloud(context
                and frame["source_function"] == "adapt_raw_result" for frame in diagnostic["frames"])
     assert any(name == "mineru.exception_frame" for name, _ in events)
     assert document.status == "FAILED" and job.error_code == "LOCAL_PIPELINE_ERROR"
+    assert str(error.value) == document.error_message == job.error_message
+    assert "文件解析失败：" in document.error_message
     assert session.commits == 1  # 只有独立失败事务提交，不是Block事务提交。
     assert "PRIVATE" not in str(error.value) + repr(diagnostic) + repr(events)
     assert "https://" not in repr(diagnostic) and "D:/" not in repr(diagnostic)

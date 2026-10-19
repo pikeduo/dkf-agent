@@ -123,6 +123,17 @@ def test_detail_and_status_hide_private_configuration_and_use_current_vector_cou
         assert str(context.document.file_path) not in response.text
 
 
+def test_failed_parse_is_explicit_in_status_and_detail_even_with_old_counts(context):
+    """旧块/向量数量不能掩盖当前解析失败；详情和状态直接展示FAILED及安全具体原因。"""
+    context.document.status = "FAILED"
+    message = context.document.error_message = "-60006：文件解析失败：MinerU 文件页数超过 200 页"
+    for suffix in ("", "/status"):
+        response = request(context.app, "GET", context.url + suffix)
+        assert response.status_code == 200
+        assert response.json()["status"] == "FAILED" and response.json()["error_message"] == message
+    assert "200 页" in response.json()["error_message"] and response.json()["vector_count"] == 3
+
+
 def test_detail_exposes_cloud_checkpoint_booleans_without_private_urls_or_options(context):
     """可观察batch/上传/申请状态，不能把私有Token、签名URL或Provider参数泄漏给前端。"""
     now = datetime.now(UTC)

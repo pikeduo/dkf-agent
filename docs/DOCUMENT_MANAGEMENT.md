@@ -60,6 +60,8 @@
 
 MANAGEMENT_STAGE_FAILED保留原外部错误码；若原文档错误具有合法ROUTER_FAILED前缀，cause_code另保留注册Router原因（如PREFLIGHT_LIMIT），不覆盖原文档错误。历史记录不批量回填；阶段33只读快照也能从原有安全前缀恢复原因。新增PDF预检拒绝事件只记资源限制种类、页和计数，不放宽预检预算。
 
+MinerU永久拒收/远端失败以Document=FAILED及`错误码：文件解析失败：具体安全原因`展示；管理汇总仍使用MANAGEMENT_STAGE_FAILED，但cause_code保留供应商已知码、HTTP 4xx/5xx状态码或固定原件错误类别。管理异常在回滚前冻结parse/cloud阶段及原因，Worker/日志不再只显示通用失败；已落库业务失败先于编排等待超时报告。未知上游原因不猜测、不透传原文，不增加云提交或扩展Retry许可；临时错误只在有限重试耗尽后转FAILED。
+
 Chunk/Embedding/Index准备阶段的固定服务异常同样记录`MANAGEMENT_STAGE_FAILED`、真实准备阶段及`cause_code`，不再一律包装为`MANAGEMENT_CHECKPOINT`；真正代次不符仍拒绝。准备失败不会伪造子任务ID或改变原Block/Chunk/向量。日志及Celery安全错误补充阶段/固定原因，原异常内容不外传。尤其`status=EMBEDDING, embedding_task_id=null, management.state=failed`表示GPU准备失败，普通Retry可在修复后接续原Chunk；不需要重走Parser。
 
 Reindex缓存缺失/损坏/原件Hash/配置/版本改变明确FAILED，不运行Router预检/Parser或MinerU，不自动Force。成功回放保持原Block身份与阅读顺序，再按当前配置建立新切片/GPU/入库检查点。改变Embedding冻结参数后应使用Reindex，不用重复/embed期待新参数生效。

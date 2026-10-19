@@ -1,6 +1,7 @@
 """上传增量及管理员维护的持久化编排；复用既有文档任务，不重建整个知识库。"""
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -16,7 +17,7 @@ from app.services.indexing import prepare_index, publish_index
 from app.services.chunk.splitter import ChunkError
 from app.services.embedding.service import EmbeddingError
 from app.services.indexing import IndexingError
-from app.services.mineru.errors import LOCAL_ADAPTER_ERROR_CODES, OFFICE_PDF_ERROR_CODES, PDF_SPLIT_ERROR_CODES
+from app.services.mineru.errors import INPUT_ERROR_CODES, LOCAL_ADAPTER_ERROR_CODES, OFFICE_PDF_ERROR_CODES, PDF_SPLIT_ERROR_CODES
 
 ERRORS = {
     "MANAGEMENT_BUSY": "文档仍有活动任务，请先查询状态；未覆盖现有代次",
@@ -39,9 +40,11 @@ CHUNK_CODES = {"CHUNK_BUSY", "CHUNK_CHECKPOINT_INVALID", "CHUNK_CONFIG_INVALID",
 class ManagementError(Exception):
     """管理错误使用固定白名单，禁止本机路径、任务原文或凭据透传。"""
 
-    def __init__(self, code):
-        """未知错误归为检查点失败，不接受任意异常文本作为返回内容。"""
+    def __init__(self, code, *, cause_code=None, stage=None):
+        """只保存固定错误及安全阶段/原因，避免事务回滚后丢失原解析失败上下文。"""
         self.code = code if code in ERRORS else "MANAGEMENT_CHECKPOINT"
+        self.cause_code = safe_cause_code(cause_code)
+        self.management_stage = stage if isinstance(stage, str) and stage in STAGES else None
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
 
@@ -84,21 +87,32 @@ def public_management(document) -> ManagementResponse | None:
 
 
 def safe_cause_code(code):
-    """根因仅接受既有服务及供应商错误码白名单，不把任意异常字符串加入日志或API。"""
+    """根因仅接受既有固定类别及有界HTTP状态码，不把任意异常字符串加入日志或API。"""
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.indexing import ERRORS as index_errors
     from app.parsers.routing.contracts import REASON_CODES
     from app.services.mineru.errors import api_error
     if isinstance(code, str) and (code in {"REMOTE_FAILED", "ROUTED_REMOTE_FAILED"}
+                                 or re.fullmatch(r"HTTP_[45][0-9]{2}", code)
                                  or api_error(code).code == code):
         return code
     return code if isinstance(code, str) and code in (
         CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES | LOCAL_ADAPTER_ERROR_CODES
-        | OFFICE_PDF_ERROR_CODES | PDF_SPLIT_ERROR_CODES) else None
+        | OFFICE_PDF_ERROR_CODES | PDF_SPLIT_ERROR_CODES | INPUT_ERROR_CODES) else None
+
+
+def document_failure_cause(document):
+    """从既有Router安全前缀或固定错误码恢复根因，不读取或回显后面的错误原文。"""
+    from app.services.document_processing import router_failure_codes
+    causes = router_failure_codes(document.error_message)
+    prefix = (document.error_message or "").split("：", 1)[0]
+    return causes[0] if causes else safe_cause_code(prefix)
 
 
 def exception_cause(exc):
-    """保留准备阶段的固定失败类别，避免GPU配置/入库模式错误被笼统隐藏。"""
+    """保留业务终态或准备阶段的固定失败类别，不让管理汇总吞掉实际根因。"""
+    if isinstance(exc, ManagementError) and exc.code == "MANAGEMENT_STAGE_FAILED":
+        return safe_cause_code(exc.cause_code)
     if isinstance(exc, (EmbeddingError, IndexingError)):
         return safe_cause_code(exc.code)
     if isinstance(exc, ChunkError):
@@ -107,8 +121,10 @@ def exception_cause(exc):
 
 
 def exception_stage(exc):
-    """仅按既有服务异常确定准备失败阶段，不把资源/模型错误误称为解析代次冲突。"""
+    """保留终态解析/云阶段及既有准备异常阶段，禁止把资源错误误称为代次冲突。"""
     prepared = getattr(exc, "management_stage", None)
+    if isinstance(exc, ManagementError) and exc.code == "MANAGEMENT_STAGE_FAILED":
+        return prepared
     if isinstance(prepared, str) and prepared in {"chunk", "embed", "index"} and exception_cause(exc) is not None:
         return prepared
     if isinstance(exc, EmbeddingError):
@@ -494,7 +510,7 @@ def publish_management(doc_id: UUID, task_id: UUID) -> bool:
 
 
 def next_action(session, document, settings) -> dict:
-    """只准备一个阶段并绑定真实准备异常；等待只查询DB，不调用云API或加载模型。"""
+    """只准备一个阶段；失败前冻结安全原因/阶段，等待只查询DB，不调用云API或模型。"""
     config = config_for(document)
     if config is None or config["state"] != "running":
         return {"kind": "stopped"}
@@ -504,10 +520,12 @@ def next_action(session, document, settings) -> dict:
         config.update(state="done", stage="done")
         document.management_config = config
         return {"kind": "done"}
+    if document.status == "FAILED" and not config["resume_failed"]:
+        # 已落库的业务失败优先于编排等待超时，避免迟到的管理检查再次掩盖云端拒收原因。
+        raise ManagementError("MANAGEMENT_STAGE_FAILED", cause_code=document_failure_cause(document),
+                              stage=config["stage"])
     if datetime.now(UTC) >= datetime.fromisoformat(config["expires_at"]):
         raise ManagementError("MANAGEMENT_TIMEOUT")
-    if document.status == "FAILED" and not config["resume_failed"]:
-        raise ManagementError("MANAGEMENT_STAGE_FAILED")
     if (config["stage"] == "cloud" and not config["dispatched"]
             and document.status not in {"CHUNKING", "EMBEDDING", "INDEXING", "READY"}):
         job = active_job(session, document)
@@ -565,7 +583,7 @@ def dispatch_action(session, doc_id: UUID, action: dict) -> bool:
 
 
 def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None, *, stage=None) -> None:
-    """独立记录安全原因和真实准备失败阶段；保留原业务状态/代次，不假造已投递的子任务。"""
+    """独立记录安全原因及失败阶段；保留原解析错误、业务状态/代次，不假造子任务。"""
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update(nowait=True))
     if document is None or document.management_task_id != task_id:
         return
@@ -573,11 +591,7 @@ def mark_failed(session, doc_id: UUID, task_id: UUID, code: str, cause_code=None
     if config["state"] != "running":
         return
     if code == "MANAGEMENT_STAGE_FAILED" and cause_code is None:
-        from app.services.document_processing import router_failure_codes
-        causes = router_failure_codes(document.error_message)
-        # 本地运行错误的固定前缀可透传原因；绝不回显异常原文或未知字符串。
-        local = (document.error_message or "").split("：", 1)[0]
-        cause_code = causes[0] if causes else safe_cause_code(local)
+        cause_code = document_failure_cause(document)
     cause_code = safe_cause_code(cause_code)
     if stage in {"chunk", "embed", "index"} and cause_code is not None:
         task = getattr(document, {"chunk": "chunk_task_id", "embed": "embedding_task_id", "index": "index_task_id"}[stage])

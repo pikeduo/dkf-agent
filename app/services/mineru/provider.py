@@ -19,7 +19,7 @@ from app.core.file_formats import (
     FileFormatError,
     validate_file_content,
 )
-from app.services.mineru.errors import MinerUError, api_error
+from app.services.mineru.errors import HTTP_REJECTION_MESSAGES, MinerUError, api_error
 from app.services.mineru.rate_limit import MinerURateLimiter
 
 IDENTIFIER = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
@@ -358,7 +358,7 @@ class MinerUCloudProvider:
         return envelope
 
     def _http_status(self, response: httpx.Response) -> None:
-        """分类 HTTP 错误，429 尊重有界 Retry-After，其余失败不给出原始 URL。"""
+        """分类HTTP拒收并提供固定中文原因；429/服务异常有限重试，不输出原始URL或响应正文。"""
 
         status = response.status_code
         if 200 <= status < 300:
@@ -372,4 +372,5 @@ class MinerUCloudProvider:
                 retryable=True,
                 retry_after=delay,
             )
-        raise MinerUError(f"HTTP_{status}", "MinerU 请求被拒绝，请检查鉴权、文件或权限")
+        raise MinerUError(f"HTTP_{status}", HTTP_REJECTION_MESSAGES.get(
+            status, "MinerU 请求被拒绝，请检查鉴权、文件或权限"))

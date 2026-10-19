@@ -193,6 +193,21 @@ def test_http_errors_safe_and_classified(settings, source, status, code, retry):
     provider.close()
 
 
+@pytest.mark.parametrize("status,reason", [
+    (400, "提交参数"), (401, "鉴权失败"), (403, "任务权限"),
+    (413, "请求大小超过接收限制"), (415, "媒体类型不受支持"), (422, "提交参数或文件"),
+    (406, "请求被拒绝"),
+])
+def test_http_permanent_rejection_explains_fixed_reason_without_raw_payload(status, reason):
+    """仅检查内存HTTP响应分类；拒收原因使用固定摘要，不读文件、不发HTTP或透传响应正文。"""
+    provider = object.__new__(MinerUCloudProvider)
+    response = httpx.Response(status, text="PRIVATE_TOKEN PRIVATE_BODY https://private.invalid/signed")
+    with pytest.raises(MinerUError) as caught:
+        provider._http_status(response)
+    assert caught.value.code == f"HTTP_{status}" and not caught.value.retryable
+    assert reason in str(caught.value) and "PRIVATE" not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "code,retry",
     [
