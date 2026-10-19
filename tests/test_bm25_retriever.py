@@ -4,6 +4,7 @@ import asyncio
 import copy
 import io
 import logging
+import weakref
 
 import pytest
 
@@ -14,9 +15,9 @@ from llama_index.core.schema import QueryBundle
 
 from app.core import business_logging as logs
 from app.services.rag import bm25 as core
-from app.services.rag.llama_index import embedding_adapter, node_adapter
+from app.services.rag.llama_index import bm25_retriever as retrievers, embedding_adapter, node_adapter
 from app.services.rag.llama_index.bm25_retriever import BM25Retriever
-from test_dense_retriever import factory_for
+from bm25_stubs import factory_for
 from test_dense_sql import stored_pair
 
 
@@ -28,7 +29,7 @@ def lexical_pair(kb_id=None, number=1, text='NASA RX-7800-XT 100'):
 
 
 def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
-    """构造不读库/建索引；BM25只用READY Chunk，即使Query模型不可用也不调用Embedding。"""
+    """构造不读库；BM25在一个只读快照内分批扫描与取命中证据，始终不调用Embedding。"""
     pair = lexical_pair()
     factory, sessions = factory_for([pair])
 
@@ -42,9 +43,11 @@ def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
     assert sessions == [] and retriever._index is None
     nodes = retriever.retrieve(QueryBundle(query_str='NASA'))
     assert len(nodes) == 1 and nodes[0].node.embedding is None and nodes[0].score > 0
-    assert sessions[0].closed and len(sessions[0].statements) == 1
-    assert sessions[0].settings == ['SET TRANSACTION READ ONLY', "SET LOCAL statement_timeout = '10s'",
-                                     "SET LOCAL lock_timeout = '2s'"]
+    assert sessions[0].closed and len(sessions[0].statements) == 2
+    assert sessions[0].settings == ['SET TRANSACTION READ ONLY',
+        'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', "SET LOCAL statement_timeout = '10s'",
+        "SET LOCAL lock_timeout = '2s'"]
+    assert all(result.closed for result in sessions[0].results)
 
 
 def test_nodes_and_dto_keep_complete_evidence_without_mutating_source():
@@ -208,3 +211,89 @@ def test_logs_are_aggregated_sanitized_and_conversion_default_is_preserved(monke
         handler.close()
         logger.handlers, logger.level, logger.propagate, logger.disabled = before
         logs.CONTEXT.reset(token)
+
+
+def test_full_corpus_nodes_are_not_retained_and_evidence_select_is_top_k(monkeypatch):
+    """逐行Node验证后立即释放，仅保存最终Top-K，第二次SQL明确绑定命中ID。"""
+    first = lexical_pair(number=1)
+    rows = [first] + [lexical_pair(first[0].kb_id, number=number) for number in range(2, 10)]
+    factory, sessions = factory_for(rows)
+    refs, alive_counts = [], []
+    convert = retrievers.chunk_to_node
+
+    def tracked(*args, **kwargs):
+        """用弱引用观察Node存活，不以易抖动的进程RSS阈值替代保留对象检查。"""
+        node = convert(*args, **kwargs)
+        refs.append(weakref.ref(node))
+        alive_counts.append(sum(ref() is not None for ref in refs))
+        return node
+
+    monkeypatch.setattr(retrievers, 'chunk_to_node', tracked)
+    retriever = BM25Retriever(first[0].kb_id, top_k=2, session_factory=factory)
+    hits = retriever.retrieve('NASA')
+    assert [hit.node.node_id for hit in hits] == [str(row[0].chunk_id) for row in rows[:2]]
+    assert max(alive_counts) <= 2 and sum(ref() is not None for ref in refs) == 2
+    statements = sessions[0].statements
+    assert all(statement.get_execution_options()['yield_per'] == core.SOURCE_BATCH_SIZE for statement in statements)
+    assert 'document_chunks.chunk_id IN' not in str(statements[0])
+    assert 'document_chunks.chunk_id IN' in str(statements[1])
+    assert [row[0].chunk_id for row in rows[:2]] in statements[1].compile().params.values()
+    assert all(result.closed for result in sessions[0].results)
+
+
+def test_nonmatching_corrupt_evidence_still_fails_entire_query():
+    """节省内存不跳过未命中Chunk的原Adapter校验，也不使用已有缓存掩盖坏证据。"""
+    first = lexical_pair(number=1)
+    second = lexical_pair(first[0].kb_id, number=2, text='ESA')
+    rows = [first, second]
+    factory, sessions = factory_for(rows)
+    retriever = BM25Retriever(first[0].kb_id, session_factory=factory)
+    assert retriever.retrieve('NASA')
+    second[0].page_end = 0
+    with pytest.raises(core.BM25RetrievalError, match='BM25_RESULT'):
+        retriever.retrieve('NASA')
+    assert len(sessions[-1].statements) == 1 and sessions[-1].closed
+    assert all(result.closed for result in sessions[-1].results)
+
+
+@pytest.mark.parametrize('damage', ['missing', 'text'])
+def test_missing_or_changed_winner_evidence_cannot_return_partial_result(monkeypatch, damage):
+    """命中取回异常不能缩减Top-K或混用新正文，即使快照Stub违规也明确整批失败。"""
+    pair = lexical_pair()
+    factory, sessions = factory_for([pair])
+    select = retrievers.select_sources
+
+    def damaged(*args, **kwargs):
+        """只损坏命中证据阶段，不改变首次全库评分输入。"""
+        rows = select(*args, **kwargs)
+        if damage == 'missing':
+            return []
+        rows[0][0].text = 'PRIVATE_CHANGED_TEXT'
+        return rows
+
+    monkeypatch.setattr(retrievers, 'select_sources', damaged)
+    retriever = BM25Retriever(pair[0].kb_id, session_factory=factory)
+    with pytest.raises(core.BM25RetrievalError, match='BM25_RESULT') as error:
+        retriever.retrieve('NASA')
+    assert 'PRIVATE_CHANGED_TEXT' not in str(error.value) and sessions[0].closed
+    assert all(result.closed for result in sessions[0].results)
+
+
+def test_rebuilding_releases_stale_index_before_allocating_replacement(monkeypatch):
+    """内容变化先清理失效词频，建索引失败不会保留或返回旧评分结果。"""
+    pair = lexical_pair()
+    factory, _ = factory_for([pair])
+    retriever = BM25Retriever(pair[0].kb_id, session_factory=factory)
+    assert retriever.retrieve('NASA')
+    previous = weakref.ref(retriever._index)
+    pair[0].text = 'ESA updated'
+
+    def failed_rebuild(*args, **kwargs):
+        """检查旧对象已释放，再模拟新索引构建失败。"""
+        assert retriever._index is None and previous() is None
+        raise core.BM25RetrievalError('BM25_INDEX')
+
+    monkeypatch.setattr(retrievers, 'LocalBM25Index', failed_rebuild)
+    with pytest.raises(core.BM25RetrievalError, match='BM25_INDEX'):
+        retriever.retrieve('ESA')
+    assert retriever._index is None and retriever._index_scope is None

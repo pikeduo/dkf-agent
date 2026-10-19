@@ -5,6 +5,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass
+from heapq import nsmallest
 from uuid import UUID
 
 from sqlalchemy import String, cast, select
@@ -23,6 +24,7 @@ MAX_CORPUS_CHUNKS = 10_000
 MAX_CORPUS_BYTES = 32 * 1024 * 1024
 MAX_CORPUS_TOKENS = 4_000_000
 MAX_QUERY_TERMS = 512
+SOURCE_BATCH_SIZE = 256
 TOKEN_PATTERN = re.compile(
     r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)%?(?![a-z0-9_]|[-./+][a-z0-9])"
     r"|[a-z0-9]+(?:[-_./+][a-z0-9]+)*%?"
@@ -109,8 +111,8 @@ def tokenize(text: str, *, max_terms=MAX_CORPUS_TOKENS) -> list[str]:
     return tokens
 
 
-def source_statement(kb_id, doc_ids=None, *, limits=None):
-    """SQL限定原范围/代次，预算+1仅检测超限，不静默返回截断语料。"""
+def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
+    """SQL限定原范围/代次；可只取评分命中ID，预算+1仍用于检测超限。"""
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
     config = Document.index_config
@@ -124,6 +126,12 @@ def source_statement(kb_id, doc_ids=None, *, limits=None):
         DocumentChunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id]
     if doc_ids is not None:
         filters.append(DocumentChunk.doc_id.in_(doc_ids))
+    if chunk_ids is not None:
+        if (not isinstance(chunk_ids, (list, tuple)) or not 1 <= len(chunk_ids) <= 100
+                or any(not isinstance(value, UUID) for value in chunk_ids)
+                or len(set(chunk_ids)) != len(chunk_ids)):
+            raise BM25RetrievalError("BM25_INPUT")
+        filters.append(DocumentChunk.chunk_id.in_(chunk_ids))
     return (select(DocumentChunk, Document).select_from(DocumentChunk)
         .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
         .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
@@ -137,42 +145,57 @@ def source_statement(kb_id, doc_ids=None, *, limits=None):
         .execution_options(populate_existing=True))
 
 
-def select_sources(session, kb_id, doc_ids=None, *, limits=None):
-    """读取完整当前语料并按实例预算检查；超限/越界全批失败，不截断。"""
+def iter_sources(session, kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
+    """分批读取并逐行验证来源；游标始终关闭，调用方须消费完毕才能发布完整结果。"""
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
     if session.new or session.dirty or session.deleted:
         raise BM25RetrievalError("BM25_SESSION")
+    result = None
     try:
         with session.no_autoflush:
-            rows = session.execute(source_statement(kb_id, doc_ids, **({"limits": limits} if limits is not None else {}))).all()
+            statement = source_statement(kb_id, doc_ids, limits=limits, chunk_ids=chunk_ids)
+            # ORM与驱动同时分批，避免all()把全库正文及完整source_spans一次性驻留。
+            result = session.execute(statement.execution_options(yield_per=SOURCE_BATCH_SIZE))
+            total, last = 0, None
+            for count, row in enumerate(result, 1):
+                if count > budget.chunks:
+                    raise BM25RetrievalError("BM25_LIMIT")
+                try:
+                    chunk, document = row
+                    config = document.index_config
+                    if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
+                            or (doc_ids is not None and chunk.doc_id not in doc_ids)
+                            or (chunk_ids is not None and chunk.chunk_id not in chunk_ids)
+                            or document.status not in {"READY", "PARTIAL_READY"} or document.index_task_id is None
+                            or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
+                            or any(config.get(key) != str(getattr(document, attribute)) for key, attribute in (
+                                ("source_parse_task_id", "processing_task_id"), ("source_chunk_task_id", "chunk_task_id"),
+                                ("embedding_task_id", "embedding_task_id")))
+                            or chunk.chunk_metadata.get("source_parse_task_id") != str(document.processing_task_id)
+                            or not isinstance(chunk.chunk_id, UUID) or (last is not None and chunk.chunk_id.int <= last)
+                            or not isinstance(chunk.text, str) or not chunk.text.strip()):
+                        raise ValueError
+                    total += len(chunk.text.encode("utf-8"))
+                    last = chunk.chunk_id.int
+                except Exception:
+                    raise BM25RetrievalError("BM25_RESULT") from None
+                if total > budget.bytes:
+                    raise BM25RetrievalError("BM25_LIMIT")
+                yield row
     except SQLAlchemyError:
         raise BM25RetrievalError("BM25_DATABASE") from None
-    if len(rows) > budget.chunks:
-        raise BM25RetrievalError("BM25_LIMIT")
-    total, last = 0, None
-    for row in rows:
-        try:
-            chunk, document = row
-            config = document.index_config
-            if (chunk.kb_id != kb_id or document.kb_id != kb_id or chunk.doc_id != document.doc_id
-                    or (doc_ids is not None and chunk.doc_id not in doc_ids)
-                    or document.status not in {"READY", "PARTIAL_READY"} or document.index_task_id is None
-                    or not isinstance(config, dict) or config.get("version") != INDEX_VERSION
-                    or any(config.get(key) != str(getattr(document, attribute)) for key, attribute in (
-                        ("source_parse_task_id", "processing_task_id"), ("source_chunk_task_id", "chunk_task_id"),
-                        ("embedding_task_id", "embedding_task_id")))
-                    or chunk.chunk_metadata.get("source_parse_task_id") != str(document.processing_task_id)
-                    or not isinstance(chunk.chunk_id, UUID) or (last is not None and chunk.chunk_id.int <= last)
-                    or not isinstance(chunk.text, str) or not chunk.text.strip()):
-                raise ValueError
-            total += len(chunk.text.encode("utf-8"))
-            last = chunk.chunk_id.int
-        except Exception:
-            raise BM25RetrievalError("BM25_RESULT") from None
-        if total > budget.bytes:
-            raise BM25RetrievalError("BM25_LIMIT")
-    return rows
+    finally:
+        if result is not None:
+            try:
+                result.close()
+            except SQLAlchemyError:
+                raise BM25RetrievalError("BM25_DATABASE") from None
+
+
+def select_sources(session, kb_id, doc_ids=None, *, limits=None, chunk_ids=None):
+    """兼容原列表入口；Retriever仅用它读取Top-K证据，全库扫描使用分批迭代器。"""
+    return list(iter_sources(session, kb_id, doc_ids, limits=limits, chunk_ids=chunk_ids))
 
 
 def corpus_fingerprint(items: list[tuple[UUID, str]], *, limits=None) -> str:
@@ -199,28 +222,34 @@ class LocalBM25Index:
     """仅保存词频和稳定 ID 的进程内派生索引，不保存 Node、业务记录或原件路径。"""
 
     def __init__(self, items: list[tuple[UUID, str]], *, limits=None):
-        """原BM25Plus/分词不变，实例预算仅扩大可承载语料，仍无进程池或第二套存储。"""
+        """逐块分词并共享相同词项字符串，保留原BM25Plus评分且不物化全库词项列表。"""
         budget = checked_limits(limits)
         self.fingerprint = corpus_fingerprint(items, **({"limits": limits} if limits is not None else {}))
         self.ids = tuple(item[0] for item in items)
-        corpus, token_count = [], 0
-        for _, text in items:
-            terms = tokenize(text, max_terms=budget.tokens - token_count)
-            token_count += len(terms)
-            if token_count > budget.tokens:
-                raise BM25RetrievalError("BM25_LIMIT")
-            corpus.append(terms)
         self._engine = None
-        if token_count:
+        if items:
             try:
                 from rank_bm25 import BM25Plus
             except ImportError:
                 raise BM25RetrievalError("BM25_DEPENDENCY") from None
+
+            def corpus():
+                """按原序产出一块词项；词表只在本次构建共享，不使用全局永久缓存。"""
+                vocabulary, token_count = {}, 0
+                for _, text in items:
+                    terms = tokenize(text, max_terms=budget.tokens - token_count)
+                    token_count += len(terms)
+                    for position, term in enumerate(terms):
+                        terms[position] = vocabulary.setdefault(term, term)
+                    yield terms
+
             # 不传 tokenizer：rank-bm25 的 tokenizer 回调会创建 multiprocessing Pool。
-            self._engine = BM25Plus(corpus, k1=1.5, b=0.75, delta=1)
+            engine = BM25Plus(corpus(), k1=1.5, b=0.75, delta=1)
+            if any(engine.doc_len):
+                self._engine = engine
 
     def search(self, query: str, top_k: int) -> list[tuple[int, float]]:
-        """仅对真实词项重叠的 Chunk 评分，降序/UUID稳定排序；无命中不返回背景基线分。"""
+        """仅对真实词项重叠的Chunk评分，以有界Top-K保持降序/UUID规则，不复制全量排序表。"""
         if type(top_k) is not int or not 1 <= top_k <= 100:
             raise BM25RetrievalError("BM25_INPUT")
         terms = list(dict.fromkeys(tokenize(bm25_query(query), max_terms=MAX_QUERY_TERMS)))
@@ -236,4 +265,4 @@ class LocalBM25Index:
         scores = self._engine.get_batch_scores(terms, matches)
         if len(scores) != len(matches) or any(not math.isfinite(score) or score <= 0 for score in scores):
             raise BM25RetrievalError("BM25_RESULT")
-        return sorted(zip(matches, scores), key=lambda hit: (-hit[1], self.ids[hit[0]].int))[:top_k]
+        return nsmallest(top_k, zip(matches, scores), key=lambda hit: (-hit[1], self.ids[hit[0]].int))

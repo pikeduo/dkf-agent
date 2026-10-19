@@ -302,7 +302,9 @@ def test_async_boundary_does_not_use_base_callbacks_or_global_llm(monkeypatch):
 
 
 def test_existing_real_retriever_classes_share_query_service_and_readonly_sessions():
-    """使用已有两路类配合Session/Query Stub，确认一次Query编码、两份只读会话及SQL范围。"""
+    """两路共享一次Query编码；BM25分批扫描和命中取回在同一只读快照且保留SQL范围。"""
+    from bm25_stubs import StreamingSessionStub
+
     pytest.importorskip("rank_bm25", reason="缺少已声明rank-bm25；跳过不算通过")
     chunk, document = stored_pair()
     chunk.text = "NASA 既有证据"
@@ -311,7 +313,7 @@ def test_existing_real_retriever_classes_share_query_service_and_readonly_sessio
     def factory():
         """分别提供Dense/BM25已加载字段；不连接真实引擎、执行文档解析或写库。"""
         rows = [(chunk, document, 0.25)] if not sessions else [(chunk, document)]
-        session = ReadonlySessionStub(rows)
+        session = ReadonlySessionStub(rows) if not sessions else StreamingSessionStub(rows)
         sessions.append(session)
         return session
 
@@ -325,7 +327,8 @@ def test_existing_real_retriever_classes_share_query_service_and_readonly_sessio
     assert all(session.closed and session.settings[0] == "SET TRANSACTION READ ONLY" for session in sessions)
     assert all("document_chunks.doc_id IN" in str(session.statements[0]) for session in sessions)
     assert all(session.new == () and session.dirty == () for session in sessions)
-    assert "READY" in sessions[1].statements[0].compile().params.values()
+    assert ["READY", "PARTIAL_READY"] in sessions[1].statements[0].compile().params.values()
+    assert len(sessions[1].statements) == 2 and all(result.closed for result in sessions[1].results)
 
 
 def test_summary_logs_are_chinese_safe_and_keep_upstream_failure_code(monkeypatch):

@@ -8,7 +8,8 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.services.rag import bm25 as tool
-from test_dense_sql import SqlSessionStub, stored_pair
+from bm25_stubs import StreamingResultStub, StreamingSessionStub as SqlSessionStub
+from test_dense_sql import stored_pair
 
 
 def test_tokenizer_preserves_numbers_models_and_acronyms():
@@ -181,3 +182,91 @@ def test_explicit_chunk_budget_is_bounded_and_not_boolean(value):
     """拒绝无效/无界预算，不把资源参数当作正式样本前N限制。"""
     with pytest.raises(tool.BM25RetrievalError):
         tool.CorpusLimits(value, 1024, 100)
+
+
+def test_streamed_index_preserves_eager_bm25plus_scores_and_shares_terms(monkeypatch):
+    """逐块建索引保持原分词及精确评分，重复词项只驻留一个字符串对象。"""
+    import rank_bm25
+
+    items = [(UUID(int=1), 'repeat_keyword repeat_keyword NASA 深度求索 100'),
+             (UUID(int=2), 'repeat_keyword ESA 深度求索 100'), (UUID(int=3), '!!!')]
+    eager = rank_bm25.BM25Plus([tool.tokenize(text) for _, text in items], k1=1.5, b=0.75, delta=1)
+    original = rank_bm25.BM25Plus
+
+    def streamed(corpus, **kwargs):
+        """只接收单次迭代器，防止重新积攒全库词项数组。"""
+        assert iter(corpus) is corpus
+        return original(corpus, **kwargs)
+
+    monkeypatch.setattr(rank_bm25, 'BM25Plus', streamed)
+    index = tool.LocalBM25Index(items)
+    assert index._engine.doc_freqs == eager.doc_freqs and index._engine.idf == eager.idf
+    assert index._engine.doc_len == eager.doc_len and index._engine.avgdl == eager.avgdl
+    terms = [next(term for term in frequencies if term == 'repeat_keyword')
+             for frequencies in index._engine.doc_freqs[:2]]
+    assert terms[0] is terms[1]
+    for query in ('NASA', '深度求索 100', 'repeat_keyword ESA', 'unknown'):
+        tokens = list(dict.fromkeys(tool.tokenize(query)))
+        matches = [position for position, frequencies in enumerate(eager.doc_freqs)
+                   if not set(tokens).isdisjoint(frequencies)]
+        expected = sorted(zip(matches, eager.get_batch_scores(tokens, matches)),
+                          key=lambda hit: (-hit[1], items[hit[0]][0].int))[:2]
+        assert index.search(query, 2) == expected
+
+
+def test_source_iteration_batches_and_closes_when_consumer_stops():
+    """调用方提前停止也可关闭服务端游标，不依赖GC释放连接或all()物化。"""
+    pair = stored_pair()
+    session = SqlSessionStub([pair])
+    sources = tool.iter_sources(session, pair[0].kb_id)
+    assert next(sources) == pair and not session.results[0].closed
+    sources.close()
+    assert session.results[0].closed
+    assert session.statements[0].get_execution_options()['yield_per'] == tool.SOURCE_BATCH_SIZE
+
+
+def test_fetch_failure_closes_cursor_and_hides_private_error():
+    """分批拉取中途失败不返回半份来源，游标关闭且数据库错误原文不外泄。"""
+    class FailedFetch(StreamingResultStub):
+        """首行成功后模拟驱动取下一批时抛错。"""
+
+        def __iter__(self):
+            """保留一次成功读取，随后返回受控数据库故障。"""
+            yield self.rows[0]
+            raise SQLAlchemyError('PRIVATE_FETCH_PASSWORD')
+
+    pair = stored_pair()
+    session = SqlSessionStub([pair])
+    session.result_type = FailedFetch
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE') as error:
+        tool.select_sources(session, pair[0].kb_id)
+    assert session.results[0].closed and 'PRIVATE_FETCH_PASSWORD' not in str(error.value)
+
+
+@pytest.mark.parametrize('budget', [tool.CorpusLimits(1, 4096, 100), tool.CorpusLimits(10, 1, 100)])
+def test_streamed_limit_failure_closes_cursor_without_truncating(budget):
+    """行数或字节在后续批次超限时整批失败，不把已读前缀作为完整语料。"""
+    first = stored_pair()
+    second = stored_pair(first[0].kb_id, 2)
+    session = SqlSessionStub([first, second])
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_LIMIT'):
+        tool.select_sources(session, first[0].kb_id, limits=budget)
+    assert session.results[0].closed
+
+
+def test_cursor_close_failure_uses_safe_database_error():
+    """关闭游标异常也必须安全映射，不把驱动内部连接信息透传调用方。"""
+    class FailedClose(StreamingResultStub):
+        """模拟已读完来源后驱动释放失败。"""
+
+        def close(self):
+            """记录尝试关闭，再抛含私有信息的驱动异常。"""
+            super().close()
+            raise SQLAlchemyError('PRIVATE_CLOSE_CONNECTION')
+
+    pair = stored_pair()
+    session = SqlSessionStub([pair])
+    session.result_type = FailedClose
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE') as error:
+        tool.select_sources(session, pair[0].kb_id)
+    assert session.results[0].closed and 'PRIVATE_CLOSE_CONNECTION' not in str(error.value)

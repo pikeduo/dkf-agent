@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from contextlib import closing
 from threading import Lock
 from time import perf_counter
 from uuid import UUID
@@ -17,10 +18,16 @@ from app.core.business_logging import log_event
 from app.schemas.retrieval import RetrievalResult
 from app.services.rag.bm25 import (
     DEFAULT_TOP_K, MAX_QUERY_TERMS, BM25RetrievalError, LocalBM25Index, bm25_query, bm25_scope,
-    corpus_fingerprint, select_sources, tokenize, CorpusLimits, checked_limits,
+    corpus_fingerprint, iter_sources, select_sources, tokenize, CorpusLimits, checked_limits,
 )
 from app.services.rag.llama_index.dense_retriever import readonly_session
 from app.services.rag.llama_index.node_adapter import chunk_to_node, node_to_result
+
+
+def corpus_item(chunk, document):
+    """沿用完整Adapter校验后只留下ID/原文，临时Node及完整证据随本行释放。"""
+    node = chunk_to_node(chunk, document, include_embedding=False, log_success=False)
+    return UUID(node.node_id), node.text
 
 
 class BM25Retriever(BaseRetriever):
@@ -67,7 +74,7 @@ class BM25Retriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """读取完整READY快照，按实例预算复用原词频索引；超限不返回部分语料。"""
+        """分批验证整库并在同一只读快照取回Top-K证据，不同时保留全库ORM与Node。"""
         started, stage = perf_counter(), "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
@@ -89,32 +96,47 @@ class BM25Retriever(BaseRetriever):
                 if session.new or session.dirty or session.deleted or session.in_transaction():
                     raise BM25RetrievalError("BM25_SESSION")
                 session.execute(text("SET TRANSACTION READ ONLY"))
+                # 全库评分与命中证据属于同一查询快照，避免两次SELECT间发生代次变化。
+                session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
                 session.execute(text("SET LOCAL statement_timeout = '10s'"))
                 session.execute(text("SET LOCAL lock_timeout = '2s'"))
-                rows = select_sources(session, kb_id, doc_ids,
-                    **({"limits": self._corpus_limits} if self._corpus_limits is not None else {}))
+                budget_args = {"limits": self._corpus_limits} if self._corpus_limits is not None else {}
                 stage = "node_adapter"
-                nodes = [chunk_to_node(chunk, document, include_embedding=False, log_success=False)
-                         for chunk, document in rows]
-            items = [(UUID(node.node_id), node.text) for node in nodes]
-            stage = "index"
-            budget_args = {"limits": self._corpus_limits} if self._corpus_limits is not None else {}
-            key = corpus_fingerprint(items, **budget_args)
-            # 缓存只含词频/ID，返回 Node 永远来自本次 SQL；新元数据不会被旧缓存覆盖。
-            with self._index_lock:
-                reused = (self._index is not None and self._index.fingerprint == key
-                          and self._index_scope == (kb_id, doc_ids))
-                if not reused:
-                    index = LocalBM25Index(items, **budget_args)
-                    self._index, self._index_scope = index, (kb_id, doc_ids)
-                index = self._index
-            log_event("bm25.index_reused" if reused else "bm25.index_built", **scope_log,
-                      chunk_count=len(nodes), artifact_reused=reused)
-            stage = "score"
-            ranked = index.search(query, self._top_k)
-            result = [NodeWithScore(node=nodes[position], score=score) for position, score in ranked]
+                with closing(iter_sources(session, kb_id, doc_ids, **budget_args)) as rows:
+                    items = [corpus_item(chunk, document) for chunk, document in rows]
+                chunk_count = len(items)
+                stage = "index"
+                key = corpus_fingerprint(items, **budget_args)
+                # 缓存只含词频/ID；失效时先释放旧索引，避免重建期间同时驻留两份词频。
+                with self._index_lock:
+                    reused = (self._index is not None and self._index.fingerprint == key
+                              and self._index_scope == (kb_id, doc_ids))
+                    if not reused:
+                        self._index, self._index_scope = None, None
+                        self._index = LocalBM25Index(items, **budget_args)
+                        self._index_scope = (kb_id, doc_ids)
+                    index = self._index
+                log_event("bm25.index_reused" if reused else "bm25.index_built", **scope_log,
+                          chunk_count=chunk_count, artifact_reused=reused)
+                stage = "score"
+                ranked = index.search(query, self._top_k)
+                expected = {items[position][0]: items[position][1] for position, _ in ranked}
+                del items
+                nodes = {}
+                if ranked:
+                    stage = "node_adapter"
+                    for chunk, document in select_sources(session, kb_id, doc_ids,
+                            chunk_ids=list(expected), **budget_args):
+                        if chunk.text != expected[chunk.chunk_id]:
+                            raise BM25RetrievalError("BM25_RESULT")
+                        nodes[chunk.chunk_id] = chunk_to_node(chunk, document,
+                            include_embedding=False, log_success=False)
+                    if nodes.keys() != expected.keys():
+                        raise BM25RetrievalError("BM25_RESULT")
+                result = [NodeWithScore(node=nodes[index.ids[position]], score=score)
+                          for position, score in ranked]
             log_event("bm25.finished" if result else "bm25.empty", **scope_log,
-                      chunk_count=len(nodes), item_count=len(result), artifact_reused=reused,
+                      chunk_count=chunk_count, item_count=len(result), artifact_reused=reused,
                       duration_ms=(perf_counter() - started) * 1000)
             return result
         except Exception as exc:

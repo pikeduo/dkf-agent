@@ -13,20 +13,21 @@
 - QueryBundle仅接受原始query_str，不接受外部向量、变换文本或图片路径；空Query/非法控制符拒绝。无词项命中返回空集，不凑Top-K、不扩大知识库或文档范围。
 - 无新HTTP API、Worker、表、迁移、模型、API Key或环境变量。只需现有PostgreSQL、core/NLP缓存及已声明rank-bm25，无GPU、BGE-M3、Redis或云调用。
 
-来源固定为 **document_chunks → TextNode → 本地BM25派生索引 → NodeWithScore**。只读SQL限定Chunk/Document同kb_id、ACTIVE库、READY、可选doc_ids，且当前解析/切片/Embedding/Index代次一致；条件在语料LIMIT前下推。查询不读取embedding列、原件或私有模型部署配置，不绑定Query模型或产生新向量。BM25不比较当前Query的BGE模型身份，因为没有Query向量；返回证据仍保留已有入库模型身份。
+来源固定为 **document_chunks → 逐行校验/ID与正文 → 本地BM25派生索引 → 命中证据NodeWithScore**。只读SQL限定Chunk/Document同kb_id、ACTIVE库、READY/PARTIAL_READY、可选doc_ids，且当前解析/切片/Embedding/Index代次一致；条件在语料LIMIT前下推。查询不读取embedding列、原件或私有模型部署配置，不绑定Query模型或产生新向量。BM25不比较当前Query的BGE模型身份，因为没有Query向量；返回证据仍保留已有入库模型身份。
 
-只读会话禁用autoflush，显式READ ONLY、statement_timeout=10s、lock_timeout=2s。越界/旧代次/非READY返回行全批拒绝，无写入/自动重试/旧缓存降级。结果表示SQL查询快照，不保证查询返回后文档仍READY；正式HTTP入口的用户权限不由本阶段实现。
+只读会话禁用autoflush，显式READ ONLY、REPEATABLE READ、statement_timeout=10s、lock_timeout=2s。全库扫描和命中证据取回处于同一个查询级快照，查询结束释放会话，不跨题持有事务。越界/旧代次/未索引返回行全批拒绝，无写入/自动重试/旧缓存降级。结果表示SQL查询快照，不保证查询返回后文档仍可检索；正式HTTP入口的用户权限不由本阶段实现。
 
 原Node.id_=chunk_id、SOURCE=doc_id、kb_id/doc_id/chunk_id/file_name、page_start/page_end/section和完整chunk_metadata/source_spans/page_semantics均由既有Adapter深复制；不伪造物理页，不把元数据前缀当正文，不随机生成ID。不返回数据库向量。
 
 ## 分词、评分与派生缓存
 
-使用已有rank-bm25 **BM25Plus**，固定k1=1.5/b=0.75/delta=1，避免单Chunk/高频词的负IDF边界。手动提供词项列表，不使用其tokenizer回调（该回调会启动进程池）。分数不是概率、语义置信度或Dense余弦分数，不能直接相加。
+使用已有rank-bm25 **BM25Plus**，固定k1=1.5/b=0.75/delta=1，避免单Chunk/高频词的负IDF边界。逐块提供词项列表的迭代器，不使用其tokenizer回调（该回调会启动进程池）。分数不是概率、语义置信度或Dense余弦分数，不能直接相加。
 
 - NFKC与英文大小写归一化只用于词项，不改Node原文。数字、百分比、BGE-M3/RX-7800-XT等内部连接符型号保持完整词；数字千分位逗号去除，不转浮点数或改公式名称。
 - 中文采用字符+相邻二元片段，无jieba/外部分词模型。支持关键词基线，不宣称专业分词、语义同义词或专有名词消歧；中文长词可能部分匹配，须人工核对。欧洲小数、特殊Unicode符号和复杂单位规范化仍有边界。
 - 只对实际词项重叠的Chunk计分，避免BM25Plus背景delta分把零命中Chunk当Evidence。同分按原chunk_id UUID升序稳定排序。
-- 每个Retriever最多保留一个进程内词频索引。每次查询先读当前READY快照、重新派生Node；相同Chunk集合/原文/算法版本及范围可复用词频。原文、Chunk集合或版本改变重建；元数据改变用本次新Node，不返回缓存Node。数据库查询/Adapter/构建失败不返回旧缓存。
+- 每个Retriever最多保留一个进程内词频索引。每次按256条流式读取当前合格语料，逐行沿用完整Adapter校验，临时Node随行释放，仅积累ID/原文；评分后只加载Top-K的完整证据。命中ID/正文必须与评分输入一致，缺失或改变整批失败。相同Chunk集合/原文/算法版本及范围可复用词频，元数据始终来自本次快照；不缓存Node或跳过未命中行的校验。
+- 建索引只持有一块临时词项，相同词项字符串在本次构建共享，不积攒整库词项数组或使用全局永久词表。失效索引先释放再重建；并发请求已经持有的索引会在其查询结束后释放。Top-K使用有界堆，原评分与同分UUID规则保持。数据库查询/Adapter/构建失败不返回旧缓存。
 - 不保存磁盘索引、不使用pickle、不新建业务表或第二份Node真相；重启后自然重建。每次仍需读取合格语料，首次构建及大库读取有CPU/内存成本，吞吐待验收。
 
 首版安全预算：最多10,000个Chunk（SQL多读1条检测超限）、语料正文32 MiB UTF-8、4,000,000个派生词项，Query最多32768字符/512个派生词项。超限返回BM25_LIMIT，不截断成不完整检索。可用doc_ids缩小范围；预算不是进程总内存上限，ORM/证据元数据/词频还有额外内存成本。大库增量或持久化缓存应另行设计，不在本阶段自动展开。
@@ -50,12 +51,12 @@ core首次导入仍可能检查NLTK缓存，由用户按[Adapter说明](LLAMA_IN
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_bm25.py tests/test_bm25_retriever.py -q
+python -m pytest tests/test_bm25.py tests/test_bm25_retriever.py tests/test_hybrid_retriever.py -q -ra
 # 验证相邻已实现行为不变：
 python -m pytest tests/test_dense_sql.py tests/test_dense_retriever.py tests/test_llama_index_adapter.py tests/test_business_logging.py -q
 ```
 
-覆盖数字/型号/缩写/中文片段、零重叠、单Chunk、排序/同分、范围及READY/代次SQL、Node/DTO完整证据、无Embedding、惰性/异步、内容/集合/元数据变化、来源失败不降级旧缓存、超限和日志脱敏。仅内存字段/词项/Session Stub，无真实素材、数据库、Parser或模型；core缺失跳过不算通过。Codex没有执行上述用例。
+覆盖数字/型号/缩写/中文片段、零重叠、单Chunk、排序/同分、范围及READY/代次SQL、Node/DTO完整证据、无Embedding、惰性/异步、内容/集合/元数据变化、来源失败不降级旧缓存、超限和日志脱敏。新增分批读取/中断关闭、词项共享、旧版评分一致、仅Top-K保留Node、未命中坏证据仍拒绝及失效索引先释放的回归。仅内存字段/词项/Session Stub，无真实素材、数据库、Parser或模型；core缺失跳过不算通过。Codex没有执行上述用例。
 
 ## 最小真实验收（PowerShell，仅用户执行）
 
@@ -100,3 +101,5 @@ python -c $bm25ReadCheck
 ## 阶段33全量预算补充
 
 生产默认语料上限不变。离线正式评测可向`BM25Retriever(..., corpus_limits=CorpusLimits(...))`显式传入实例资源预算，复用同一SQL/词项/评分/Node边界；最多20万Chunk、512MiB原文、6400万词项。上限仅用于拒绝过大语料，不按前N截断或修改全局常量。正式命令/预算及未验收事项见[阶段33](STAGE33_EVALUATION.md)，无新依赖、迁移或环境变量。
+
+本轮改动减少全库ORM/证据Node与临时词项的同时驻留，不降低检索范围、分词预算或证据完整性。进程仍需保存词频索引，阶段33还会加载两个本地模型；不能承诺固定GB上限。实际内存、耗时及PostgreSQL驱动流式兼容性待用户运行确认。正在运行的Python不会自动加载修改；用户应在当前题结束后停止旧评测进程，再按相同run/抽样参数与`--resume`启动新进程，已成功题保留。

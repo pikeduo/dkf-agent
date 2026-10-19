@@ -554,7 +554,7 @@ curl.exe -X POST "http://127.0.0.1:8000/api/admin/knowledge-bases/知识库UUID/
 
 已有READY文档可使用 `app.services.rag.llama_index.bm25_retriever.BM25Retriever(kb_id, doc_ids=None, top_k=20)`，`retrieve(query)`返回统一NodeWithScore，`retrieve_results(query)`返回原证据DTO。文档范围与Dense相同，无词项命中返回空集；独立BM25只读PostgreSQL、不加载BGE-M3/GPU、不需要Worker或新API Key。HTTP入口统一Hybrid/重排，不另设BM25接口。
 
-使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次读取当前READY语料，不产生第二套业务表或磁盘索引。首次构建有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
+使用已声明rank-bm25和core；新环境缺包时手动 `python -m pip install "rank-bm25>=0.2.2,<0.3"`，core/NLP缓存沿用原准备方式。索引仅为实例内可重建词频缓存，每次分批读取当前READY/PARTIAL_READY语料并校验证据，仅保留命中项的完整Node；建索引逐块分词，不产生第二套业务表或磁盘索引。首次构建仍有CPU/内存成本，超限失败而非部分检索；分词/使用命令和人工验收见 [BM25 Retriever](docs/BM25_RETRIEVAL.md)。
 
 ### Hybrid Python Retriever
 
