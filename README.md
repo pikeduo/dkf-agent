@@ -98,7 +98,7 @@ HYBRID_MAX_IMAGE_MB=16
 - API/Worker 共用可读写的 `PARSED_DIR`（默认 data/parsed）；每个缓存代次上限默认 768 MiB，超限明确失败。缓存包含原文/ZIP，限制目录访问并备份整个目录，不在运行中删隐藏元数据；自定义仓库内目录需自行加入忽略规则。没有自动清理。
 - Native 解析/切片无需外部密钥或 GPU；云解析从 [MinerU API 管理页](https://mineru.net/apiManage/docs) 获取 Token。文档向量化需要本地 BGE-M3、CUDA GPU 和 GPU Worker；不需要 DeepSeek Key，不下载 Reranker。
 - API/GPU Worker 共用可读写的 EMBEDDINGS_DIR，默认 data/embeddings；向量文件含业务衍生数据，应限制访问并备份，不入仓库。每代次结果上限 512 MiB，无自动清理；模型和向量目录自定义到仓库内时需自行配置忽略规则。
-- 切片不读取原件、不调用MinerU或模型；CHUNK_SIZE允许400～700，CHUNK_OVERLAP允许50～100。新v7支持Native带引号TSV逻辑行和大HTML表流式行组，不因整份字符/行/单元格总数拒绝；保留表题/注释、rowspan关联行、原Block/页码/字符来源。旧v1～v6配方冻结，普通Retry不升级；大表可能产生更多Chunk/向量并增加CPU、磁盘和GPU耗时，应串行恢复。公式及无法安全拆分的单行保持完整，真实Tokenizer仍拒绝超限输入，详见[Chunk](docs/CHUNK.md)。
+- CPU切片不读取原件、不调用MinerU或模型；CHUNK_SIZE允许400～700，CHUNK_OVERLAP允许50～100。v7支持Native带引号TSV和大HTML表流式完整行组。文档向量化新增真实Tokenizer预检：超长正文继续细分，旧整表从当前Block重建安全行组，保留原文/页码/字符来源；不重新解析或调用云端。公式及无法安全细分的完整行组明确返回EMBEDDING_UNSPLITTABLE。旧成功结果不自动重建，长度失败Retry规则见[Embedding](docs/EMBEDDING.md)。
 - 云解析会上传原件并消耗账户额度，请先确认文档允许外传。同账户 Worker 共用限流 Redis/命名空间，不通过修改保护值绕过额度；Redis 故障时不调用云端。
 - MinerU API、签名上传和 ZIP 下载固定直连，不读取环境/Windows 系统代理、不回退代理；仍校验证书，不能绕过 VPN/TUN 的系统路由。
 
@@ -354,15 +354,15 @@ python -c $embeddingDeployCheck
 python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=solo --concurrency=1 --hostname=gpu@%h -l info
 ```
 
-应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型仅首次编码时加载，ready/health 不证明 GPU 已验收；一份文档一个任务、内部批处理，不每 Chunk 投递一次，只启动 CPU Worker 不会执行向量化。
+应显示 gpu_queue、app.tasks.embeddings.embed_document 和 ready。模型在首次Token预检或编码时加载，ready/health不证明GPU已验收。每份文档内部批处理；需要安全重切时先提交新检查点，再交接一次新向量任务，不为每个Chunk投递任务。只启动CPU Worker不会执行向量化。
 
 对已切片、状态为 EMBEDDING 的文档调用 `POST /api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/embed`，命令见 [已有 Chunk 向量化](#已有-chunk-向量化)。完成为 INDEXING / awaiting_index，结果仅保存在 EMBEDDINGS_DIR；不写 pgvector、不创建索引、不标记 READY。详细真实验收、SQL 与故障恢复继续参阅 [Embedding](docs/EMBEDDING.md)，不在此重复业务测试清单。
 
-若旧整表Chunk报`EMBEDDING_TOO_LONG`，待活动任务安全结束后手动重启API/CPU/GPU Worker，再调用`POST /api/admin/documents/{doc_id}/reindex`，从已有成功解析缓存重建切片并自动接续向量化/入库。新检查点使用`block-chunk-v5`，额外兼容HTML单元格内无属性的`strong`加粗标签，完整行/rowspan及原字符来源保留；v1～v4检查点冻结。普通Retry沿用旧Chunk。此操作只处理指定文档、无MinerU请求；解析质量保留，原PARTIAL可结束为PARTIAL_READY。若仍超限，查看`embedding.chunk_rejected`中的chunk_id、原数组序号、真实Token数及限制数量，保留原文不截断。先完成当前路由配置下的缓存Reindex，再调整XML预检预算；配置变化会影响缓存身份。
+向量阶段因`EMBEDDING_TOO_LONG/EMBEDDING_LIMIT`失败时，待任务安全结束，手动重启API/CPU/GPU Worker使新代码生效，再调用`POST /api/admin/documents/{doc_id}/retry`。入口核对原向量输入Hash及冻结模型配置，启用`embedding-token-refinement-v1`：先全量真实Token预检，必要时核对原Block Hash并重切、提交新Chunk/向量代次，然后编码并接续原Index。原件、Block及解析质量不变，无MinerU请求，也不要求先升级Parse Cache。重切时embedding_task_id会变化，应查询文档`/status`判断业务进度，旧任务返回rechunked不表示已入库。改变模型配置或修复CPU切片源预算仍使用显式缓存Reindex。
 
 `chunk.started`的`step`记录实际冻结的`block-chunk-v*`版本；只重启API不会更新已运行的CPU Worker。旧成功Office Job只有v2/v3缓存时，可用显式离线工具`python scripts/upgrade_mineru_office_cache.py --help`核对原Job/同Hash原件后转换并发布目标新缓存，再调用原Reindex。默认只核验，`--execute`运行本地Adapter，`--publish`才发布缓存；不请求MinerU或写业务SQL。升级前停止相关API/Worker，原成功缓存及Job不改；只支持整份DOCX/PPTX，身份/配置不符或目标已有缓存时拒绝覆盖，详见[恢复说明](docs/STAGE33_EVALUATION.md#较早清单30份failed68份partial_ready的恢复)。
 
-若`status=EMBEDDING`但`embedding_task_id=null`、`management.state=failed`，并不表示正在推理。旧v1～v5仍有1600万字符/2万Chunk聚合门槛，v6/v7不套用该整份门槛。`EMBEDDING_LIMIT`需看具体事件：`embedding.input_rejected`是旧聚合预算；`embedding.chunk_resource_rejected`给出单片字符数、上限和真实chunk_id，不能当作模型Token错误。新版会在完整输入Hash预检中发现巨片，先于GPU加载；表格切片修复须在任务安全结束、重启API/CPU/GPU后显式`POST /api/admin/documents/{doc_id}/reindex`回放原缓存，普通Retry仍用旧Chunk。Service单次1000万字符、单片100万字符及8192真实Token保护不变，不因重建切片重新请求MinerU。
+若`status=EMBEDDING`但`embedding_task_id=null`、`management.state=failed`，并不表示正在推理。新向量配方通过流式预检/批处理接住旧聚合预算和巨片；Service单批1000万字符、单片100万字符及模型真实Token上限仍保持。`embedding.rechunk_started`表示发现需要重切的输入；`embedding.rechunk_persisted`才表示新检查点提交；`embedding.preflight_passed`后开始编码。若返回`EMBEDDING_UNSPLITTABLE`，查看`embedding.rechunk_blocked`的FORMULA/TABLE_ROW_GROUP/TEXT_CHARACTER原因及页码；不截断内容、不无限投递重切任务，不冒充READY。
 
 ### 运行日志
 
@@ -472,7 +472,7 @@ MinerU 单文件仍受 200 MB/200 页限制（分片保守取最多200,000,000�
 - 保存最初响应的 task_id，可通过 /tasks 查询路由决策及任务结果（默认保留 24 小时）。转云后的文档 task_id 是本地云代次，不是短任务结果 ID；未知/过期结果 PENDING 也不一定表示排队。
 - 新上传失败或编排超时先查`/api/admin/documents/{doc_id}/status`、详情及parse-jobs，修复原因后用文档级`/retry`恢复，不重传或重建全库。旧无编排文档仅UPLOADED/FAILED可通过`/process`重投，活动云任务用`/mineru`恢复；活动管理任务拒绝旧写入口。收费失败且无缓存仍需明确Force，不因普通Retry新增云批次。
 - 已验证的解析缓存命中不再提交 MinerU；相同视觉图片跨 XLSX 复用，仅未命中的图片聚合为一份 Bundle。缓存失败不降级为不完整 Native，不静默重新收费。
-- 新切片使用`block-chunk-v7`：在v6分批链路上增加两遍HTML行扫描，先完整验证、再按完整行及rowspan关联组切片，不再因旧整表网格预算回退成数百万字符的Chunk。旧v1～v6检查点不自动升级；失败文档应在任务安全结束、更新API/CPU/GPU Worker后，执行一次`POST /api/admin/documents/{doc_id}/reindex`回放原缓存；无需新解析/迁移或改上限。预计Chunk数量及GPU耗时增加，原来源/Hash、真实Token、完整索引事务和PARTIAL质量保留，不能预称READY。
+- 新CPU切片使用`block-chunk-v7`，旧成功配方冻结。向量长度失败可通过文档级Retry启用真实Token重切；CPU切片阶段的旧CHUNK_LIMIT仍通过缓存Reindex建立v7。二者均不重新请求MinerU，保留原来源/Hash及PARTIAL质量。预计Chunk数量、磁盘和GPU耗时可能增加，最终以原Index全量提交的READY/PARTIAL_READY为准。
 - 旧知识库嵌套`/reindex`保留仅回放到CHUNKING的兼容语义；新文档级`/api/admin/documents/{doc_id}/reindex`自动接续切片、GPU向量化及入库。两者均不重新调用MinerU，缓存缺失/损坏/参数变化明确失败，旧结果保留供诊断，不自动Force。成功回放替换Block时同事务失效旧Chunk。
 - `/reparse` 必须明确 `force=true`，跳过整份和视觉缓存；有活动云/切片/GPU/入库检查点时拒绝维护。维护支持 UPLOADED/FAILED/CHUNKING/EMBEDDING/INDEXING/READY/PARTIAL_READY；换代次后旧 Chunk/向量仅供诊断，成功解析/缓存回放时整体替换。管理接口暂无鉴权，仅限可信环境。
 

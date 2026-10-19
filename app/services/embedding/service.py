@@ -32,6 +32,7 @@ ERRORS = {
     "EMBEDDING_INPUT": "Embedding 输入必须是非空文本列表",
     "EMBEDDING_LIMIT": "Embedding 输入超过本地资源上限",
     "EMBEDDING_TOO_LONG": "输入超过模型真实 token 上限，未截断或生成不完整向量",
+    "EMBEDDING_UNSPLITTABLE": "完整公式、表格行组或未知结构仍超限，无法在保留结构和来源的前提下继续拆分",
     "EMBEDDING_OUTPUT": "模型输出数量、维度或数值无效",
     "EMBEDDING_INFERENCE": "本地模型推理失败，请检查 GPU 显存与运行环境",
     "EMBEDDING_EMPTY": "文档没有可向量化的 Chunk",
@@ -243,6 +244,34 @@ class EmbeddingService:
                     "dimension": DIMENSION, "normalized": True, "version": VERSION,
                     "max_length": self.options.max_length,
                     "precision": "fp16" if self.options.use_fp16 and self.options.device.startswith("cuda:") else "fp32"}
+
+    def token_counts(self, texts: list[str]) -> list[int]:
+        """只用同一真实Tokenizer预检完整输入（含特殊Token），不截断、不计算向量。"""
+        if not isinstance(texts, list) or any(not isinstance(text, str) or not text.strip() for text in texts):
+            raise EmbeddingError("EMBEDDING_INPUT")
+        if (len(texts) > MAX_ITEMS or any(len(text) > MAX_TEXT_CHARS for text in texts)
+                or sum(map(len, texts)) > MAX_TOTAL_CHARS):
+            raise EmbeddingError("EMBEDDING_LIMIT")
+        if not texts:
+            return []
+        try:
+            with self._lock:
+                self._ensure_model()
+                counts = []
+                for offset in range(0, len(texts), self.options.batch_size):
+                    batch = texts[offset:offset + self.options.batch_size]
+                    ids = self._model.tokenizer(batch, add_special_tokens=True, padding=False,
+                        truncation=False, return_attention_mask=False)["input_ids"]
+                    if len(ids) != len(batch):
+                        raise EmbeddingError("EMBEDDING_OUTPUT")
+                    counts.extend(len(row) for row in ids)
+                if model_stamp(self._files) != self._stamp:
+                    raise EmbeddingError("EMBEDDING_MODEL_CHANGED")
+                return counts
+        except EmbeddingError:
+            raise
+        except Exception:
+            raise EmbeddingError("EMBEDDING_INFERENCE") from None
 
     def _encode(self, texts: list[str], operation: str) -> list[list[float]]:
         """逐批核对字符资源和真实长度，记录具体类别/序号；不截断或返回半份向量。"""

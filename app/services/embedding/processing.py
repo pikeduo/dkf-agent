@@ -4,7 +4,7 @@ import logging
 import hashlib
 import json
 from pathlib import Path
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -16,37 +16,41 @@ from app.services.document_processing import transition_document
 from app.services.chunk.splitter import STREAM_VERSIONS
 from app.services.embedding.artifacts import ArtifactStore, digest_json
 from app.services.embedding.service import DIMENSION, MAX_ITEMS, MAX_TEXT_CHARS, MAX_TOTAL_CHARS, EmbeddingError, EmbeddingOptions, get_embedding_service
+from app.services.embedding.refinement import POLICY as INPUT_POLICY, first_oversized, rebuild_chunks
 
 # 旧检查点保留聚合预算；v6/v7按批次读取，Service每次调用仍保留1000万字符限制。
 MAX_DOCUMENT_TOTAL_CHARS = 16_000_000
 
 
 def streaming_document(document) -> bool:
-    """v6/v7均沿用流式向量及索引契约，不因升级切片而退回旧聚合门槛。"""
+    """v6/v7及显式Token重切配方按批处理；旧成功向量检查点不隐式换算法。"""
     config = getattr(document, "chunk_config", None)
+    embedding = getattr(document, "embedding_config", None)
     return (isinstance(config, dict) and isinstance(config.get("options"), dict)
-            and config["options"].get("version") in STREAM_VERSIONS)
+            and config["options"].get("version") in STREAM_VERSIONS
+            or isinstance(embedding, dict) and embedding.get("input_policy") == INPUT_POLICY)
 
 
 class ChunkRows:
     """可重复遍历的当前Chunk视图；仅保留计数，每遍有界读取并复核来源/连续序号。"""
 
-    def __init__(self, session, document, query, count):
-        """绑定已持有文档锁的会话和查询，不提前读取所有正文。"""
+    def __init__(self, session, document, query, count, *, allow_refinement=False):
+        """绑定行锁会话；重切预检可读取巨片，但后续索引读取仍执行单片字符保护。"""
         self.session, self.document, self.query, self.count = session, document, query, count
+        self.allow_refinement = allow_refinement
 
     def __len__(self):
         """返回已核对的SQL计数，供结果与索引完整性校验。"""
         return self.count
 
     def __iter__(self):
-        """每次预取256行，核对来源及单片字符；首次全量Hash即拒绝巨片，不先浪费GPU。"""
+        """每次预取256行并核对来源/序号；仅重切输入阶段把字符超限交给预检处理。"""
         source = str(self.document.processing_task_id) if self.document.processing_task_id else None
         seen = 0
         for seen, row in enumerate(self.session.execute(self.query.execution_options(yield_per=256)), 1):
             if row.chunk_index != seen or row.source_parse_task_id != source or not row.text.strip():
                 raise EmbeddingError("EMBEDDING_SOURCE")
-            if len(row.text) > MAX_TEXT_CHARS:
+            if not self.allow_refinement and len(row.text) > MAX_TEXT_CHARS:
                 error = EmbeddingError("EMBEDDING_LIMIT", step="TEXT_CHAR_LIMIT", item_index=seen,
                                        item_count=len(row.text), limit_count=MAX_TEXT_CHARS)
                 log_event("embedding.chunk_resource_rejected", level=logging.ERROR, doc_id=self.document.doc_id,
@@ -58,15 +62,15 @@ class ChunkRows:
             raise EmbeddingError("EMBEDDING_SOURCE")
 
 
-def read_chunks(session: Session, document: Document) -> list | ChunkRows:
-    """v6返回逐批读取视图，不因整篇字符/Chunk数拒绝；旧版本保留预算和来源规则。"""
+def read_chunks(session: Session, document: Document, *, allow_refinement=False) -> list | ChunkRows:
+    """重切预检使用有界视图接住旧巨片；其他入口保留冻结预算与来源/字符保护。"""
 
     predicate = (DocumentChunk.doc_id == document.doc_id, DocumentChunk.kb_id == document.kb_id)
     count, chars = session.execute(select(func.count(), func.coalesce(func.sum(func.length(DocumentChunk.text)), 0))
                                   .select_from(DocumentChunk).where(*predicate)).one()
     if count == 0:
         raise EmbeddingError("EMBEDDING_EMPTY")
-    if not streaming_document(document) and (count > MAX_ITEMS or chars > MAX_DOCUMENT_TOTAL_CHARS):
+    if not allow_refinement and not streaming_document(document) and (count > MAX_ITEMS or chars > MAX_DOCUMENT_TOTAL_CHARS):
         chars_exceeded = chars > MAX_DOCUMENT_TOTAL_CHARS
         log_event("embedding.input_rejected", level=logging.ERROR, doc_id=document.doc_id,
             stage="embedding.document_budget", step="TOTAL_CHAR_LIMIT" if chars_exceeded else "CHUNK_COUNT_LIMIT",
@@ -77,8 +81,8 @@ def read_chunks(session: Session, document: Document) -> list | ChunkRows:
         DocumentChunk.chunk_metadata["chunk_index"].as_integer().label("chunk_index"),
         DocumentChunk.chunk_metadata["source_parse_task_id"].as_string().label("source_parse_task_id"))
         .where(*predicate).order_by(DocumentChunk.chunk_metadata["chunk_index"].as_integer().asc().nulls_last()))
-    if streaming_document(document):
-        return ChunkRows(session, document, query, count)
+    if allow_refinement or streaming_document(document):
+        return ChunkRows(session, document, query, count, allow_refinement=allow_refinement)
     rows = session.execute(query).all()
     source = str(document.processing_task_id) if document.processing_task_id else None
     if any(row.chunk_index != index or row.source_parse_task_id != source or not row.text.strip()
@@ -133,11 +137,13 @@ def checked_config(document: Document) -> tuple[dict, EmbeddingOptions]:
         raise EmbeddingError("EMBEDDING_CONFIG") from None
     if not options.device.startswith("cuda:"):
         raise EmbeddingError("EMBEDDING_GPU_REQUIRED")
+    if "input_policy" in config and config["input_policy"] != INPUT_POLICY:
+        raise EmbeddingError("EMBEDDING_CHECKPOINT")
     return config, options
 
 
 def prepare_embedding(session: Session, document: Document, settings: Settings) -> tuple[UUID, bool]:
-    """行锁下创建/恢复 GPU 代次；INDEXING/READY 不重算，入库失败应恢复 /index。"""
+    """新输入和长度失败Retry启用真实Token重切；保留模型配置，已完成向量不重算。"""
 
     active = session.scalar(select(DocumentParseJob.job_id).where(
         DocumentParseJob.doc_id == document.doc_id, DocumentParseJob.is_active.is_(True)))
@@ -151,12 +157,19 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
     if (document.status not in {"EMBEDDING", "FAILED"} or document.chunk_task_id is None
             or document.status == "FAILED" and document.embedding_task_id is None):
         raise EmbeddingError("EMBEDDING_STATE")
-    rows = read_chunks(session, document)
+    previous = document.embedding_config
+    refine = (document.embedding_task_id is None
+        or isinstance(previous, dict) and previous.get("input_policy") == INPUT_POLICY
+        or document.status == "FAILED" and (document.error_message or "").split("：", 1)[0]
+            in {"EMBEDDING_TOO_LONG", "EMBEDDING_LIMIT"})
+    rows = read_chunks(session, document, allow_refinement=True) if refine else read_chunks(session, document)
     source_hash = chunks_hash(rows)
     if document.embedding_task_id is not None:
         config, _ = checked_config(document)
         if config["source_hash"] != source_hash:
             raise EmbeddingError("EMBEDDING_SOURCE")
+        if refine:
+            document.embedding_config = config | {"input_policy": INPUT_POLICY}
     else:
         options = EmbeddingOptions.from_settings(settings)
         if not options.device.startswith("cuda:"):
@@ -171,14 +184,15 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
         document.embedding_task_id = uuid4()
         document.embedding_config = {"options": options.snapshot(), "source_hash": source_hash,
             "source_parse_task_id": str(document.processing_task_id) if document.processing_task_id else None,
-            "source_chunk_task_id": str(document.chunk_task_id), "output_dir": output_dir}
+            "source_chunk_task_id": str(document.chunk_task_id), "output_dir": output_dir,
+            "input_policy": INPUT_POLICY}
     document.status, document.error_message = "EMBEDDING", None
     session.flush()
     return document.embedding_task_id, True
 
 
 def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """v6/v7逐批读取/编码/写文件；单片资源预检先于GPU，真实Token及原子发布不变。"""
+    """新版先真实Token预检；超长先提交新切片/向量代次，再投递编码，不发布旧输入产物。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -191,7 +205,8 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     if document.status != "EMBEDDING":
         return result | {"status": "skipped"}
     config, options = checked_config(document)
-    rows = read_chunks(session, document)
+    refine = config.get("input_policy") == INPUT_POLICY
+    rows = read_chunks(session, document, allow_refinement=True) if refine else read_chunks(session, document)
     if chunks_hash(rows) != config["source_hash"]:
         raise EmbeddingError("EMBEDDING_SOURCE")
     store = ArtifactStore(config["output_dir"])
@@ -204,6 +219,49 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
     if manifest is None:
         service = get_embedding_service(options)
         identity = service.identity()
+        if refine:
+            repaired = config.get("token_refinement")
+            if repaired is not None and (not isinstance(repaired, dict) or repaired.get("version") != INPUT_POLICY
+                    or repaired.get("model_fingerprint") != identity["model_fingerprint"]
+                    or repaired.get("max_length") != identity["max_length"]):
+                raise EmbeddingError("EMBEDDING_MODEL_CHANGED")
+            log_event("embedding.preflight_started", doc_id=doc_id, task_id=task_id,
+                      stage="embedding.token_preflight", chunk_count=len(rows))
+            oversized = first_oversized(rows, service, options.max_length, batch_size=options.batch_size)
+            if oversized is not None:
+                if repaired is not None or getattr(document, "index_task_id", None) is not None:
+                    # 同模型重切结果必已逐片通过；不允许状态损坏形成无限重切/队列循环。
+                    raise EmbeddingError("EMBEDDING_SOURCE")
+                row, step, observed, limit = oversized
+                log_event("embedding.rechunk_started", doc_id=doc_id, task_id=task_id, chunk_id=row.chunk_id,
+                    stage="embedding.rechunk", step=step, item_index=row.chunk_index,
+                    item_count=observed, limit_count=limit)
+                if (not isinstance(document.chunk_config, dict)
+                        or not isinstance(document.chunk_config.get("options"), dict)):
+                    raise EmbeddingError("EMBEDDING_CHECKPOINT")
+                previous_options = document.chunk_config["options"]
+                count = rebuild_chunks(session, document, service, identity)
+                # 新代次先与Chunk同事务提交；当前任务从不写任何旧/新向量文件。
+                # SQL失败则整批回滚；提交后投递丢失可用Retry恢复新的向量检查点。
+                document.chunk_task_id = uuid5(document.chunk_task_id, INPUT_POLICY + ":" + digest_json(identity))
+                new_rows = read_chunks(session, document)
+                source_hash = chunks_hash(new_rows)
+                next_task_id = uuid5(task_id, INPUT_POLICY + ":" + source_hash)
+                document.embedding_task_id = next_task_id
+                document.embedding_config = {key: value for key, value in config.items() if key != "result"} | {
+                    "source_hash": source_hash, "source_chunk_task_id": str(document.chunk_task_id),
+                    "token_refinement": {"version": INPUT_POLICY, "previous_source_hash": config["source_hash"],
+                        "previous_chunk_options": previous_options, "model_fingerprint": identity["model_fingerprint"],
+                        "max_length": options.max_length}}
+                management = getattr(document, "management_config", None)
+                if (isinstance(management, dict) and management.get("state") == "running"
+                        and management.get("stage") == "embed" and management.get("stage_task_id") == str(task_id)):
+                    document.management_config = management | {"stage_task_id": str(next_task_id)}
+                session.flush()
+                return result | {"status": "rechunked", "document_status": "EMBEDDING",
+                                 "chunk_count": count, "next_task_id": str(next_task_id)}
+            log_event("embedding.preflight_passed", doc_id=doc_id, task_id=task_id,
+                      stage="embedding.token_preflight", chunk_count=len(rows))
         streamed = streaming_document(document)
         with store.writer(doc_id, task_id, streaming=streamed) as writer:
             for batch_index, batch in enumerate(embedding_batches(rows, options.batch_size), 1):

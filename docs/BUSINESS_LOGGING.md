@@ -55,6 +55,8 @@ v7大HTML表切分记录`chunk.table_split / stage=chunk.html_stream_rows`，仅
 
 ## 主要事件
 
+向量预检使用`embedding.preflight_started/preflight_passed`，表示全部输入尚未编码/已通过真实Token检查；`embedding.rechunk_started`记录首个超长Chunk、固定TOKEN_LIMIT/TEXT_CHAR_LIMIT及计数。`embedding.rechunk_persisted`只在新Chunk与检查点事务提交后记录，随后交接新GPU任务；不是向量入库完成。`embedding.rechunk_blocked`仅记录FORMULA/TABLE_ROW_GROUP/TEXT_CHARACTER、页码和EMBEDDING_UNSPLITTABLE，不输出原式、表格内容、Token IDs、来源片段或模型指纹。原每日单文件/角色和字段白名单保持不变。
+
 LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次转换、冻结PDF复用和安全失败；`office.split_authorized`仅表示管理员给定最多新片预算，不代表已提交或已收费。字段只有doc/job、格式、页数、实际大小/限制、耗时及固定错误码；不输出可执行路径、profile、stdout/stderr、正文、应用环境或凭据。CLI本地报告可含打开PDF的路径，不进入业务日志。
 
 阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。

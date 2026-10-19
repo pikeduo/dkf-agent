@@ -917,6 +917,17 @@ def test_token_limit_log_identifies_chunk_and_counts_without_exposing_input(even
     assert "SECRET" not in events.getvalue()
 
 
+@pytest.mark.parametrize("event", ["embedding.preflight_started", "embedding.preflight_passed",
+    "embedding.rechunk_started", "embedding.rechunk_persisted", "embedding.rechunk_blocked"])
+def test_token_refinement_events_use_safe_registered_summaries(events, event):
+    """新预检/重切事件集中注册，只记录阶段/计数，来源、Token IDs和指纹不外泄。"""
+    logs.log_event(event, doc_id=uuid4(), stage="embedding.rechunk", chunk_count=4, limit_count=8192,
+        text="SECRET_BODY", input_ids=[1, 2], model_fingerprint="SECRET_HASH", model_dir="SECRET_PATH")
+    [record] = records(events)
+    assert event in logs.EVENT_LABELS and record["chunk_count"] == 4
+    assert "SECRET" not in events.getvalue() and "业务事件" not in events.getvalue()
+
+
 @pytest.mark.parametrize("value", ["SECRET_BODY", -1, True, 1.5, 2**63, float("nan")])
 def test_token_count_log_rejects_non_integer_or_sensitive_values(events, value):
     """新增Token计数字段与资源计数一样受限，不能用字符串或非法数字绕过脱敏。"""

@@ -5,15 +5,15 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 import pytest
 from celery.exceptions import Retry
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.api import admin_knowledge_bases as admin_api
 from app.core.celery_app import celery_app
 from app.core.config import Settings
-from app.models import Document, DocumentChunk, KnowledgeBase
-from app.services.chunk.splitter import ChunkOptions
+from app.models import Document, DocumentBlock, DocumentChunk, KnowledgeBase
+from app.services.chunk.splitter import LEGACY_VERSION, ChunkOptions, SourceBlock, build_chunks
 from app.services.embedding import processing
 from app.services.embedding.artifacts import ArtifactStore, digest_json
 from app.services.embedding.service import DIMENSION, MODEL_ID, VERSION, EmbeddingError
@@ -38,6 +38,10 @@ class DenseStub:
 
         return {"model_name": MODEL_ID, "dimension": DIMENSION, "normalized": True,
                 "version": VERSION, "model_fingerprint": "f" * 64, "max_length": 8192, "precision": "fp16"}
+
+    def token_counts(self, texts):
+        """仅模拟特殊Token长度预检，不进行推理；现有批次失败注入保持独立。"""
+        return [len(text) + 2 for text in texts]
 
     def embed_documents(self, texts):
         """收集整批文本，指定批次可安全失败，不提交每个 Chunk 的子任务。"""
@@ -369,3 +373,127 @@ def test_chunk_repeat_after_embedding_does_not_reset_gpu_result(context):
     with context.session() as session:
         assert session.get(Document, context.ids[1]).embedding_task_id == task_id
     assert len(context.stub.calls) == 3
+
+
+def legacy_table(context):
+    """仅在隔离schema构造旧整表检查点；不创建Office文件、转换PDF或访问云端。"""
+    text = "字段\t原式\n" + "".join(f"条目{i}\t=SUM(A{i}:B{i})\n" for i in range(1500))
+    source = SourceBlock(uuid4(), 1, 1, "Sheet1", "table", text, "native_parser")
+    options = ChunkOptions(version=LEGACY_VERSION)
+    with context.session() as session, session.begin():
+        document = session.get(Document, context.ids[1])
+        document.file_type = "xlsx"
+        document.parse_quality = {"content": "PARTIAL"}
+        document.chunk_config = {"options": options.snapshot(), "source_parse_task_id": str(document.processing_task_id)}
+        session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document.doc_id))
+        session.add(DocumentBlock(block_id=source.block_id, doc_id=document.doc_id, block_index=1,
+            page=1, section=source.section, block_type="table", text=text, source=source.source))
+        for draft in build_chunks(document.doc_id, document.kb_id, "xlsx", [source], options):
+            session.add(DocumentChunk(chunk_id=draft.chunk_id, doc_id=document.doc_id, kb_id=document.kb_id,
+                text=draft.text, page_start=draft.page_start, page_end=draft.page_end, section=draft.section,
+                chunk_metadata=draft.metadata | {"source_parse_task_id": str(document.processing_task_id),
+                                                  "file_hash": document.file_hash}))
+    return source
+
+
+def test_legacy_giant_chunk_rechunks_then_indexes_all_vectors_without_parser_or_cloud(context):
+    """旧整表先原子重切再交接GPU；Stub全批向量经原Index写入，PARTIAL质量不升级。"""
+    from app.services import indexing
+    from test_chunk_splitter import assert_evidence
+
+    source = legacy_table(context)
+    old_task = submit(context)
+    first = execute(context, old_task)
+    assert first.state == "SUCCESS", str(first.result)
+    assert first.result["status"] == "rechunked" and context.stub.calls == []
+    next_task = UUID(first.result["next_task_id"])
+    assert next_task != old_task and len(context.messages) == 2
+    with context.session() as session:
+        document = session.get(Document, context.ids[1])
+        assert document.embedding_task_id == next_task and document.status == "EMBEDDING"
+        assert document.processing_task_id == context.ids[2] and document.chunk_task_id != context.ids[3]
+        chunks = session.scalars(select(DocumentChunk).where(DocumentChunk.doc_id == document.doc_id).order_by(
+            DocumentChunk.chunk_metadata["chunk_index"].as_integer())).all()
+        assert len(chunks) > 1 and all(len(chunk.text) + 2 <= 8192 for chunk in chunks)
+        assert_evidence([SimpleNamespace(text=chunk.text, metadata=chunk.chunk_metadata) for chunk in chunks], [source])
+        assert session.get(DocumentBlock, source.block_id).text == source.text
+        assert document.parse_quality == {"content": "PARTIAL"}
+    assert execute(context, old_task).result["status"] == "stale_task"
+    second = execute(context, next_task)
+    assert second.state == "SUCCESS" and second.result["status"] == "awaiting_index", str(second.result)
+    with context.session() as session, session.begin():
+        document = session.get(Document, context.ids[1])
+        index_task, _ = indexing.prepare_index(session, document)
+    with context.session() as session, session.begin():
+        result = indexing.run_index_step(session, context.ids[1], index_task)
+        current = session.get(Document, context.ids[1])
+        assert result["status"] == "partial_ready" and current.parse_quality == {"content": "PARTIAL"}
+        counts = session.execute(select(func.count(), func.count(DocumentChunk.embedding)).where(
+            DocumentChunk.doc_id == context.ids[1])).one()
+        assert counts[0] == counts[1] > 1
+
+
+def test_late_rechunk_failure_rolls_back_all_chunks_and_preserves_old_generation(context, monkeypatch):
+    """重切后批错误全回滚，原Chunk/任务/Block保留，任何向量文件都不发布。"""
+    from app.services.embedding import refinement
+
+    source = legacy_table(context)
+    old_task = submit(context)
+    original = refinement.refine_drafts
+
+    def failed_late(*args):
+        """在首个安全片之后模拟真实后批失败，验证删除和暂存都不能部分提交。"""
+        iterator = original(*args)
+        yield next(iterator)
+        raise EmbeddingError("EMBEDDING_UNSPLITTABLE")
+
+    monkeypatch.setattr(refinement, "refine_drafts", failed_late)
+    result = execute(context, old_task)
+    assert result.state == "FAILURE" and "EMBEDDING_UNSPLITTABLE" in str(result.result)
+    assert context.stub.calls == [] and len(context.messages) == 1
+    with context.session() as session:
+        document = session.get(Document, context.ids[1])
+        assert document.embedding_task_id == old_task and document.chunk_task_id == context.ids[3]
+        assert document.status == "FAILED" and session.get(DocumentBlock, source.block_id).text == source.text
+        assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 1
+    assert not (ArtifactStore(context.settings.embeddings_dir).directory(context.ids[1], old_task) / "manifest.json").exists()
+
+
+def test_rechunk_dispatch_loss_keeps_committed_chunks_and_retry_resumes_new_generation(context, monkeypatch):
+    """重切事务提交后的投递失败保留新检查点；Retry恢复新ID，旧消息不再编码。"""
+    legacy_table(context)
+    old_task = submit(context)
+    original = tasks.embed_document.apply_async
+
+    def lost(*args, **kwargs):
+        """只模拟Broker失败，不访问真实队列或把原始异常外传。"""
+        raise RuntimeError("SECRET connection")
+
+    monkeypatch.setattr(tasks.embed_document, "apply_async", lost)
+    failed = execute(context, old_task)
+    assert failed.state == "FAILURE" and "SECRET" not in str(failed.result)
+    with context.session() as session:
+        document = session.get(Document, context.ids[1])
+        new_task = document.embedding_task_id
+        assert new_task != old_task and document.status == "FAILED"
+        assert session.scalar(select(func.count()).select_from(DocumentChunk)) > 1
+    monkeypatch.setattr(tasks.embed_document, "apply_async", original)
+    assert submit(context) == new_task
+    assert execute(context, new_task).state == "SUCCESS"
+
+
+def test_sql_failure_after_rechunk_checkpoint_rolls_back_without_vector_artifact(context):
+    """新代次已在会话中生成但事务失败时，完整恢复旧检查点且没有向量产物可误复用。"""
+    legacy_table(context)
+    old_task = submit(context)
+    with pytest.raises(OperationalError):
+        with context.session() as session, session.begin():
+            result = processing.run_embedding_step(session, context.ids[1], old_task)
+            assert result["status"] == "rechunked"
+            raise OperationalError("SECRET SQL", {}, RuntimeError("SECRET connection"))
+    with context.session() as session:
+        document = session.get(Document, context.ids[1])
+        assert document.embedding_task_id == old_task and document.chunk_task_id == context.ids[3]
+        assert session.scalar(select(func.count()).select_from(DocumentChunk)) == 1
+    assert context.stub.calls == [] and len(context.messages) == 1
+    assert not (ArtifactStore(context.settings.embeddings_dir).directory(context.ids[1], old_task) / "manifest.json").exists()

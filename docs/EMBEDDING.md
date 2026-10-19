@@ -23,6 +23,16 @@ Service 导入/构造与 API 投递不加载 Torch/模型；每进程缓存一�
 
 ## 长度与资源边界
 
+### 新文档及长度失败Retry：真实Token重切
+
+新向量配置保存`input_policy=embedding-token-refinement-v1`；旧FAILED且原因是EMBEDDING_TOO_LONG/EMBEDDING_LIMIT的检查点，在显式Retry核对原输入Hash后启用。保留原模型参数，不因代码升级重算READY/PARTIAL_READY或已有完整产物。该配方使用流式输入，不再让旧聚合门槛阻断长度修复；字符超限片不直接交给Tokenizer，而是进入安全重切。
+
+首次编码前，按冻结批大小/单批字符预算遍历全部Chunk，用真实Tokenizer（含特殊Token、truncation=False）测长。发现超限后，从当前已落库Block重切，核对旧input_blocks_hash，使用v7完整行组及正文字符二分，直至每个最终片同时符合单片字符与真实Token上限。无需Parse Cache、Parser或任何MinerU请求。所有主内容/页码/来源原样可追溯；不能安全细分的公式、rowspan组、单行或未知HTML返回EMBEDDING_UNSPLITTABLE，通过embedding.rechunk_blocked的固定step与page定位。
+
+全部新片通过后，先在单事务提交新Chunk及新的切片/向量代次，再投递新GPU任务；当前任务返回rechunked，此时没有向量文件。新任务做完整预检后编码并沿原Index完成入库。提交前失败全回滚；提交后投递丢失保留新检查点，Retry恢复新ID。重切绑定模型指纹，指纹改变拒绝混用；同一重切结果再次超限不循环投递。质量不升级，PARTIAL仍只能PARTIAL_READY。
+
+以下旧预算/直接失败说明适用于未启用该配方的历史检查点及直接Service/Query调用；它们不在GPU内部偷偷截断或改写输入。CPU切片CHUNK_LIMIT、模型配置变更等仍按原缓存Reindex流程处理。真实Token预检可能加载本地GPU模型，但不会先计算几千批向量才发现后面的超长片。
+
 - v6/v7切片文档使用可重复SQL流式视图，每256行预取并核对Chunk连续序号/解析代次；输入Hash增量计算且与旧规范JSON一致。不再因整份字符数或Chunk数拒绝；每次Service调用同时受冻结批大小及1000万字符单批预算约束，达到预算换下一批，不加载全篇正文/全量向量。源ID列表仍占用随Chunk数增长的元数据内存，不宣称整条链路恒定内存。新版首次完整Hash预检同时发现单片超过100万字符的情况，给出全局Chunk ID/序号/实际字符数，先于模型加载，避免先算数千批才发现巨片；不在GPU层偷偷拆改Chunk。
 - 新文档向量产物标记`dense-jsonl-stream-v2`，仍是原1024维数值JSONL，不改变向量精度、模型或归一化。逐行读写最多128KiB，整文件安全边界由真实SQL Chunk数推导；不再因累计超过512MiB拒绝。完整行数/全文件SHA256/来源/次序/维度均校验后才发布和推进INDEXING，任一后批错误不发布成功manifest。旧v1文件及v1～v5检查点保留原预算。
 - EMBEDDING_BATCH_SIZE 默认 16，允许 1～128；EMBEDDING_MAX_LENGTH 默认 8192，允许 8～8192；CUDA 默认 cuda:0、fp16=true。这不是最小显存保证，真实硬件需手动验收。
@@ -51,7 +61,7 @@ data/embeddings/<doc_id>/<embedding_task_id>/
 
 成功重解析/缓存回放/切片替换会在相应事务失效旧 Embedding 检查点，不自动删除历史文件；失败回滚保留原 Chunk。活动 GPU 检查点不允许 Reindex/Reparse 改代次，向量完成后可维护。若因显存或部署参数需改 batch/model_dir/device，停止相关进程、更新配置，再用已有成功 Parse Cache 执行 Reindex→Chunk→Embed 建立新检查点；不为此 Force Reparse、不调用 MinerU。缓存缺失仍按阶段 12 规则失败，不绕过。
 
-旧v1～v6切片发生聚合预算、巨型整表或EMBEDDING_TOO_LONG失败时，普通Retry只恢复旧向量输入，不会改用新策略。待当前任务结束、手动重启API/CPU/GPU Worker使新代码生效后，使用文档级`POST /api/admin/documents/{doc_id}/reindex`复用成功解析缓存，重建v7 Chunk及本地向量并接续Index；无需MinerU请求，不重建其他文档。原解析质量仍保留，PARTIAL不会因此变成完整READY。单文档恢复示例：
+旧向量长度/聚合预算失败优先按新增配方执行文档级Retry，安全重切直接复用当前Block；CPU切片预算失败或需要更改冻结配置时，才使用文档级Reindex复用成功解析缓存。待当前任务结束并手动重启API/CPU/GPU Worker使新代码生效。二者均不请求MinerU，保留PARTIAL质量。以下保留缓存Reindex示例：
 
 ```powershell
 $base = "http://127.0.0.1:8000/api/admin/documents/da426abd-541e-45c0-a2b2-7cba49bc9d1a"
@@ -67,6 +77,17 @@ Invoke-RestMethod -Uri "$base/status" -ErrorAction Stop |
 ## 用户手动自动测试
 
 Codex 仅编写以下用例，未执行；不会自动生成文档样本、下载模型或启动 GPU。服务测试使用内存模型/Tokenizer Stub；结果测试只在用户运行时写临时数值文件；DB 使用隔离 schema/外层事务，模型/Broker Stub，不消耗云额度：
+
+本次定向回归及可选隔离数据库验证（由用户执行）：
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_embedding_refinement.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_streaming_pipeline.py tests/test_chunk_html_streaming.py tests/test_business_logging.py -q -ra
+# 已有隔离数据库验收环境时执行；不加载真实模型，不操作public数据。
+python -m pytest tests/embedding_db_smoke.py -q -ra
+```
+
+新增断言覆盖特殊Token、正文/HTML/TSV原字符全覆盖、rowspan组、不可拆结构、旧长度失败Retry、原Block Hash拒绝、重切先于任何向量产物、检查点换代、后批全回滚、投递失败恢复和原Index全量写入。代码/用例已编写，未执行，真实GPU/Worker入库仍待用户单文档验收。
 
 ```powershell
 conda activate dkf-agent

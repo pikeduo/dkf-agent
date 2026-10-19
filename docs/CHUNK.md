@@ -41,7 +41,15 @@ Worker 持有文档行锁，检查切片代次和来源解析代次，全部切�
 
 成功重新解析/缓存回放替换 Block 时在同一事务清除旧 Chunk 和切片检查点，避免引用已删除 Block；失败保留旧 Block/Chunk，必须结合 Document 状态辨别旧结果。活动切片检查点未完成时不允许 Reindex/Reparse；切片成功后可 Reindex→缓存 Block→显式 Chunk。改变 CHUNK_SIZE/OVERLAP 不修改正在执行或已完成的冻结参数；用成功 Reindex 建立新的切片检查点，不需要 Force Reparse，不消耗云端。
 
-旧v1～v6检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧聚合预算或整表导致失败时，普通Retry仍消费旧配方；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v7切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，不再为切片问题修改XML预算。大表预计增加Chunk数、向量文件及GPU耗时；没有完整manifest的旧失败GPU暂存不能冒充可复用向量。
+旧成功检查点保留原metadata/稳定ID。CPU切片阶段的旧聚合预算失败仍须显式缓存Reindex建立v7；向量阶段的EMBEDDING_TOO_LONG/EMBEDDING_LIMIT新增Retry重切例外，见下节，不再要求仅为长度问题先回放Parse Cache。只处理指定文档，不请求MinerU、不改变parse_quality；原PARTIAL可结束为PARTIAL_READY。大表预计增加Chunk、向量文件与GPU耗时，没有完整manifest的旧GPU暂存不能冒充成功结果。
+
+## 向量输入的真实Token重切
+
+新向量检查点冻结`input_policy=embedding-token-refinement-v1`；旧向量长度失败在显式Retry时启用，模型目录/长度/精度/批大小保持原配置。GPU Worker先遍历当前Chunk核对输入Hash，再使用同一真实Tokenizer（含特殊Token、不截断）做全量预检；尚未开始向量编码。过长时核对当前Block规范Hash与旧Chunk的input_blocks_hash，使用v7重建行组，再按真实Token继续细分普通正文。HTML仅在已验证完整行/rowspan组间拆分，TSV保留带引号逻辑行；公式、不明结构及不可拆单行保持完整，仍超限则EMBEDDING_UNSPLITTABLE并记录固定原因与页码。
+
+重切保留所有主内容字符、原Block/page/provenance和精确source_spans；重复标题/overlap可减少，重复表壳仍为context。新Chunk ID由原输入、重切版本及模型指纹确定，不含时间/任务ID。全部新片经真实Tokenizer复验后，Chunk全量替换、chunk_task_id与embedding_task_id换代在一个事务提交；失败回滚保留旧Chunk，无向量产物。提交后交接一次新向量任务，不为每片建任务。新任务再次预检后编码，原Index完整提交规则不变。
+
+重切不改原件、Block、Parse Cache或parse_quality，不需要新迁移；已READY/PARTIAL_READY和已有完整向量产物不自动重切。新任务投递中断可用Retry恢复新检查点；旧任务/失败回调不能覆盖新代次。同模型已重切结果再次超限视为来源异常，不形成无限重切循环。该阶段会在GPU进程加载本地Tokenizer/模型；CPU初始切片仍无需模型。
 
 定向离线回归由用户手动执行（不需要数据库/模型或云端）：
 

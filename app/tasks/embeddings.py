@@ -7,7 +7,7 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
 from app.core.business_logging import log_event
 from app.core.celery_app import celery_app
-from app.services.embedding.processing import record_embedding_failure, run_embedding_step
+from app.services.embedding.processing import publish_embedding, record_embedding_failure, run_embedding_step
 from app.services.embedding.service import EmbeddingError
 from app.tasks.documents import DocumentProcessingError, processing_session
 
@@ -26,7 +26,7 @@ def save_embedding_failure(doc_id: UUID, task_id: UUID, message: str, final: boo
 @celery_app.task(bind=True, name="app.tasks.embeddings.embed_document", max_retries=3,
                  acks_late=True, reject_on_worker_lost=True)
 def embed_document(self, doc_id: str) -> dict:
-    """GPU Worker 批量生成本地结果；仅临时数据库错误重试 5/10/20 秒，模型错误不自动反复重算。"""
+    """先提交安全重切再投递新代次编码；仅数据库暂错重试，不重复已完成向量或调用云端。"""
 
     try:
         identifier, task_id = UUID(doc_id), UUID(self.request.id)
@@ -53,6 +53,13 @@ def embed_document(self, doc_id: str) -> dict:
         log_event("embedding.failed", level=logging.ERROR, doc_id=identifier, task_id=task_id,
                   error_code=message.split("：", 1)[0])
         raise DocumentProcessingError(message) from None
+    if result["status"] == "rechunked":
+        log_event("embedding.rechunk_persisted", doc_id=identifier, task_id=task_id,
+                  stage="embedding.rechunk", chunk_count=result["chunk_count"], state="EMBEDDING")
+        with processing_session() as session:
+            if not publish_embedding(session, identifier, UUID(result["next_task_id"])):
+                raise DocumentProcessingError("EMBEDDING_DISPATCH：重切已提交，GPU投递未确认，请Retry恢复新代次")
+        return result
     log_event("embedding.persisted" if result["status"] == "awaiting_index" else "embedding.skipped",
               doc_id=identifier, task_id=task_id, state=result.get("document_status"), status=result["status"],
               chunk_count=result.get("chunk_count"), dimension=result.get("dimension"),

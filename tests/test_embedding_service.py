@@ -108,6 +108,14 @@ def test_lazy_loading_and_empty_documents(stub_service):
     assert loads == []
 
 
+def test_real_token_preflight_includes_special_tokens_without_encoding(stub_service):
+    """预检测完整长度（含特殊Token），允许返回超限计数但绝不调用模型编码。"""
+    service, model, _, loads = stub_service
+    assert service.token_counts([]) == [] and loads == []
+    assert service.token_counts(["甲" * 30, "乙" * 31]) == [32, 33]
+    assert model.calls == [] and len(loads) == 1
+
+
 def test_batch_order_dimension_normalization_and_query_consistency(stub_service):
     """批次为 2/2/1，文档和 Query 使用相同模型/维度/归一化，顺序不乱。"""
 

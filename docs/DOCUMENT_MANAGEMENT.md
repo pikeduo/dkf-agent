@@ -48,6 +48,8 @@
 
 失败阶段优先恢复Index→Embedding→Chunk→Parse，不把普通解析失败的旧Block当成当前已完成输入。活动云任务沿用job_id/batch_id及upload_complete决定submit/check；当前代次已上传Batch的JOB_TIMEOUT允许普通Retry续看原批次，不视为远端失败。
 
+向量阶段EMBEDDING_TOO_LONG/EMBEDDING_LIMIT的显式Retry会在保持原模型配置、验证旧输入Hash后启用真实Token重切配方。Worker必要时核对原Block Hash并重切，先提交新Chunk/向量检查点，再交接新GPU任务；管理stage_task_id同事务换绑。原processing_task_id、Block和解析质量不变，不需要Parse Cache或新增云请求。重切事务失败保留旧代次；投递失败可Retry恢复新代次。READY/PARTIAL_READY不受此例外影响，公式或不可拆完整行仍明确给出EMBEDDING_UNSPLITTABLE，详见[Embedding](EMBEDDING.md)。
+
 本地Adapter/Guard错误（如MERGE_EVIDENCE、EMPTY_BLOCK、CONTENT_TYPE、COMPLETENESS）在同Job/Batch/原件Hash/冻结版本及原ZIP可校验时允许Retry，持久标记`_local_replay_only=true`。入口不构造云客户端，服务层也禁止GET/PUT/POST/下载；重复修复后可重放同一原ZIP，不需重新授权云访问。已成功片复用缓存，后续片保留原Batch；缺本地结果返回LOCAL_RESULT_REQUIRED，整份不写部分Block/READY，绝不自动提交尚未取得结果的下一片。缺归档/坏归档或来源不符继续拒绝；新费用只能来自另行明确授权的云处理，不是修Adapter的前提。
 
 其他远端失败、未知POST及坏ZIP终态不因本地重放扩大恢复范围。失败Reparse的Retry改为普通ingest并复用业务代次；只有再次显式Force Reparse允许绕过收费历史，但不得把Force当成Adapter问题的解决方案。
