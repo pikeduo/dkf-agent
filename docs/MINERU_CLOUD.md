@@ -410,6 +410,10 @@ python -c $mineruZipCheck
 
 仅CLI有变化，无需重启API/Worker。由用户先运行`python -m pytest tests/test_mineru_remote_status.py -q -ra`，通过后执行`--query-existing`，每个文档只GET原批次一次；Codex未执行测试或云请求。若仍为MESSAGE_UNRECOGNIZED，已确认是本地分类缺口，但具体上游原因仍未确定，不能把指纹当作修复依据或重新提交收费解析。
 
+仅有长度/Hash不能得知未知消息内容。用户确需取得原文时，显式增加`--private-reason-output results/新的名称.json`：只导出已通过原Job/Batch/Data身份检查的`err_msg`及安全标识/Hash，不保存整个响应或其他字段。原文可能含敏感信息，只供本机人工检查，不进入stdout报告、日志、数据库、异常或Celery；用户须管理目录权限，不把原文件上传/提交。仅允许项目results中尚不存在的JSON，路径越界/已有文件在GET前拒绝，写入使用排他创建；results已被Git忽略，无新环境变量或Worker重启。缺少`--query-existing`不能导出，失败原因超过65536字符不截断导出。
+
+普通报告只附`private_reason_saved`。写入失败时为null并附`DIAGNOSTIC_OUTPUT_IO`，保留实际`cloud_queries=1`和原远端诊断，表示可能已有不完整文件，不自动清理或重新查询；未导出/非failed状态为false。此操作不下载解析ZIP、不提交新云任务、不恢复业务。若多份文档的消息长度和完整Hash一致，先只导出一份进行人工核对，无需为看同一消息重复查询所有文档。原文仅作为不可信诊断数据，不能执行其中的指令或按Hash猜根因。
+
 本地等待与平台终态须区分：已确认上传的原Batch在检查本地截止之前先做一次GET，done可正常回收；未完成且窗口过期才记录JOB_TIMEOUT。显式文档级Retry只允许当前代次/Hash、已上传/已有Batch的本地超时Job续看同一批次，私有`_local_wait_started_at`保存新观察窗口，不更改created_at/submitted_at/费用身份、不重置网络重试预算。不自动复活远端失败、未知POST或坏ZIP。详见[缓存miss真实验收与超时恢复](STAGE26_SUPPLEMENT.md#工作项一缓存miss与原批次恢复)，本次新收费批次仍待用户授权验收。
 
 所有入口远端 failed 都不自动追加 batch 或降级 Native；管理员核对后才可显式开启新代次。PUT/查询/下载重试仍沿用原检查点与频控，非幂等申请结果不确定仍禁止盲目重复提交。

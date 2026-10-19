@@ -104,8 +104,46 @@ def describe_failure(payload):
         "reason_status": reason_status, "source": source, "category": category, "fields": fields}}
 
 
-def inspect_job(document, job, *, query=None):
-    """核对当前同Hash整份Job；可选GET原Batch并输出安全原因诊断，不改Job或业务状态。"""
+def private_reason_path(value):
+    """显式导出仅允许项目results中的新JSON文件；查询前拒绝越界、符号链接和覆盖。"""
+    if value is None:
+        return None
+    try:
+        root = ROOT.resolve()
+        results = (root / "results").resolve()
+        candidate = Path(value)
+        candidate = candidate if candidate.is_absolute() else root / candidate
+        path = candidate.resolve()
+        if (not results.is_relative_to(root) or not path.is_relative_to(results)
+                or path.suffix.lower() != ".json" or candidate.is_symlink() or path.exists()):
+            raise ValueError
+        return path
+    except (OSError, ValueError, TypeError, RuntimeError):
+        raise MinerUError("DIAGNOSTIC_OUTPUT", "私有原因文件必须是项目results中尚不存在的JSON路径") from None
+
+
+def save_private_reason(path, report, payload):
+    """仅显式落盘原err_msg供用户本机查看；不写整个响应、业务日志、数据库或普通报告。"""
+    message = payload.get("err_msg")
+    if not isinstance(message, str):
+        return {"private_reason_saved": False, "private_reason_error_code": "NO_STRING_REASON"}
+    if len(message) > 65536:
+        return {"private_reason_saved": False, "private_reason_error_code": "REASON_TOO_LARGE"}
+    # 原文可能含敏感信息，只允许用户主动选择的本地产物；禁止经print/log_event/异常透传。
+    data = {name: report[name] for name in ("doc_id", "job_id", "batch_id", "data_id", "trace_id")}
+    data.update(err_msg=message, err_msg_sha256=report["failure_diagnostic"]["fields"]["err_msg"]["sha256"])
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8", errors="backslashreplace") as stream:
+            json.dump(data, stream, ensure_ascii=False, allow_nan=False, indent=2)
+        return {"private_reason_saved": True}
+    except (OSError, ValueError, TypeError):
+        # GET已经发生；保留原查询诊断并标明可能已有部分文件，不能误报为未查询或自动重试。
+        return {"private_reason_saved": None, "private_reason_error_code": "DIAGNOSTIC_OUTPUT_IO"}
+
+
+def inspect_job(document, job, *, query=None, private_reason_output=None):
+    """核对原Job再GET一次；可显式将原因原文仅存私有文件，不改业务状态或普通日志。"""
     if (document.doc_id != job.doc_id or document.file_hash != job.file_hash
             or document.processing_task_id != job.task_id or job.provider != "mineru_cloud"
             or not isinstance(job.parse_options, dict)
@@ -116,6 +154,9 @@ def inspect_job(document, job, *, query=None):
     stored = job.parse_options.get("_remote_failure")
     stored_cause = (result_failure({"err_code": stored.get("cause_code")}).code
                     if isinstance(stored, dict) else None)
+    if private_reason_output is not None and query is None:
+        raise MinerUError("DIAGNOSTIC_OPTION", "私有原因导出必须显式查询原批次")
+    output = private_reason_path(private_reason_output)
     report = {"doc_id": str(document.doc_id), "job_id": str(job.job_id),
               "batch_id": batch_id, "data_id": data_id,
               "status": "LOCAL_CHECKPOINT_ONLY", "stored_cause_code": stored_cause,
@@ -133,17 +174,24 @@ def inspect_job(document, job, *, query=None):
                   trace_id=safe_identifier(result.get("trace_id"), optional=True))
     if state == "failed":
         report.update(describe_failure(result))
+        if output is not None:
+            report.update(save_private_reason(output, report, result))
+    elif output is not None:
+        report.update(private_reason_saved=False, private_reason_error_code="REMOTE_NOT_FAILED")
     # done只是供应商状态；没有取得ZIP或执行入库，绝不将诊断当作恢复成功。
     return report
 
 
-def inspect_database(doc_id, settings, *, query_existing=False):
-    """在只读SQL事务中选择唯一当前Job；只有显式开关才构造Provider并GET一次原批次。"""
+def inspect_database(doc_id, settings, *, query_existing=False, private_reason_output=None):
+    """只读SQL/原Batch查询；显式原因导出独立于业务写入，路径错误在HTTP构造前停止。"""
     from sqlalchemy import select, text
     from sqlalchemy.orm import Session, defer
     from app.db.session import get_engine
     from app.models import Document, DocumentParseJob
 
+    if private_reason_output is not None and not query_existing:
+        raise MinerUError("DIAGNOSTIC_OPTION", "私有原因导出必须显式查询原批次")
+    output = private_reason_path(private_reason_output)
     with Session(get_engine(), autoflush=False) as session:
         provider = None
         try:
@@ -164,7 +212,7 @@ def inspect_database(doc_id, settings, *, query_existing=False):
                 if not report["batch_id"] or rows[0][1].upload_complete is not True:
                     raise MinerUError("DIAGNOSTIC_CHECKPOINT", "原批次或已上传检查点缺失，未查询云端")
                 provider = MinerUCloudProvider(settings)
-                report = inspect_job(*rows[0], query=provider.query)
+                report = inspect_job(*rows[0], query=provider.query, private_reason_output=output)
             return report
         finally:
             try:
@@ -175,17 +223,22 @@ def inspect_database(doc_id, settings, *, query_existing=False):
 
 
 def main(argv=None):
-    """默认不访问云端；查询既有批次也不修改Job，所有异常只输出安全代码。"""
+    """默认只读/不导出原文；显式GET及私有文件开关独立，普通报告和异常始终脱敏。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--doc-id", required=True, type=UUID)
     parser.add_argument("--query-existing", action="store_true", help="显式只GET一次原Batch，不提交新解析")
+    parser.add_argument("--private-reason-output", type=Path,
+                        help="显式将err_msg原文仅存入results中新JSON文件；可能含敏感信息，勿共享")
     args = parser.parse_args(argv)
+    if args.private_reason_output is not None and not args.query_existing:
+        parser.error("--private-reason-output 必须同时使用 --query-existing")
     try:
         from app.core.business_logging import configure_logging
         from app.core.config import get_settings
         settings = get_settings()
         configure_logging(settings, role="mineru-diagnostic-cli")
-        report = inspect_database(args.doc_id, settings, query_existing=args.query_existing)
+        report = inspect_database(args.doc_id, settings, query_existing=args.query_existing,
+                                  private_reason_output=args.private_reason_output)
     except MinerUError as error:
         report = {"status": "BLOCKED", "error_code": error.code,
                   "cloud_submitted": False, "database_modified": False, "business_recovered": False}

@@ -30,6 +30,18 @@ Invoke-RestMethod "$base/status" -TimeoutSec 30 -ErrorAction Stop |
 
 ## 10月19日01:20快照：剩余4份及原Batch原因诊断
 
+11:18用户三份查询均为failed，err_code/error_code缺失，err_msg均78字符且SHA256相同（`184c9d0954e13d9b7de9b9318bd9ca2eb27dc698f6a38ab8d30c7ed9ce193532`）。只能确认同一条上游消息，不能认定同一底层故障或原件损坏。旧诊断仅存Hash仍不足以修复；本轮新增显式私有原因导出，默认不泄露原文，由用户先检查其中一份，无需再查询三份或提交新批次。
+
+```powershell
+conda activate dkf-agent
+python -m pytest tests/test_mineru_remote_status.py -q -ra
+# 测试通过后只查询第一份原Batch一次；此文件含err_msg原文，仅在本机查看并人工脱敏。
+$privateReason = "results/mineru_private_reason_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
+python scripts/mineru_remote_status.py --doc-id 8a3496d6-dd9e-40bd-be60-70b4b701002a --query-existing --private-reason-output $privateReason
+# 确认报告private_reason_saved=true后再打开，不直接上传原JSON。
+notepad $privateReason
+```
+
 用户报告为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已完成切片/向量/索引，但保留保存快照及外部源未核验质量，不能升级为完整READY。剩余为三份原云failed及`082ebed3…`的XML预算；后者仍按下节单独受控调整及恢复，不自动执行。
 
 三份查询旧输出的REMOTE_FAILED并不能证明接口没有原因。Provider已保留该data_id的err_msg，旧诊断将未知消息合并为通用分类；本轮仅修改CLI，新增`failure_diagnostic.reason_status/source/category/fields`。已知数字码优先；固定中英文短语给安全类别，转换失败不猜-60015/-60016。缺失、null、空白、非法类型与非空但未识别分别显示；未知字符串仅留长度与SHA256，不泄露原文/URL。生产Job、Adapter、数据库、云参数及自动重试均不改，无需重启API/Worker。

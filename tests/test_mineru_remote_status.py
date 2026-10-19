@@ -3,6 +3,7 @@
 from copy import deepcopy
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -274,3 +275,69 @@ def test_database_diagnostic_uses_read_only_transaction_and_explicit_cloud_permi
     provider.request_upload_urls.assert_not_called()
     provider.upload.assert_not_called()
     provider.download_result.assert_not_called()
+
+
+def test_private_reason_export_is_explicit_and_never_enters_public_report_or_log(context, monkeypatch, tmp_path, caplog):
+    """只把已核对原Job的err_msg写入显式私有文件；普通报告/日志无原文，默认不创建文件。"""
+    _, document, job, _ = context
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    reason = "PRIVATE_REASON https://private.invalid/?token=PRIVATE_TOKEN"
+    query = MagicMock(return_value={"state": "failed", "trace_id": "trace-test", "err_msg": reason,
+                                   "full_zip_url": "https://PRIVATE.invalid/signed", "PRIVATE_FIELD": "PRIVATE_BODY"})
+    default = tool.inspect_job(document, job, query=query)
+    assert "private_reason_saved" not in default and not (tmp_path / "results").exists()
+    query.reset_mock()
+    report = tool.inspect_job(document, job, query=query, private_reason_output="results/private_reason.json")
+    query.assert_called_once_with(job.batch_id, job.data_id)
+    assert report["private_reason_saved"] is True and report["cloud_queries"] == 1
+    assert report["database_modified"] is False and report["cloud_submitted"] is False
+    saved = json.loads((tmp_path / "results/private_reason.json").read_text(encoding="utf-8"))
+    assert saved["err_msg"] == reason and saved["doc_id"] == str(document.doc_id)
+    assert saved["err_msg_sha256"] == hashlib.sha256(reason.encode()).hexdigest()
+    assert set(saved) == {"doc_id", "job_id", "batch_id", "data_id", "trace_id", "err_msg", "err_msg_sha256"}
+    assert "PRIVATE" not in json.dumps(report, ensure_ascii=False) + caplog.text
+
+
+@pytest.mark.parametrize("damage", ["outside", "extension", "existing", "no_query"])
+def test_private_export_rejects_bad_target_or_missing_permission_before_query(context, monkeypatch, tmp_path, damage):
+    """越界/非JSON/已有文件及未显式查询均提前停止；绝不覆盖文件或先花查询额度。"""
+    _, document, job, _ = context
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    query = MagicMock()
+    path = "results/private_reason.json"
+    if damage == "outside":
+        path = str(tmp_path / "outside.json")
+    elif damage == "extension":
+        path = "results/not-a-report.py"
+    elif damage == "existing":
+        target = tmp_path / path
+        target.parent.mkdir()
+        target.write_text("KEEP_EXISTING", encoding="utf-8")
+    with pytest.raises(MinerUError) as failure:
+        tool.inspect_job(document, job, query=None if damage == "no_query" else query, private_reason_output=path)
+    assert failure.value.code == ("DIAGNOSTIC_OPTION" if damage == "no_query" else "DIAGNOSTIC_OUTPUT")
+    query.assert_not_called()
+    if damage == "existing":
+        assert (tmp_path / path).read_text(encoding="utf-8") == "KEEP_EXISTING"
+
+
+def test_private_reason_write_failure_keeps_actual_query_count_and_safe_remote_diagnostic(context, monkeypatch, tmp_path):
+    """GET后磁盘失败不抹掉已发生的查询，不泄漏IO异常，也不自动重试或误称完全未写文件。"""
+    _, document, job, _ = context
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    query = MagicMock(return_value={"state": "failed", "trace_id": "trace-test", "err_msg": "PRIVATE_REASON"})
+    original = Path.open
+
+    def denied(path, *args, **kwargs):
+        """只拦截本次私有导出，模拟包含敏感内容的文件系统错误。"""
+        if path.name == "denied.json":
+            raise OSError("PRIVATE_PATH PRIVATE_TOKEN")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", denied)
+    report = tool.inspect_job(document, job, query=query, private_reason_output="results/denied.json")
+    assert report["status"] == "REMOTE_STATUS_ONLY" and report["cloud_queries"] == 1
+    assert report["private_reason_saved"] is None and report["private_reason_error_code"] == "DIAGNOSTIC_OUTPUT_IO"
+    assert report["failure_diagnostic"]["reason_status"] == "MESSAGE_UNRECOGNIZED"
+    assert "PRIVATE" not in json.dumps(report, ensure_ascii=False)
+    query.assert_called_once()
