@@ -4,6 +4,8 @@
 
 当前基线：阶段 10 图片、扫描、表格、公式及阅读顺序已通过真实 API 人工验收，11A 多格式代码和质量记录保留。11B.1 默认自动路由与内部 [11B.2 XLSX Hybrid](SELECTIVE_HYBRID.md) 复用现有短任务；旧显式入口不变。新增 Hybrid 测试只编写未执行，真实 API 与收益仍由用户验收。
 
+已确认的固定英文200页超限消息现归为PAGE_COUNT_LIMIT，本地安全错误-60006；响应即使没有数字码也可明确识别，分类不冒称上游返回了数字码。Office限制针对云转换后的页数，不能以XLSX Sheet/PPTX Slide数猜测。原远端failed仍终态，不自动新POST或把Office套入PDF分片；三份已确认失败的恢复尚需另行授权可追溯转换/分片及新云费用，详见[阶段33](STAGE33_EVALUATION.md)。不再反复GET同一失败Batch当作修复。
+
 ## v4基础提取与质量分层
 
 当前入口`normalize()`按“ZIP安全校验→可靠基础提取→可选normalize_strict增强→质量记录”处理。旧版把合并/布局证明放在任何Block生成之前，增强异常沿Parse Job事务变成整份FAILED，这是之前MERGE_EVIDENCE集中出现的架构原因，不代表云端解析失败。

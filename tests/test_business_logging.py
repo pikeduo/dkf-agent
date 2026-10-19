@@ -878,6 +878,19 @@ def test_embedding_summary_and_task_context_do_not_log_vectors_or_text(events):
     assert "SECRET" not in events.getvalue() and "向量结果与文档状态已提交" in events.getvalue()
 
 
+def test_resource_limit_log_has_distinct_safe_summary_and_exact_chunk_counts(events):
+    """字符资源失败不冒称真实Token超限，保留全局Chunk位置/数量，仍拒绝正文与路径。"""
+    chunk_id = uuid4()
+    logs.log_event("embedding.chunk_resource_rejected", chunk_id=chunk_id, item_index=5610,
+        item_count=5_770_985, limit_count=1_000_000, step="TEXT_CHAR_LIMIT",
+        error_code="EMBEDDING_LIMIT", stage="embedding.input_budget", text="SECRET_BODY", model_dir="SECRET_PATH")
+    [record] = records(events)
+    assert record["chunk_id"] == str(chunk_id) and record["item_index"] == 5610
+    assert record["item_count"] == 5_770_985 and record["limit_count"] == 1_000_000
+    assert record["step"] == "TEXT_CHAR_LIMIT" and "单片字符资源预算" in events.getvalue()
+    assert "真实Token" not in events.getvalue() and "SECRET" not in events.getvalue()
+
+
 def test_token_limit_log_identifies_chunk_and_counts_without_exposing_input(events):
     """长度诊断只输出Chunk身份和有界计数；正文、路径、向量继续由白名单拒绝。"""
     chunk_id = uuid4()

@@ -490,7 +490,7 @@ def submit_step(
 
 
 def result_failure(payload: dict) -> MinerUError:
-    """优先保留已知错误码，再匹配既有固定原因；未知原文不透传，也不推断可重新提交。"""
+    """优先保留已知错误码，再匹配已确认固定原因；消息分类不授予新提交或自动分片。"""
 
     for key in ("err_code", "error_code"):
         value = payload.get(key)
@@ -506,6 +506,8 @@ def result_failure(payload: dict) -> MinerUError:
         "解析失败": "-60010",
         "文件拆分失败": "-60020",
         "读取文件页数失败": "-60021",
+        # 用户私有原Batch诊断已证实此完整短语；只是本地分类，不冒称上游提供了数字码。
+        "number of pages exceeds limit (200 pages), please split the file and try again": "-60006",
     }
     message = payload.get("err_msg")
     code = transient.get(message) if isinstance(message, str) else None

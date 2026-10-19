@@ -11,7 +11,7 @@
 - POST `/api/admin/knowledge-bases/{kb_id}/documents/{doc_id}/index`，无请求体；INDEXING 才能首次提交，FAILED 仅恢复已有入库检查点。未完成 Embedding/普通解析失败返回 409，跨知识库返回 404。
 - 返回 202、doc_id/kb_id/index_task_id/status。独立 index_task_id/index_config 冻结解析、切片、GPU 代次、输入及选项 Hash、向量文件校验和、实际模型指纹。API 不读取向量或加载模型，提交检查点后投递 default_queue，每文档一个 CPU 任务。
 - CPU 先校验完整 manifest/文件，再核对 Chunk 原顺序/文本 Hash、模型名/指纹/编码版本/精度/长度、1024 维有限 L2 单位向量。固定 256 行参数化批量更新原 Chunk，不插入新 Chunk，不改变正文、页码、section 或 metadata，不静默重新归一化。
-- v6切片支持`dense-jsonl-stream-v2`向量文件：输入正文和Chunk锁逐批读取，超过旧2万Chunk/512MiB不因累计量拒绝，仍按真实Chunk数量限制逐行读取范围。新旧文件都复核完整顺序/行数/Hash；后批失败全部回滚，原READY/PARTIAL_READY事务语义不变，无新迁移。
+- v6/v7切片均支持`dense-jsonl-stream-v2`向量文件：输入正文和Chunk锁逐批读取，超过旧2万Chunk/512MiB不因累计量拒绝，仍按真实Chunk数量限制逐行读取范围。新旧文件都复核完整顺序/行数/Hash；后批失败全部回滚，原READY/PARTIAL_READY事务语义不变，无新迁移。
 - 流式入库再次校验文件身份和校验和，避免预检后文件变化。文档及 Chunk 行锁保护代次，全量向量、模型来源摘要和 READY 同一个事务；任一批次/文件/数据库错误全部回滚，再独立保存安全 INDEX_* 原因。旧结果保留但不声称新代次 READY。
 - 数据库临时错误最多重试 3 次，退避 5/10/20 秒；文件/输入/完整性失败永久 FAILED，由用户修复后重投 `/index`。不重新推理、不重传云端、不自动补投，不承诺 exactly-once。
 - READY 请求返回同一编号、不再次投递，重复旧消息跳过；迟到错误不覆盖 READY。确认丢失可能返回 503 但已完成，先查文档。READY 重复 /chunk、/embed 不重算，入库 FAILED 应恢复 /index 而非 /embed。

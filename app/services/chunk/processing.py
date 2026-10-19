@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.business_logging import log_event
 from app.core.config import Settings
 from app.models import Document, DocumentBlock, DocumentChunk, DocumentParseJob
-from app.services.chunk.splitter import MAX_BLOCKS, VERSION, ChunkError, ChunkOptions, SourceBlock, build_chunks, source_char_limit
+from app.services.chunk.splitter import MAX_BLOCKS, STREAM_VERSIONS, ChunkError, ChunkOptions, SourceBlock, build_chunks, source_char_limit
 from app.services.document_processing import transition_document
 
 
@@ -63,7 +63,7 @@ def prepare_chunk(session: Session, document: Document, settings: Settings) -> t
 
 
 def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """v6逐块读取/每256片写入，同一事务完成；旧版本保留冻结预算和算法。"""
+    """v6/v7逐块读取/每256片写入，同一事务完成；更旧版本保留冻结预算和算法。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -88,7 +88,7 @@ def run_chunk_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
                   limit_count=source_char_limit(options.version) if chars_exceeded else MAX_BLOCKS,
                   error_code="CHUNK_LIMIT")
         raise ChunkError("CHUNK_LIMIT：切片源文本超过本地资源上限")
-    if options.version == VERSION:
+    if options.version in STREAM_VERSIONS:
         return result | stream_chunk_step(session, document, options, block_count, total_chars)
     blocks = list(session.scalars(select(DocumentBlock).where(DocumentBlock.doc_id == doc_id)
                                  .order_by(DocumentBlock.block_index.asc().nulls_last())))

@@ -47,13 +47,19 @@ ERRORS = {
 class EmbeddingError(Exception):
     """仅输出固定错误码及中文原因，禁止透传模型、正文或本机路径异常。"""
 
-    def __init__(self, code: str, *, item_index=None, token_count=None, limit_count=None):
-        """使用固定文案；长度错误仅附受限序号/计数，不携带正文或模型原始异常。"""
+    def __init__(self, code: str, *, item_index=None, token_count=None, limit_count=None,
+                 item_count=None, step=None):
+        """长度/资源错误只附受限序号、计数和固定类别，不携带正文或模型原始异常。"""
 
         self.code = code if code in ERRORS else "EMBEDDING_INFERENCE"
         self.diagnostic = {key: value for key, value in {
-            "item_index": item_index, "token_count": token_count, "limit_count": limit_count}.items()
-            if self.code == "EMBEDDING_TOO_LONG" and type(value) is int and 0 < value <= 2**31 - 1}
+            "item_index": item_index, "token_count": token_count, "limit_count": limit_count,
+            "item_count": item_count}.items()
+            if self.code in {"EMBEDDING_TOO_LONG", "EMBEDDING_LIMIT"}
+            and type(value) is int and 0 < value <= 2**31 - 1}
+        if (self.code == "EMBEDDING_LIMIT" and isinstance(step, str)
+                and step in {"TEXT_CHAR_LIMIT", "TOTAL_CHAR_LIMIT", "ITEM_COUNT_LIMIT"}):
+            self.diagnostic["step"] = step
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
 
@@ -239,15 +245,26 @@ class EmbeddingService:
                     "precision": "fp16" if self.options.use_fp16 and self.options.device.startswith("cuda:") else "fp32"}
 
     def _encode(self, texts: list[str], operation: str) -> list[list[float]]:
-        """逐批核对真实长度并保留超限序号/数量；不截断、不添加指令或返回半份向量。"""
+        """逐批核对字符资源和真实长度，记录具体类别/序号；不截断或返回半份向量。"""
 
         if not isinstance(texts, list) or any(not isinstance(text, str) or not text.strip() for text in texts):
             log_event("embedding.encode_failed", level=logging.WARNING, operation=operation, error_code="EMBEDDING_INPUT")
             raise EmbeddingError("EMBEDDING_INPUT")
-        if (len(texts) > MAX_ITEMS or sum(len(text) for text in texts) > MAX_TOTAL_CHARS
-                or any(len(text) > MAX_TEXT_CHARS for text in texts)):
-            log_event("embedding.encode_failed", level=logging.WARNING, operation=operation, error_code="EMBEDDING_LIMIT")
-            raise EmbeddingError("EMBEDDING_LIMIT")
+        limit_error = None
+        too_large = next((index for index, text in enumerate(texts, 1) if len(text) > MAX_TEXT_CHARS), None)
+        if len(texts) > MAX_ITEMS:
+            limit_error = EmbeddingError("EMBEDDING_LIMIT", step="ITEM_COUNT_LIMIT",
+                                         item_count=len(texts), limit_count=MAX_ITEMS)
+        elif too_large is not None:
+            limit_error = EmbeddingError("EMBEDDING_LIMIT", step="TEXT_CHAR_LIMIT", item_index=too_large,
+                                         item_count=len(texts[too_large - 1]), limit_count=MAX_TEXT_CHARS)
+        elif sum(len(text) for text in texts) > MAX_TOTAL_CHARS:
+            limit_error = EmbeddingError("EMBEDDING_LIMIT", step="TOTAL_CHAR_LIMIT",
+                                         item_count=sum(len(text) for text in texts), limit_count=MAX_TOTAL_CHARS)
+        if limit_error is not None:
+            log_event("embedding.encode_failed", level=logging.WARNING, operation=operation,
+                      error_code=limit_error.code, **limit_error.diagnostic)
+            raise limit_error
         if not texts:
             log_event("embedding.encode_skipped", operation=operation, item_count=0)
             return []

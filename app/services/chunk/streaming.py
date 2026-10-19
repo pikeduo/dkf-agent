@@ -1,4 +1,4 @@
-"""v6逐块切片：批量落库而非以整份大小拒绝，原字符与来源保持完整。"""
+"""v6/v7逐块切片；v7以有界扫描切HTML行组，原字符与来源保持完整。"""
 
 import csv
 import hashlib
@@ -9,7 +9,7 @@ from uuid import uuid5
 
 from app.core.business_logging import log_event
 from app.services.chunk.splitter import (
-    ChunkDraft, ChunkError, Span, TOKENIZER, VERSION, iter_token_ranges, table_units,
+    ChunkDraft, ChunkError, Span, TOKENIZER, VERSION, STREAM_VERSIONS, iter_token_ranges, table_units,
     tail_overlap, text_spans, token_count,
 )
 
@@ -86,8 +86,8 @@ def native_rows(block, budget):
                   stage="chunk.native_table_rows", chunk_count=emitted + 1)
 
 
-def atoms(factory, file_type, budget, hashes):
-    """次遍逐块消费并复核Hash；正文/原生表/HTML表仍使用各自的真实边界。"""
+def atoms(factory, file_type, budget, hashes, version=VERSION):
+    """次遍复核Hash；v7使用HTML流式行组，v6继续原TableHTML预算，不偷换旧来源。"""
     seen = 0
     for block in factory():
         record_hash = hashlib.sha256(json.dumps(source_record(block), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
@@ -99,7 +99,11 @@ def atoms(factory, file_type, budget, hashes):
         if block.block_type == "table" and block.source == "native_parser" and file_type in {"xlsx", "csv"}:
             yield from native_rows(block, budget)
         elif block.block_type == "table":
-            yield from table_units(block, budget, allow_surrounding=True, large_tables=True, cell_strong=True)
+            if version == VERSION:
+                from app.services.chunk.html_rows import html_rows
+                yield from html_rows(block, budget)
+            else:
+                yield from table_units(block, budget, allow_surrounding=True, large_tables=True, cell_strong=True)
         elif block.block_type == "formula":
             yield [Span(block, 0, len(block.text))]
         else:
@@ -134,7 +138,7 @@ def formula_groups(values, budget):
 
 
 def draft_for(doc_id, kb_id, file_type, pending, section, index, config, input_hash, hashes):
-    """为一片生成精确字符证据和稳定ID；完整来源Hash不随分批边界改变。"""
+    """按冻结v6/v7配置生成证据和稳定ID；来源Hash不随分批边界改变。"""
     parts, evidence, offset = [], [], 0
     for span in pending:
         if parts:
@@ -151,7 +155,7 @@ def draft_for(doc_id, kb_id, file_type, pending, section, index, config, input_h
                                 page_reliable=span.block.provenance.get("page_reliable", False))
         offset += len(value)
     text, estimated = "\n\n".join(parts), token_count(pending)
-    metadata = {"chunk_index": index, "chunker_version": VERSION, "tokenizer": TOKENIZER,
+    metadata = {"chunk_index": index, "chunker_version": config["version"], "tokenizer": TOKENIZER,
         "config": config, "input_blocks_hash": input_hash, "estimated_token_count": estimated,
         "oversized": estimated > config["size"], "source_spans": evidence,
         "page_semantics": "physical_pdf" if file_type == "pdf" else
@@ -164,11 +168,11 @@ def draft_for(doc_id, kb_id, file_type, pending, section, index, config, input_h
 def iter_chunks(doc_id, kb_id, file_type, factory, options):
     """用可重复读取的原块工厂逐片输出；不截断总文档、不限制最终Chunk数，由调用方原子落库。"""
     config = options.snapshot()
-    if options.version != VERSION:
-        raise ChunkError("CHUNK_CONFIG_INVALID：流式入口仅支持v6")
+    if options.version not in STREAM_VERSIONS:
+        raise ChunkError("CHUNK_CONFIG_INVALID：流式入口仅支持v6/v7")
     input_hash, hashes = source_identity(factory)
     pending, heading, section, index = [], None, None, 0
-    units = formula_groups(atoms(factory, file_type, options.size - 100, hashes), options.size - 100)
+    units = formula_groups(atoms(factory, file_type, options.size - 100, hashes, options.version), options.size - 100)
 
     def flush():
         """只生成当前一片及小型重叠，调用方成功消费后立即释放，不累积全篇Chunk。"""

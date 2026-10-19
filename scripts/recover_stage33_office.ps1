@@ -153,11 +153,11 @@ $rows = @(
             Write-Host "串行恢复：$($document.doc_id) / $operation"
             Invoke-RestMethod -Method Post "$apiRoot/documents/$($document.doc_id)/$operation" -TimeoutSec 120 | Out-Null
             $state = Wait-Stage33Recovery $document.doc_id
-            # 解析/切片失败可能保留旧Chunk；只在已推进向量阶段或成功时判断实际新切片版本。
+            # 解析/切片失败可能保留旧Chunk；推进向量或成功后必须核对新v7，旧v6不会自动升级。
             if ($operation -eq 'reindex' -and $state.chunk_count -gt 0 -and
                 ($state.status -in @('READY','PARTIAL_READY') -or $state.management.stage -in @('embed','index'))) {
                 $sample = Invoke-RestMethod "$apiRoot/documents/$($document.doc_id)/chunks?limit=1&offset=0" -TimeoutSec 30
-                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v6') {
+                if ($sample.items[0].metadata.chunker_version -ne 'block-chunk-v7') {
                     throw '仍由旧Worker生成切片，停止后续恢复；先安全重启所有消费default_queue的旧Worker。'
                 }
             }

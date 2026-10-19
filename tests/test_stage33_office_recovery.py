@@ -114,10 +114,10 @@ def test_xml_part_budget_reports_counts_before_reading_private_xml(monkeypatch):
 
 
 @pytest.mark.parametrize("version,allowed", [
-    ("block-chunk-v3", False), ("block-chunk-v4", True), ("block-chunk-v5", True), ("block-chunk-v6", True),
+    ("block-chunk-v3", False), ("block-chunk-v4", True), ("block-chunk-v5", True), ("block-chunk-v6", True), ("block-chunk-v7", True),
 ])
 def test_sql_chunk_budget_matches_frozen_algorithm_before_fetching_body(monkeypatch, version, allowed):
-    """旧代次保留版本预算，v6进入逐块读取；测试在正文边界停止，不产生任何真实切片。"""
+    """旧代次保留版本预算，v6/v7进入逐块读取；测试在正文边界停止，不产生真实切片。"""
     from app.services.chunk import processing, splitter
 
     task_id, parse_id, doc_id = uuid4(), uuid4(), uuid4()

@@ -23,6 +23,7 @@ from test_mineru_recovery import context
     ({"err_code": -60003}, "-60003"),
     ({"error_code": "-60007"}, "-60007"),
     ({"err_msg": "解析失败"}, "-60010"),
+    ({"err_msg": "number of pages exceeds limit (200 pages), please split the file and try again"}, "-60006"),
     ({"err_code": "PRIVATE_TOKEN", "err_msg": "PRIVATE_BODY"}, "REMOTE_FAILED"),
     ({"err_code": True, "err_msg": {"private": "PRIVATE_BODY"}}, "REMOTE_FAILED"),
 ])
@@ -32,12 +33,15 @@ def test_remote_failure_preserves_known_code_without_exporting_raw_message(paylo
     assert error.code == expected and "PRIVATE" not in str(error)
 
 
-def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, monkeypatch):
-    """远端临时分类也必须终止原任务；安全原因经失败事务到管理层，绝不新POST或自动重试。"""
+@pytest.mark.parametrize("payload,cause", [
+    ({"err_code": -60007, "err_msg": "PRIVATE_TOKEN PRIVATE_BODY"}, "-60007"),
+    ({"err_msg": "number of pages exceeds limit (200 pages), please split the file and try again"}, "-60006"),
+])
+def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, monkeypatch, payload, cause):
+    """远端临时或页数分类均终止原任务；安全原因到管理层，不新POST/自动Office分片。"""
     settings, document, job, session = context
     job.parse_options = {"_route_decision": {"existing": True}}
-    provider = SimpleNamespace(query=MagicMock(return_value={"state": "failed", "trace_id": "trace-test",
-                              "err_code": -60007, "err_msg": "PRIVATE_TOKEN PRIVATE_BODY"}))
+    provider = SimpleNamespace(query=MagicMock(return_value={"state": "failed", "trace_id": "trace-test", **payload}))
     monkeypatch.setattr(jobs, "check_normalizer_recipe", lambda *args: None)
     with pytest.raises(MinerUError) as caught:
         jobs.check_step(session, job.job_id, provider, settings)
@@ -45,14 +49,15 @@ def test_terminal_remote_failure_keeps_cause_and_batch_without_retry(context, mo
     provider.query.assert_called_once_with(job.batch_id, job.data_id)
     assert not jobs.record_error(session, job.job_id, caught.value, settings)
     assert job.parse_options["_remote_failure"] == {
-        "cause_code": "-60007", "batch_id": job.batch_id, "data_id": job.data_id, "trace_id": "trace-test"}
+        "cause_code": cause, "batch_id": job.batch_id, "data_id": job.data_id, "trace_id": "trace-test"}
     assert job.error_code == "ROUTED_REMOTE_FAILED" and job.is_active is False
-    assert document.error_message.startswith("-60007：") and "PRIVATE" not in document.error_message
+    assert document.error_message.startswith(cause + "：") and "PRIVATE" not in document.error_message
+    assert payload["err_msg"] not in document.error_message
     document.management_task_id = uuid4()
     monkeypatch.setattr(management, "config_for", lambda doc: {"state": "running", "operation": "retry"})
     monkeypatch.setattr(session, "scalar", lambda statement: document)
     management.mark_failed(session, document.doc_id, document.management_task_id, "MANAGEMENT_STAGE_FAILED")
-    assert document.management_config["cause_code"] == "-60007"
+    assert document.management_config["cause_code"] == cause
 
 
 @pytest.mark.parametrize("code", ["PRIVATE_TOKEN", "https://private.invalid/?secret=PRIVATE", "-999999"])
@@ -108,6 +113,7 @@ def test_remote_diagnostic_distinguishes_absent_empty_invalid_and_unrecognized_r
     ("Unsupported file format, please upload a valid file type", "UNSUPPORTED_FILE_FORMAT"),
     ("File size exceeds limit", "FILE_SIZE_LIMIT"),
     ("Page count exceeds limit", "PAGE_COUNT_LIMIT"),
+    ("number of pages exceeds limit (200 pages), please split the file and try again", "PAGE_COUNT_LIMIT"),
     ("Model service temporarily unavailable", "SERVICE_UNAVAILABLE"),
     ("Task submission queue is full", "QUEUE_FULL"),
     ("Extract failed", "PARSING_FAILED"),

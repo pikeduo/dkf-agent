@@ -137,6 +137,27 @@ def test_invalid_inputs_are_rejected_before_model_load(stub_service, texts):
     assert loads == []
 
 
+@pytest.mark.parametrize("texts,max_items,max_chars,max_total,expected", [
+    (["正常", "SECRET_BODY"], 10, 8, 100,
+     {"step": "TEXT_CHAR_LIMIT", "item_index": 2, "item_count": 11, "limit_count": 8}),
+    (["甲", "乙", "丙"], 2, 8, 100,
+     {"step": "ITEM_COUNT_LIMIT", "item_count": 3, "limit_count": 2}),
+    (["abcde", "abcdef"], 10, 8, 10,
+     {"step": "TOTAL_CHAR_LIMIT", "item_count": 11, "limit_count": 10}),
+])
+def test_resource_limits_report_exact_safe_counts_before_model_load(stub_service, monkeypatch, caplog,
+                                                                  texts, max_items, max_chars, max_total, expected):
+    """分别定位单片、总批字符及数量门槛，日志/异常无正文，资源失败不加载模型。"""
+    service, _, _, loads = stub_service
+    monkeypatch.setattr(module, "MAX_ITEMS", max_items)
+    monkeypatch.setattr(module, "MAX_TEXT_CHARS", max_chars)
+    monkeypatch.setattr(module, "MAX_TOTAL_CHARS", max_total)
+    with pytest.raises(EmbeddingError) as failure:
+        service.embed_documents(texts)
+    assert failure.value.code == "EMBEDDING_LIMIT" and failure.value.diagnostic == expected
+    assert loads == [] and "SECRET" not in str(failure.value) and "SECRET" not in caplog.text
+
+
 def test_true_token_limit_refuses_truncation(stub_service):
     """超限仍拒绝截断，并提供安全的输入序号及含特殊token的实际长度。"""
 

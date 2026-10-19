@@ -13,17 +13,19 @@ from app.core.business_logging import log_event
 from app.core.config import PROJECT_ROOT, Settings
 from app.models import Document, DocumentChunk, DocumentParseJob
 from app.services.document_processing import transition_document
+from app.services.chunk.splitter import STREAM_VERSIONS
 from app.services.embedding.artifacts import ArtifactStore, digest_json
-from app.services.embedding.service import DIMENSION, MAX_ITEMS, MAX_TOTAL_CHARS, EmbeddingError, EmbeddingOptions, get_embedding_service
+from app.services.embedding.service import DIMENSION, MAX_ITEMS, MAX_TEXT_CHARS, MAX_TOTAL_CHARS, EmbeddingError, EmbeddingOptions, get_embedding_service
 
-# 旧检查点保留聚合预算；v6按批次读取，Service每次调用仍保留1000万字符限制。
+# 旧检查点保留聚合预算；v6/v7按批次读取，Service每次调用仍保留1000万字符限制。
 MAX_DOCUMENT_TOTAL_CHARS = 16_000_000
 
 
 def streaming_document(document) -> bool:
-    """仅v6切片使用流式文档策略，旧检查点不静默切换输入契约。"""
+    """v6/v7均沿用流式向量及索引契约，不因升级切片而退回旧聚合门槛。"""
     config = getattr(document, "chunk_config", None)
-    return isinstance(config, dict) and isinstance(config.get("options"), dict) and config["options"].get("version") == "block-chunk-v6"
+    return (isinstance(config, dict) and isinstance(config.get("options"), dict)
+            and config["options"].get("version") in STREAM_VERSIONS)
 
 
 class ChunkRows:
@@ -38,12 +40,19 @@ class ChunkRows:
         return self.count
 
     def __iter__(self):
-        """每次预取256行，晚到的缺行/坏来源同样抛错，外层事务不能发布部分结果。"""
+        """每次预取256行，核对来源及单片字符；首次全量Hash即拒绝巨片，不先浪费GPU。"""
         source = str(self.document.processing_task_id) if self.document.processing_task_id else None
         seen = 0
         for seen, row in enumerate(self.session.execute(self.query.execution_options(yield_per=256)), 1):
             if row.chunk_index != seen or row.source_parse_task_id != source or not row.text.strip():
                 raise EmbeddingError("EMBEDDING_SOURCE")
+            if len(row.text) > MAX_TEXT_CHARS:
+                error = EmbeddingError("EMBEDDING_LIMIT", step="TEXT_CHAR_LIMIT", item_index=seen,
+                                       item_count=len(row.text), limit_count=MAX_TEXT_CHARS)
+                log_event("embedding.chunk_resource_rejected", level=logging.ERROR, doc_id=self.document.doc_id,
+                          task_id=getattr(self.document, "embedding_task_id", None), chunk_id=row.chunk_id,
+                          stage="embedding.input_budget", error_code=error.code, **error.diagnostic)
+                raise error
             yield row
         if seen != self.count:
             raise EmbeddingError("EMBEDDING_SOURCE")
@@ -169,7 +178,7 @@ def prepare_embedding(session: Session, document: Document, settings: Settings) 
 
 
 def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
-    """逐批读取/编码/写文件；v6不设整份大小门槛，真实Token保护及完整原子发布不变。"""
+    """v6/v7逐批读取/编码/写文件；单片资源预检先于GPU，真实Token及原子发布不变。"""
 
     document = session.scalar(select(Document).where(Document.doc_id == doc_id).with_for_update()
                               .execution_options(populate_existing=True))
@@ -202,10 +211,12 @@ def run_embedding_step(session: Session, doc_id: UUID, task_id: UUID) -> dict:
                     vectors = service.embed_documents([row.text for row in batch])
                 except EmbeddingError as exc:
                     position = exc.diagnostic.get("item_index")
-                    if exc.code == "EMBEDDING_TOO_LONG" and position is not None and 1 <= position <= len(batch):
+                    if exc.code in {"EMBEDDING_TOO_LONG", "EMBEDDING_LIMIT"} and position is not None and 1 <= position <= len(batch):
                         row = batch[position - 1]
-                        log_event("embedding.chunk_rejected", level=logging.ERROR, doc_id=doc_id, task_id=task_id,
-                            chunk_id=row.chunk_id, item_index=row.chunk_index, stage="embedding.token_limit",
+                        log_event("embedding.chunk_rejected" if exc.code == "EMBEDDING_TOO_LONG" else "embedding.chunk_resource_rejected",
+                            level=logging.ERROR, doc_id=doc_id, task_id=task_id,
+                            chunk_id=row.chunk_id, item_index=row.chunk_index,
+                            stage="embedding.token_limit" if exc.code == "EMBEDDING_TOO_LONG" else "embedding.input_budget",
                             error_code=exc.code, **{key: value for key, value in exc.diagnostic.items() if key != "item_index"})
                     raise
                 if len(vectors) != len(batch):

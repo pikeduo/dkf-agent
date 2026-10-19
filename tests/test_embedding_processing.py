@@ -59,8 +59,9 @@ def test_large_document_budget_keeps_source_generation_and_order_checks():
     assert failure.value.code == "EMBEDDING_SOURCE"
 
 
-def test_later_batch_token_limit_identifies_chunk_without_publishing_partial_vectors(monkeypatch, tmp_path):
-    """第二批超限映射到全局Chunk序号，保留原异常且不发布manifest或推进INDEXING。"""
+@pytest.mark.parametrize("code", ["EMBEDDING_TOO_LONG", "EMBEDDING_LIMIT"])
+def test_later_batch_limit_identifies_chunk_without_publishing_partial_vectors(monkeypatch, tmp_path, code):
+    """第二批Token或字符超限映射全局Chunk序号，不发布manifest或推进INDEXING。"""
     options = EmbeddingOptions(str(tmp_path / "unused-model"), batch_size=2)
     rows = [SimpleNamespace(chunk_id=uuid4(), chunk_index=index, text=f"已有切片{index}")
             for index in range(1, 5)]
@@ -74,7 +75,9 @@ def test_later_batch_token_limit_identifies_chunk_without_publishing_partial_vec
     session.scalar.return_value = document
     store.ready.return_value = None
     writer = store.writer.return_value.__enter__.return_value
-    error = EmbeddingError("EMBEDDING_TOO_LONG", item_index=2, token_count=9001, limit_count=8192)
+    error = (EmbeddingError(code, item_index=2, token_count=9001, limit_count=8192)
+             if code == "EMBEDDING_TOO_LONG" else
+             EmbeddingError(code, item_index=2, item_count=1_000_001, limit_count=1_000_000, step="TEXT_CHAR_LIMIT"))
     service.embed_documents.side_effect = [[[1.0] + [0.0] * (DIMENSION - 1)] * 2, error]
 
     def memory_rows(*args):
@@ -95,8 +98,46 @@ def test_later_batch_token_limit_identifies_chunk_without_publishing_partial_vec
     assert store.ready.call_count == 1 and document.status == "EMBEDDING"
     assert document.embedding_config is config and "result" not in config
     session.flush.assert_not_called()
-    [failure] = [call.kwargs for call in log.call_args_list if call.args == ("embedding.chunk_rejected",)]
+    event = "embedding.chunk_rejected" if code == "EMBEDDING_TOO_LONG" else "embedding.chunk_resource_rejected"
+    [failure] = [call.kwargs for call in log.call_args_list if call.args == (event,)]
     assert failure["doc_id"] == document.doc_id and failure["task_id"] == document.embedding_task_id
     assert failure["chunk_id"] == rows[3].chunk_id and failure["item_index"] == 4
-    assert failure["token_count"] == 9001 and failure["limit_count"] == 8192
-    assert failure["error_code"] == "EMBEDDING_TOO_LONG" and failure["stage"] == "embedding.token_limit"
+    assert failure["error_code"] == code
+    assert failure["limit_count"] == (8192 if code == "EMBEDDING_TOO_LONG" else 1_000_000)
+    if code == "EMBEDDING_TOO_LONG":
+        assert failure["token_count"] == 9001 and failure["stage"] == "embedding.token_limit"
+    else:
+        assert failure["item_count"] == 1_000_001 and failure["step"] == "TEXT_CHAR_LIMIT"
+        assert failure["stage"] == "embedding.input_budget" and "token_count" not in failure
+
+
+@pytest.mark.parametrize("version", ["block-chunk-v6", "block-chunk-v7"])
+def test_late_giant_chunk_is_rejected_during_input_hash_before_any_gpu_or_artifact(monkeypatch, tmp_path, version):
+    """复现前5608片正常、随后巨片的控制流；首次全量Hash预检即定位，不先计算数千批。"""
+    options = EmbeddingOptions(str(tmp_path / "unused-model"), batch_size=2)
+    document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4(), status="EMBEDDING",
+        processing_task_id=uuid4(), chunk_task_id=uuid4(), embedding_task_id=uuid4(),
+        chunk_config={"options": {"version": version}})
+    document.embedding_config = {"options": options.snapshot(), "source_hash": "a" * 64,
+        "source_parse_task_id": str(document.processing_task_id), "source_chunk_task_id": str(document.chunk_task_id),
+        "output_dir": str(tmp_path / "unused-vectors")}
+    rows = [SimpleNamespace(chunk_id=uuid4(), chunk_index=i, source_parse_task_id=str(document.processing_task_id),
+                            text="正常片" if i < 4 else "甲" * 11) for i in range(1, 5)]
+    session, aggregate, service, store, log = MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    session.scalar.return_value = document
+    aggregate.one.return_value = (4, 36_009_492)
+    session.execute.side_effect = [aggregate, iter(rows)]
+    monkeypatch.setattr(processing, "MAX_TEXT_CHARS", 10)
+    monkeypatch.setattr(processing, "get_embedding_service", service)
+    monkeypatch.setattr(processing, "ArtifactStore", store)
+    monkeypatch.setattr(processing, "log_event", log)
+    with pytest.raises(EmbeddingError, match="EMBEDDING_LIMIT") as failure:
+        processing.run_embedding_step(session, document.doc_id, document.embedding_task_id)
+    service.assert_not_called()
+    store.assert_not_called()
+    session.flush.assert_not_called()
+    assert document.status == "EMBEDDING" and "result" not in document.embedding_config
+    assert failure.value.diagnostic == {"item_index": 4, "item_count": 11, "limit_count": 10, "step": "TEXT_CHAR_LIMIT"}
+    assert log.call_args.args == ("embedding.chunk_resource_rejected",)
+    assert log.call_args.kwargs["chunk_id"] == rows[-1].chunk_id
+    assert log.call_args.kwargs["stage"] == "embedding.input_budget"

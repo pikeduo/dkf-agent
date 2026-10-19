@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：01:20用户CSV为116 READY/80 PARTIAL_READY/4 FAILED；11:10的082ebed3已云解析并落库12块，36009492字符被切片1600万聚合预算拦截。已编写v6分批切片/向量/索引，旧v1～v5/JSONL v1冻结，来源/真实Token/事务保护保留；测试及单文档缓存Reindex待用户，未实际恢复/GPU。11:18三份云失败均返回同一78字符消息，无已知错误码；补默认关闭、仅results新JSON的显式私有原因导出，原文不进日志/普通报告/数据库，实际内容仍待用户核对，不猜根因。PARTIAL缺口未解决，不进入34，冻结200/4087不改。**
+当前阶段：**33全量导入排错中：01:20用户快照116 READY/80 PARTIAL_READY/4 FAILED。082ebed3的v6已生成5614片，三张HTML表超旧整表预算退为巨片，前5608片编码后触发单片字符EMBEDDING_LIMIT。已编写v7有界HTML行扫描/完整rowspan组切片及GPU前巨片定位；v1～v6冻结，单文档缓存Reindex/测试/GPU待用户，未声称恢复。三份Office云失败的私有原消息已确认转换后超200页，补固定消息分类；现有仅PDF分片，不自动转换/新收费或Force。PARTIAL缺口仍待验收，不进入34，冻结200/4087不改。**
 
 | 阶段 | 已完成任务 / 当前状态 |
 |---|---|
@@ -37,7 +37,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 11B.1 | 已实现预检、Native/MinerU 自动路由及完整性 Guard；不再使用人工 Review 路由 |
 | 11B.2 | 已实现 XLSX Native 主解析、候选过滤/复用、结构化 Chart、单 Bundle/manifest、Anchor Merge 与事务接入；测试仅编写未执行，真实收益待验收 |
 | 12 | 已实现配置化本地缓存、完整身份键、跨文档/视觉复用、Reindex 缓存回放与显式 Reparse；测试只编写，待人工验收 |
-| 13 | 已补v6逐块/原行流式切片及256片暂存，不以整篇字符/片数拒绝；继承v5 strong/TSV证据，v1～v5冻结；新Mock及单文档待用户验收 |
+| 13 | 已补v7两遍有界HTML行/rowspan扫描，修复v6整表预算退化巨片；逐块Hash/256片暂存及精确来源保留，v1～v6冻结；测试及真实单文档待用户验收 |
 | 14 | 已实现 BGE-M3 本地惰性加载、文档/Query 统一 1024 维编码、单文档 GPU 批处理与检查点；真实模型/CUDA 及回归待验收 |
 | 15 | 已实现显式 /index、CPU 批量入库、模型/输入身份校验、全量向量与 READY 同事务、HNSW cosine 索引迁移；未执行测试/迁移，待验收 |
 | 15A | 已实现只读 Node/NodeWithScore 互转、稳定业务 ID/完整证据、共享 Query Adapter 和文档重编码保护；用例仅编写，待 core 安装与用户验收 |
@@ -58,7 +58,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 30 | 已补有限StateGraph/四薄Tool/范围来源/计步及CLI；新增统一LLM显式授权一次Fallback，默认关闭、业务校验不变；Mock仅编写，待验收 |
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
-| 33 | 01:20快照116 READY/80 PARTIAL_READY/4 FAILED；082ebed3后续已解析12块、切片聚合超限，补v6分批链路及新向量文件流式校验，不抬整篇上限；测试/缓存Reindex/GPU待用户，三份云失败及PARTIAL缺口未解决 |
+| 33 | 01:20快照116 READY/80 PARTIAL_READY/4 FAILED；082ebed3最新为v6三张巨型HTML片触发EMBEDDING_LIMIT，补v7行扫描与GPU前定位，未运行测试/恢复；三份Office已知超200页但尚无获授权的转换/分片恢复，PARTIAL缺口未解决 |
 | 34 及后续 | 未执行，等待用户确认 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
@@ -139,7 +139,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 - 解析、Guard、旧块整体替换及状态推进在同一事务，失败全回滚再独立记录原因；云端 Block、Document=CHUNKING、job=done 同事务。业务状态以 Document 为准，PARSING 不保证实时可见。
 - `/process`及旧嵌套维护接口保留历史逐阶段语义；新`/api/admin/documents`提供统一管理，Reindex仅缓存回放后自动Chunk/Embedding/Index至READY，Reparse仍须force=true。活动任务不能覆盖，数据库/文件/消息/云端非原子，无Outbox，不宣称exactly-once。
 - 切片 `/chunk` 采用独立 chunk_task_id/冻结参数，不改变解析代次；行锁、稳定 ID、全量 Chunk 替换和 EMBEDDING 同事务。只恢复切片检查点，不用解析失败的旧块冒充新输入。成功替换 Block 同事务失效旧 Chunk；失败回滚保留旧证据。正文重叠为软目标，结构块/原生公式完整性优先，本地 token 估算不得声称模型精确 token。
-- 新切片为block-chunk-v6：逐块复核全量Hash/顺序，按原行/正文片段逐片生成，每256片SQL暂存；不按整份字符/Block/Chunk数拒绝，不累积全篇派生列表。继承v5的TSV/HTML/p/strong及精确source_spans，rowspan关联行、公式和未知结构不猜切。v1～v5检查点冻结；显式文档Reindex从原解析缓存创建v6，不重新付费或改变质量。v6向量输入逐批读取、增量规范Hash，JSONL stream v2按单行/真实行数限制而非累计512MiB，所有片/向量完整校验后才提交状态；不宣称最大单块或ID元数据也是恒定内存。
+- 新切片为block-chunk-v7：继承v6逐块Hash/256片暂存，HTML先整体验证再以有界标签缓冲/列rowspan终点逐组切行，不建立全表DOM/行数组/展开网格，不以整表行/单元格总数退回巨片。TSV/p/strong及精确source_spans保持，跨行关联组、公式/未知结构不猜切；坏尾部不可先输出子表再全块回退。v1～v6检查点冻结；显式文档Reindex从原解析缓存创建v7，不重新付费或改变质量。v6/v7均流式向量/索引，首次输入Hash核对单片字符资源先于GPU，真实Token保护不变；JSONL stream v2仍全量来源/行数/Hash验证后才提交。最大原块和源ID元数据仍占内存。
 - Windows CPU threads 仅用于既有开发验证；Hybrid PDF Bundle、超限PDF分片处理均使用 solo 并发 1；正式 Linux CPU prefork 并发 2～4；GPU Worker 使用 solo、并发 1，每 GPU 一个进程，首次任务惰性加载模型；在线 RAG 默认同步。
 
 ### Parser、证据与质量

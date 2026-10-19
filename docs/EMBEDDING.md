@@ -23,13 +23,13 @@ Service 导入/构造与 API 投递不加载 Torch/模型；每进程缓存一�
 
 ## 长度与资源边界
 
-- v6切片文档使用可重复SQL流式视图，每256行预取并核对Chunk连续序号/解析代次；输入Hash增量计算且与旧规范JSON一致。不再因整份字符数或Chunk数拒绝；每次Service调用同时受冻结批大小及1000万字符单批预算约束，达到预算换下一批，不加载全篇正文/全量向量。源ID列表仍占用随Chunk数增长的元数据内存，不宣称整条链路恒定内存。
+- v6/v7切片文档使用可重复SQL流式视图，每256行预取并核对Chunk连续序号/解析代次；输入Hash增量计算且与旧规范JSON一致。不再因整份字符数或Chunk数拒绝；每次Service调用同时受冻结批大小及1000万字符单批预算约束，达到预算换下一批，不加载全篇正文/全量向量。源ID列表仍占用随Chunk数增长的元数据内存，不宣称整条链路恒定内存。新版首次完整Hash预检同时发现单片超过100万字符的情况，给出全局Chunk ID/序号/实际字符数，先于模型加载，避免先算数千批才发现巨片；不在GPU层偷偷拆改Chunk。
 - 新文档向量产物标记`dense-jsonl-stream-v2`，仍是原1024维数值JSONL，不改变向量精度、模型或归一化。逐行读写最多128KiB，整文件安全边界由真实SQL Chunk数推导；不再因累计超过512MiB拒绝。完整行数/全文件SHA256/来源/次序/维度均校验后才发布和推进INDEXING，任一后批错误不发布成功manifest。旧v1文件及v1～v5检查点保留原预算。
 - EMBEDDING_BATCH_SIZE 默认 16，允许 1～128；EMBEDDING_MAX_LENGTH 默认 8192，允许 8～8192；CUDA 默认 cuda:0、fp16=true。这不是最小显存保证，真实硬件需手动验收。
-- 编码前用真实Tokenizer（含特殊token、truncation=False）检查长度。切片估算不作为模型真实长度；新`block-chunk-v6`继承CPU完整HTML表格行及rowspan关联组切片，兼容表体前后的原表题/注释，见[Chunk](CHUNK.md)。剩余不可拆长行/公式或不支持的表格超限仍报EMBEDDING_TOO_LONG，不截断前缀、不改写原式、不伪造向量。
+- 编码前用真实Tokenizer（含特殊token、truncation=False）检查长度。切片估算不作为模型真实长度；新`block-chunk-v7`在CPU以两遍扫描切完整HTML行/rowspan组，不因整表行/网格预算退回数百万字符巨片，兼容原表题/注释，见[Chunk](CHUNK.md)。剩余不可拆长行/公式或不支持表格超过字符资源报EMBEDDING_LIMIT，通过资源检查但超过真实Token报EMBEDDING_TOO_LONG；不截断、改写原式或伪造向量。
 - 长度失败的`embedding.encode_failed`记录输入序号、真实Token数和限制数量；文档任务再以`embedding.chunk_rejected`关联真实chunk_id、全局1-based chunk_index、doc_id/task_id与`embedding.token_limit`阶段。日志只含受限整数及标识，不含正文/Tokenizer IDs/模型目录。后续management失败保留底层安全错误，不应仅按管理层通用码判断原因。
 - 文档只读取已有 Chunk，不重读原件、不调用 Parser/MinerU。每文档一个 gpu_queue 任务，内部依次批处理，每张 GPU 一个 solo/concurrency=1 Worker，不每 Chunk 一个任务，不静默改为 CPU。
-- 旧切片代次文档聚合最多2万Chunk、1600万字符，旧v1文件最多512MiB；v6不套用这些整份门槛。Service单次调用仍最多2万文本、1000万总字符、单文本100万字符；真实Tokenizer上限8192保持不变。无法证明安全边界的整表/不可拆行和公式仍可能单片超限，不截断或猜造向量。
+- 旧v1～v5文档聚合最多2万Chunk、1600万字符，旧v1文件最多512MiB；v6/v7不套用这些整份门槛。Service单次调用仍最多2万文本、1000万总字符、单文本100万字符；真实Tokenizer上限8192保持不变。资源失败明确区分TEXT_CHAR_LIMIT/TOTAL_CHAR_LIMIT/ITEM_COUNT_LIMIT，不与真实Token混淆；单片失败使用独立`embedding.chunk_resource_rejected`及`embedding.input_budget`，不只留下通用EMBEDDING_LIMIT。无法证明安全边界的整表/不可拆行和公式仍可能单片超限，不截断或猜造向量。
 - `embedding.input_rejected`在读取Chunk正文之前记录`embedding.document_budget`、固定限制种类、实际计数与上限。准备阶段失败时Document仍可为EMBEDDING而`embedding_task_id=null`，表示尚未投递GPU；必须同时看`management.state/cause_code`，不能当作仍在推理。修复预算后普通Retry接续原Chunk，不需要Reindex/云请求；真实超Token仍须另行修复切片来源。
 - 缺模型、GPU 不可用、推理/显存错误、数量/维度/非有限值/零向量异常为安全永久失败，不自动反复推理或缩小模型输入。临时数据库最多 3 次重试，5/10/20 秒。
 
@@ -51,7 +51,7 @@ data/embeddings/<doc_id>/<embedding_task_id>/
 
 成功重解析/缓存回放/切片替换会在相应事务失效旧 Embedding 检查点，不自动删除历史文件；失败回滚保留原 Chunk。活动 GPU 检查点不允许 Reindex/Reparse 改代次，向量完成后可维护。若因显存或部署参数需改 batch/model_dir/device，停止相关进程、更新配置，再用已有成功 Parse Cache 执行 Reindex→Chunk→Embed 建立新检查点；不为此 Force Reparse、不调用 MinerU。缓存缺失仍按阶段 12 规则失败，不绕过。
 
-旧切片发生聚合预算或EMBEDDING_TOO_LONG失败时，普通Retry只恢复旧向量输入，不会改用新策略。待当前任务结束、手动重启API/CPU/GPU Worker使新代码生效后，使用文档级`POST /api/admin/documents/{doc_id}/reindex`复用成功解析缓存，重建v6 Chunk及本地向量并接续Index；无需MinerU请求，不重建其他文档。原解析质量仍保留，PARTIAL不会因此变成完整READY。单文档恢复示例：
+旧v1～v6切片发生聚合预算、巨型整表或EMBEDDING_TOO_LONG失败时，普通Retry只恢复旧向量输入，不会改用新策略。待当前任务结束、手动重启API/CPU/GPU Worker使新代码生效后，使用文档级`POST /api/admin/documents/{doc_id}/reindex`复用成功解析缓存，重建v7 Chunk及本地向量并接续Index；无需MinerU请求，不重建其他文档。原解析质量仍保留，PARTIAL不会因此变成完整READY。单文档恢复示例：
 
 ```powershell
 $base = "http://127.0.0.1:8000/api/admin/documents/da426abd-541e-45c0-a2b2-7cba49bc9d1a"

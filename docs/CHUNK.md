@@ -6,9 +6,9 @@
 
 ## 策略与计量边界
 
-新检查点采用`block-chunk-v6`：通过可重复读取工厂先逐块验证全量Hash/顺序，再逐片生成，SQL每次预取1个Block、每256片批量暂存，全部成功后与EMBEDDING同事务提交。整份字符数、Block数或最终Chunk数不再作为新版本拒绝理由；不先构造全篇原子/Chunk列表。原生TSV两遍验证完整逻辑行、按行分组，不收集全部行，原公式/字符/页码/质量不变。单个Block仍需从数据库读取，内存下界包含最大原块；不宣称任意大单块也能恒定内存处理。
+新检查点采用`block-chunk-v7`：继承v6的全量Hash/顺序验证、逐块读取和每256片暂存；不因整篇字符/Block/Chunk总数拒绝。原生TSV按完整逻辑行分组；HTML表先完整扫描验证，再逐组输出，扫描器只维护有界标签缓冲和最多1024列的rowspan终点，不物化整表DOM/行数组/展开网格。切分依据是原字符偏移及rowspan传递闭包，不计算或重写原值。单个Block仍须从SQL读取，有序源ID元数据仍占内存，不宣称整条链路恒定内存。
 
-v1～v5原算法、预算和成功结果冻结。失败旧代次需用户显式文档Reindex，从原解析缓存建立v6，不重新请求MinerU；普通Retry不偷换旧切片配方。v6继承v5的HTML/rowspan/strong验证，不猜切不可证明的表格行，也不改写不可拆公式；此类单片仍可能由真实Tokenizer明确拒绝。源身份变化、坏结构、磁盘/SQL错误仍失败，不能以部分结果标成功。下文v4/v5预算仅描述旧版本。
+v1～v6原算法、预算和成功结果冻结。v6实际已解决文档聚合门槛，但HTML仍沿用2万行/40万单元格的旧整表扫描，超出后退为巨片；v7仅替换此切片路径，Adapter不变。新扫描保留唯一表体、有限无属性p/strong/eq/br、矩形/colspan/rowspan验证；坏尾部在首次yield之前发现，整块回退只出现一次。总表行/单元格/字符数不再构成拒绝理由。失败旧代次需显式文档Reindex从原缓存建立v7；普通Retry不偷换配方，v6后续仍走流式向量/索引。不猜切坏HTML或不可拆单行/公式，真实Tokenizer、来源/Hash及整份事务不放松。
 
 MinerU v4新增来源/质量沿原链路传递：可靠页的Block.provenance进入source_spans，Document.parse_quality进入Chunk metadata。未知页码文字只保留本地隔离产物，不造page=1的Chunk；原始Block/公式/字符来源不改。部分覆盖最终只能PARTIAL_READY，详见[MinerU v4](MINERU_CLOUD.md#v4基础提取与质量分层)。
 
@@ -41,12 +41,12 @@ Worker 持有文档行锁，检查切片代次和来源解析代次，全部切�
 
 成功重新解析/缓存回放替换 Block 时在同一事务清除旧 Chunk 和切片检查点，避免引用已删除 Block；失败保留旧 Block/Chunk，必须结合 Document 状态辨别旧结果。活动切片检查点未完成时不允许 Reindex/Reparse；切片成功后可 Reindex→缓存 Block→显式 Chunk。改变 CHUNK_SIZE/OVERLAP 不修改正在执行或已完成的冻结参数；用成功 Reindex 建立新的切片检查点，不需要 Force Reparse，不消耗云端。
 
-旧v1～v5检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧聚合预算或整表导致失败时，普通Retry仍消费旧配方；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v6切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，不再为切片问题修改XML预算。
+旧v1～v6检查点保留原metadata/稳定ID，不随代码升级自动重建Chunk。旧聚合预算或整表导致失败时，普通Retry仍消费旧配方；应待活动任务安全结束并重启相关进程后使用文档级`POST /api/admin/documents/{doc_id}/reindex`，从成功Parse Cache回放、建立新v7切片并自动接续GPU/Index。只重建指定文档，不重投MinerU，不改变parse_quality；原PARTIAL可能正常结束为PARTIAL_READY。路由配置参与缓存身份，不再为切片问题修改XML预算。大表预计增加Chunk数、向量文件及GPU耗时；没有完整manifest的旧失败GPU暂存不能冒充可复用向量。
 
 定向离线回归由用户手动执行（不需要数据库/模型或云端）：
 
 ```powershell
-python -m pytest tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_chunk_html_streaming.py tests/test_streaming_pipeline.py tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_document_management.py tests/test_business_logging.py -q -ra
 ```
 
 新增用例覆盖p内strong/实体、完整行/传递rowspan、表题/脚注/表体偏移、纯空白与多表体边界、原字符全覆盖、v4冻结/v5身份隔离、坏嵌套/属性/网格保留原表、旧检查点复用、新Reindex代次、Stub长度检查及失败不发布向量。代码与用例已编写，未执行；真实表格、Tokenizer及GPU结果须由用户确认。

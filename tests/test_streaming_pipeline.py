@@ -14,19 +14,21 @@ from app.services.embedding.service import DIMENSION, MODEL_ID, VERSION as MODEL
 from test_chunk_splitter import assert_evidence, block
 
 
-def test_v6_continues_past_aggregate_and_chunk_count_limits_without_losing_source(monkeypatch):
-    """用缩小旧预算复现3601万字符的控制流；新版本继续分片而不是扩大整份上限。"""
+@pytest.mark.parametrize("version", splitter.STREAM_VERSIONS)
+def test_streaming_continues_past_aggregate_and_chunk_count_limits_without_losing_source(monkeypatch, version):
+    """用缩小旧预算复现3601万字符；v6/v7继续逐片处理且不混用版本身份。"""
     monkeypatch.setattr(splitter, "MAX_V4_SOURCE_CHARS", 100)
     monkeypatch.setattr(splitter, "MAX_CHUNKS", 2)
     sources = [block(1, "".join(f'项目{i}\t="公式{i}"\t' + "甲" * 100 + "\n" for i in range(60)), "table")]
     snapshot, doc_id, kb_id = deepcopy(sources), uuid4(), uuid4()
-    drafts = list(streaming.iter_chunks(doc_id, kb_id, "xlsx", lambda: iter(sources), splitter.ChunkOptions()))
+    options = splitter.ChunkOptions(version=version)
+    drafts = list(streaming.iter_chunks(doc_id, kb_id, "xlsx", lambda: iter(sources), options))
     assert len(drafts) > 2 and sources == snapshot
     assert [draft.metadata["chunk_index"] for draft in drafts] == list(range(1, len(drafts) + 1))
-    assert all(draft.metadata["chunker_version"] == "block-chunk-v6" for draft in drafts)
+    assert all(draft.metadata["chunker_version"] == version for draft in drafts)
     assert all(draft.metadata["estimated_token_count"] <= 600 for draft in drafts)
     assert_evidence(drafts, sources)
-    assert drafts == list(streaming.iter_chunks(doc_id, kb_id, "xlsx", lambda: iter(sources), splitter.ChunkOptions()))
+    assert drafts == list(streaming.iter_chunks(doc_id, kb_id, "xlsx", lambda: iter(sources), options))
     with pytest.raises(splitter.ChunkError, match="CHUNK_LIMIT"):
         splitter.build_chunks(doc_id, kb_id, "xlsx", sources, splitter.ChunkOptions(version=splitter.STRONG_VERSION))
 
@@ -106,10 +108,11 @@ def test_chunk_persistence_uses_bounded_insert_batches_and_does_not_commit_parti
     session.commit.assert_not_called()
 
 
-def test_streamed_chunk_reader_does_not_fetch_all_text_or_reject_large_document():
-    """复现36,009,492字符聚合；新版本直到迭代才按256行读取正文，顺序/代次每遍核对。"""
+@pytest.mark.parametrize("version", splitter.STREAM_VERSIONS)
+def test_streamed_chunk_reader_does_not_fetch_all_text_or_reject_large_document(version):
+    """复现36,009,492字符聚合；v6/v7均按256行读取正文，顺序/代次每遍核对。"""
     document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4(), processing_task_id=uuid4(),
-        chunk_config={"options": {"version": "block-chunk-v6"}})
+        chunk_config={"options": {"version": version}})
     rows = [SimpleNamespace(chunk_id=uuid4(), text=f"原片{i}", chunk_index=i,
             source_parse_task_id=str(document.processing_task_id)) for i in range(1, 4)]
     aggregate, session = MagicMock(), MagicMock()
@@ -154,12 +157,13 @@ def test_streaming_hash_matches_frozen_json_and_batches_obey_each_call_budget(mo
     assert [row for batch in batches for row in batch] == rows
 
 
-def test_mock_streamed_embedding_and_index_complete_all_batches_without_total_limits(monkeypatch, tmp_path):
-    """纯Mock贯通分批GPU/本地产物/pgvector写入，缩小旧上限后仍逐片完整且保留PARTIAL。"""
+@pytest.mark.parametrize("version", splitter.STREAM_VERSIONS)
+def test_mock_streamed_embedding_and_index_complete_all_batches_without_total_limits(monkeypatch, tmp_path, version):
+    """纯Mock贯通v6/v7分批向量及索引，缩小旧上限后仍完整且保留PARTIAL。"""
     options = EmbeddingOptions(str(tmp_path / "unused-model"), batch_size=2)
     document = SimpleNamespace(doc_id=uuid4(), kb_id=uuid4(), processing_task_id=uuid4(), chunk_task_id=uuid4(),
         embedding_task_id=uuid4(), index_task_id=None, status="EMBEDDING", error_message=None,
-        chunk_config={"options": {"version": "block-chunk-v6"}}, parse_quality={"content": "PARTIAL"})
+        chunk_config={"options": {"version": version}}, parse_quality={"content": "PARTIAL"})
     rows = [SimpleNamespace(chunk_id=uuid4(), chunk_index=i, text=f"原片{i}") for i in range(1, 6)]
     document.embedding_config = {"options": options.snapshot(), "source_hash": embedding.chunks_hash(rows),
         "source_parse_task_id": str(document.processing_task_id), "source_chunk_task_id": str(document.chunk_task_id),

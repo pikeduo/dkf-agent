@@ -2,68 +2,48 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 11:10单文档切片聚合超限与v6分批处理
+## 11:52单文档大HTML表回退巨片与v7修复（待人工验证）
 
-`082ebed3-a4e9-4b61-934b-4025b472192e`已完成原生4块+云8块落库；Job为`410b876c-d66a-4ed3-ae92-e969ffc929d4`、Batch为`17b673c7-d9d1-4d21-8f97-377dfaea2d8c`。真实失败是`chunk.source_budget / SOURCE_CHAR_LIMIT`：36009492字符超过旧1600万预算，不是MinerU或Adapter失败。
+`082ebed3-a4e9-4b61-934b-4025b472192e`的原Job为`410b876c-d66a-4ed3-ae92-e969ffc929d4`、Batch为`17b673c7-d9d1-4d21-8f97-377dfaea2d8c`。日志确认v6已运行，12块/36009492字符生成5614片；其中三张HTML表仍因旧TableHTML整表预算回退为巨片，最终在11:52:40报EMBEDDING_LIMIT，不是旧Worker或MinerU/Adapter失败。
 
-本轮编写v6逐块/逐片处理、每256片暂存；向量化按SQL视图/单批字符预算读取和编码，新JSONL stream v2逐行限量/校验，索引仍256行一批。取消新版本整份聚合拒绝，不提高旧常量；旧v1～v5冻结，不截断正文/公式、不变更Block/页码/质量。内存仍需容纳最大原块和有序ID元数据，磁盘、GPU、事务耗时需真实验收；不可安全拆分结构/单片真实Token超限仍明确失败。无新依赖、环境变量或迁移。
+只读SQL和日志共同定位：三个云表分别76564/73266/58392行，均超过2万行；第三张467136个单元格也超过40万。第5610/5612/5614片为5770985/5520582/15942556字符，均超过Service单片100万字符门槛。前2804批/5608片已编码但未发布完整manifest，因此vector_count=0；不能把失败临时结果当作可接续复用的向量。
+
+本轮新增v7两遍HTML行扫描，保留矩形、有限标签/属性及rowspan传递组，先完整验证再yield，不构建全表DOM/展开网格，也不通过调大预算解决。旧v1～v6配方冻结，v6/v7后续均流式读取/分批向量/事务索引。首次全量输入Hash还会预检巨片，记录精确Chunk及字符数，先于GPU加载。Block/来源/页码/parse_quality及真实8192Token保护不变。无新依赖、环境变量或迁移；本轮未运行测试或恢复。预计新Chunk数及GPU/磁盘耗时增加，不预称能READY。
 
 由用户先执行以下定向回归（Codex未执行）：
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_streaming_pipeline.py tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_processing.py tests/test_embedding_artifacts.py tests/test_indexing.py tests/test_document_management.py tests/test_stage33_office_recovery.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_chunk_html_streaming.py tests/test_streaming_pipeline.py tests/test_chunk_splitter.py tests/test_chunk_table_rows.py tests/test_embedding_service.py tests/test_embedding_processing.py tests/test_embedding_artifacts.py tests/test_indexing.py tests/test_document_management.py tests/test_stage33_office_recovery.py tests/test_mineru_remote_status.py tests/test_business_logging.py -q -ra
 ```
 
-通过后暂停新投递，检查`celery inspect active / reserved / scheduled`，确认相关任务安全结束，再正常停止并按README重启API/所有CPU/GPU Worker。只对这一份执行一次文档Reindex，原缓存身份/Hash仍验证；普通Retry继续旧v5不会启用v6。缓存缺失停止，不Force或重新提交云批次：
+通过后暂停新投递，先检查队列，确认相关任务安全结束再正常停止并按README重启API/所有CPU/GPU Worker。inspect未响应不能当作空队列；solo忙时须结合其终端日志等待本次任务结束。仅对这一份执行一次Reindex，原缓存身份/Hash仍验证；普通Retry继续旧v6不会启用v7。缓存缺失停止，不Force或重新提交云批次：
 
 ```powershell
 $base = 'http://127.0.0.1:8000/api/admin/documents/082ebed3-a4e9-4b61-934b-4025b472192e'
+python -m celery -A app.core.celery_app:celery_app inspect active
+python -m celery -A app.core.celery_app:celery_app inspect reserved
+python -m celery -A app.core.celery_app:celery_app inspect scheduled
+# 确认安全结束并手动重启进程后，POST一次：
 Invoke-RestMethod -Method Post "$base/reindex" -TimeoutSec 120 -ErrorAction Stop
 # 受理后只GET，不重复POST；大文档可能持续运行较长时间。
 Invoke-RestMethod "$base/status" -TimeoutSec 30 -ErrorAction Stop |
     Select-Object status,block_count,chunk_count,vector_count,invalid_vector_count,error_message,management |
     ConvertTo-Json -Depth 8
+# 新切片生成后，仅展示版本，不打印正文或完整证据。
+$sample = Invoke-RestMethod "$base/chunks?limit=1&offset=0" -ErrorAction Stop
+$sample.items[0].metadata | Select-Object chunker_version
 ```
 
-验收需实际新Chunk为`block-chunk-v6`、`chunk_count=vector_count>0`、无无效向量、management=done，终态由真实原质量决定READY/PARTIAL_READY。不能把新代码/测试Stub通过当作该文档已恢复。三份原云失败仍按下节诊断，不批量Reindex其他文档或进入34。
+验收需实际新Chunk为`block-chunk-v7`、`chunk_count=vector_count>0`、无无效向量、management=done，终态由真实原质量决定READY/PARTIAL_READY。原12块不应丢失。若仍失败，保留`embedding.chunk_resource_rejected`的Chunk ID/计数或`embedding.chunk_rejected`的真实Token诊断，只读核查，不连续重投。不能把代码/Stub通过当作业务恢复，不批量Reindex其他文档或进入34。
 
-## 10月19日01:20快照：剩余4份及原Batch原因诊断
+## 三份原云失败原因已确认：Office转换后超过200页
 
-11:18用户三份查询均为failed，err_code/error_code缺失，err_msg均78字符且SHA256相同（`184c9d0954e13d9b7de9b9318bd9ca2eb27dc698f6a38ab8d30c7ed9ce193532`）。只能确认同一条上游消息，不能认定同一底层故障或原件损坏。旧诊断仅存Hash仍不足以修复；本轮新增显式私有原因导出，默认不泄露原文，由用户先检查其中一份，无需再查询三份或提交新批次。
+用户已私有导出第一份原Batch的完整固定原因；三份此前78字符的SHA256完全相同，均为超过200页。对应`8a3496d6…`（PPTX）、`81f211b8…`及`c8e4ca42…`（DOCX）。这不是Adapter故障或原件损坏，也不是HTTP查询失败。固定完整短语现映射为本地安全类别PAGE_COUNT_LIMIT及-60006；明确是消息分类，不冒称响应包含数字码，未知长消息仍只留指纹。
 
-```powershell
-conda activate dkf-agent
-python -m pytest tests/test_mineru_remote_status.py -q -ra
-# 测试通过后只查询第一份原Batch一次；此文件含err_msg原文，仅在本机查看并人工脱敏。
-$privateReason = "results/mineru_private_reason_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
-python scripts/mineru_remote_status.py --doc-id 8a3496d6-dd9e-40bd-be60-70b4b701002a --query-existing --private-reason-output $privateReason
-# 确认报告private_reason_saved=true后再打开，不直接上传原JSON。
-notepad $privateReason
-```
+不再反复GET相同Batch或要求平台补原因。原远端failed保持终态，普通Retry不能使超页原件通过；没有成功原ZIP可供本地回放。现有生产只支持PDF分片，不能把Office直接套入PDF账本。三份尚未恢复；后续需要明确授权并实现/验收保留原件Hash、转换来源和逻辑页映射的Office转换/分片流程，以及另行确认新增云外传/费用。本轮不转换、不新提交、不Force，也不改冻结200原件/4087QA。
 
-用户报告为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已完成切片/向量/索引，但保留保存快照及外部源未核验质量，不能升级为完整READY。剩余为三份原云failed及`082ebed3…`的XML预算；后者仍按下节单独受控调整及恢复，不自动执行。
-
-三份查询旧输出的REMOTE_FAILED并不能证明接口没有原因。Provider已保留该data_id的err_msg，旧诊断将未知消息合并为通用分类；本轮仅修改CLI，新增`failure_diagnostic.reason_status/source/category/fields`。已知数字码优先；固定中英文短语给安全类别，转换失败不猜-60015/-60016。缺失、null、空白、非法类型与非空但未识别分别显示；未知字符串仅留长度与SHA256，不泄露原文/URL。生产Job、Adapter、数据库、云参数及自动重试均不改，无需重启API/Worker。
-
-由用户执行（Codex未执行测试或真实查询）：
-
-```powershell
-Set-Location 'D:\python project\dkf-agent'
-conda activate dkf-agent
-python -m pytest tests/test_mineru_remote_status.py -q -ra
-# 测试通过后：每份只GET一次原Batch，不申请新解析，也不下载/恢复/改数据库。
-$remoteDocIds = @(
-    '8a3496d6-dd9e-40bd-be60-70b4b701002a',
-    '81f211b8-330f-4015-9ad7-b3d377a7392b',
-    'c8e4ca42-f739-48c4-9c2d-50120f956309'
-)
-foreach ($remoteDocId in $remoteDocIds) {
-    python scripts/mineru_remote_status.py --doc-id $remoteDocId --query-existing
-}
-```
-
-查看`failure_diagnostic`：`KNOWN_CODE / CLASSIFIED_MESSAGE`可据受控类别继续定位，但不表示业务已恢复；`MESSAGE_UNRECOGNIZED`明确代表本地未识别，不能说平台未给原因，指纹本身也不能证明根因；`MESSAGE_MISSING / MESSAGE_NULL / MESSAGE_EMPTY`仅说明这次返回缺少可用消息。各结果仍须`cloud_queries=1`且`cloud_submitted/result_downloaded/database_modified/cache_published/business_recovered=false`。不要把诊断命令再跑一遍当作修复，拿到这三份新诊断后再决定定向处理。
+01:20历史快照仍为116 READY、80 PARTIAL_READY、4 FAILED；新增六份已真实索引但保留原PARTIAL质量。后续082的XML及聚合门槛已越过，最新失败与单文档验证步骤以上节为准；不能把历史XML操作再执行一遍当作修复。
 
 ## 10月19日00:52快照：剩余10份分组恢复（历史）
 

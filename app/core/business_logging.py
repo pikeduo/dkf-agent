@@ -249,6 +249,7 @@ EVENT_LABELS = {
     "embedding.encoded": "本地 Dense 向量编码完成，尚未代表文档任务提交",
     "embedding.encode_failed": "本地向量编码安全失败",
     "embedding.chunk_rejected": "切片超过模型真实Token上限，保留原文与来源，未发布向量结果",
+    "embedding.chunk_resource_rejected": "切片超过单片字符资源预算，请重建安全切片，未发布向量结果",
     "embedding.encode_skipped": "跳过空的本地向量编码请求，未加载模型",
     "embedding.dispatched": "文档 GPU 批处理任务已投递",
     "embedding.dispatch_failed": "GPU 投递确认失败，保留检查点",

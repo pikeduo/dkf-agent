@@ -12,7 +12,9 @@ from uuid import UUID, uuid5
 
 from app.core.business_logging import log_event
 
-VERSION = "block-chunk-v6"
+VERSION = "block-chunk-v7"
+STREAM_VERSION = "block-chunk-v6"
+STREAM_VERSIONS = (STREAM_VERSION, VERSION)
 STRONG_VERSION = "block-chunk-v5"
 NATIVE_ROW_VERSION = "block-chunk-v4"
 CAPTION_VERSION = "block-chunk-v3"
@@ -40,11 +42,11 @@ class ChunkOptions:
     tokenizer: str = TOKENIZER
 
     def validate(self) -> None:
-        """新切片使用v6流式处理；已有v1～v5检查点保持冻结算法。"""
+        """新切片使用v7流式HTML行组；已有v1～v6检查点保持冻结算法。"""
 
         if (type(self.size) is not int or type(self.overlap) is not int
                 or not 400 <= self.size <= 700 or not 50 <= self.overlap <= 100
-                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, STRONG_VERSION, VERSION)
+                or self.version not in (LEGACY_VERSION, ROW_VERSION, CAPTION_VERSION, NATIVE_ROW_VERSION, STRONG_VERSION, *STREAM_VERSIONS)
                 or self.tokenizer != TOKENIZER):
             raise ChunkError("CHUNK_CONFIG_INVALID：切片参数或算法版本不可用")
 
@@ -186,8 +188,8 @@ def formula_units(atoms: list[list[Span]], budget: int) -> list[list[Span]]:
 
 
 def source_char_limit(version: str) -> int | None:
-    """v6按块/批处理不以整份字符数拒绝；旧版本保留冻结预算。"""
-    if version == VERSION:
+    """v6/v7按块/批处理不以整份字符数拒绝；更旧版本保留冻结预算。"""
+    if version in STREAM_VERSIONS:
         return None
     return MAX_V4_SOURCE_CHARS if version in (NATIVE_ROW_VERSION, STRONG_VERSION) else MAX_SOURCE_CHARS
 
@@ -313,10 +315,10 @@ def table_units(block: SourceBlock, budget: int, *, allow_surrounding: bool = Fa
 
 def build_chunks(doc_id: UUID, kb_id: UUID, file_type: str,
                  blocks: list[SourceBlock], options: ChunkOptions | None = None) -> list[ChunkDraft]:
-    """纯函数兼容入口；v6消费流式生成器，旧版本保留原算法及全部资源边界。"""
+    """纯函数兼容入口；v6/v7消费各自冻结流式策略，更旧版本保留原算法和预算。"""
 
     options = options or ChunkOptions()
-    if options.version == VERSION:
+    if options.version in STREAM_VERSIONS:
         from app.services.chunk.streaming import iter_chunks
         return list(iter_chunks(doc_id, kb_id, file_type, lambda: iter(blocks), options))
     config = options.snapshot()
