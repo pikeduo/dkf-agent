@@ -39,9 +39,9 @@ DOCX精确官方`attachedTemplate / External`是非正文排版依赖，不抓�
 
 Office XML单部件默认16MiB，超限事件`router.inspection_rejected / XML_PART_SIZE`只记录实际字节与限制；关系及所读Owner XML各自总预算64MiB，DTD/实体/路径/Hash检查保留。调整既有`ROUTER_XML_PART_MAX_MB`需由用户重启相关进程；配置参与缓存身份，先完成旧配置下缓存恢复。定向元数据/Mock用例为`tests/test_office_saved_snapshot.py`，Codex未执行。
 
-`PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数；PDF_OBJECT_LIMIT保留步骤名称兼容，现仅针对单页图片数超过5000。日志保留触发页及实际计数/阈值，绘图数不能被日志白名单丢弃；不据通用错误码猜测云端失败。
+`PREFLIGHT_LIMIT`须结合`router.preflight_rejected`的固定步骤核对：PDF_PAGE_LIMIT为总页数，PDF_LINE_LIMIT为单页文本行数。历史PDF_OBJECT_LIMIT是本地图片条目预算，不是PDF损坏或云端失败的证明；新预检不再按图片条目数拒绝。日志保留触发页及实际计数/阈值。
 
-图片与绘图合计超过5000、但图片未超硬限制时，仅停止Python层的绘图几何/装饰细查，记录`router.preflight_geometry_limited / PDF_DRAWING_DETAIL_LIMIT`。保留真实数量、`required=true / content_or_uncertain`，增加既有`PDF_COMPLEX_DRAWING`理由，继续检查所有后续页；auto进入原MinerU Whole链路。总页数、单页文本行数、图片硬预算及原件/云端限制保持；PyMuPDF元数据提取仍执行，这不是进程级资源隔离。显式Native仍保留其对照范围，不能据此忽略覆盖或宣称视觉完整。该调整不改覆盖v2、Normalizer、Guard或缓存协议；从未创建云Job的失败文档经用户Retry可能首次提交收费任务。
+图片与绘图合计超过5000时，停止Python层的绘图几何/装饰细查，记录`router.preflight_geometry_limited`；图片条目本身超过5000用`PDF_VISUAL_DETAIL_LIMIT`，其余沿用`PDF_DRAWING_DETAIL_LIMIT`。图片计数是提取到的条目数，可能重复引用同一资源，不冒称独立图片数；面积仍按既有规则线性汇总全部图片bbox，不解码像素或构建相交网格。保留真实计数、`required=true / content_or_uncertain`，增加既有`PDF_COMPLEX_DRAWING`理由，继续检查所有后续页；auto进入原MinerU Whole链路，Office转换也能冻结完整逐页摘要再按180页规划。总页数、单页文本行数、损坏检查及原件/云端限制保持；PyMuPDF元数据提取仍执行，这不是进程级资源隔离。显式Native仍保留其对照范围，不能据此忽略覆盖或宣称视觉完整。该调整不改覆盖v2、Normalizer、Guard或旧冻结缓存；从未创建云Job的失败文档经用户Retry可能首次提交收费任务。
 
 Guard 在最终 Block 替换前检查有效正文、非空 PDF 页面覆盖/范围、Native XLSX 有效 Sheet 数和章节、来源、逻辑页、Office 空 bbox。不改变 Block/ID/顺序、不拆表格公式、不补 OCR 字符。Native 解析/检查/整体替换/CHUNKING 同事务；失败回滚后独立记安全原因，旧结果不被半份新块覆盖。
 

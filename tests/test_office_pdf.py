@@ -4,6 +4,7 @@ import json
 import subprocess
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 from uuid import uuid4, uuid5
 
 import pytest
@@ -95,6 +96,64 @@ def test_conversion_receipt_is_reused_without_engine_or_source_overwrite(context
     assert receipt["page_semantics"] == "converted_office" and receipt["pdf_signals"]["page_count"] == 201
     assert context.source.read_bytes() == original and tool.file_hash(path) == receipt["pdf_sha256"]
     assert json.loads((path.parent / "receipt.json").read_text(encoding="utf-8")) == receipt
+
+
+@pytest.mark.parametrize("condition", ["dense_images", "later_line_limit", "damaged_pdf"])
+def test_conversion_dense_images_freeze_complete_signals_or_publish_nothing(context, monkeypatch, condition):
+    """密集图片可冻结完整逐页回执并复用；后页超预算或PDF损坏仍不发布成功产物。"""
+    import pymupdf
+
+    from app.parsers.routing import inspector
+
+    original = context.source.read_bytes()
+    pdf, pages = MagicMock(), []
+    pdf.__enter__.return_value = pdf
+    pdf.needs_pass, pdf.is_repaired, pdf.page_count = False, condition == "damaged_pdf", 40
+    for index in range(pdf.page_count):
+        page = MagicMock()
+        page.number, page.rect = index, pymupdf.Rect(0, 0, 600, 800)
+        page.get_image_info.return_value = [{"bbox": (0, 0, 1, 1)}] * (12639 if index == 37 else 0)
+        page.get_drawings.return_value = [{}] * (58 if index == 37 else 0)
+        page.annots.return_value = []
+        page.get_text.return_value = {"blocks": [{"type": 0, "lines": [
+            {"bbox": (40, 100, 200, 115), "spans": [{"text": "内存正文"}]}]}]}
+        pages.append(page)
+    if condition == "later_line_limit":
+        pages[-1].get_text.return_value = {"blocks": [{"type": 0, "lines": [{}] * 2001}]}
+    pdf.__iter__.side_effect = lambda: iter(pages)
+    # 只隔离容器/文档读取边界，保留正式inspect_document→inspect_pdf→冻结回执链路。
+    validation = MagicMock()
+    monkeypatch.setattr(inspector, "validate_file_content", validation)
+    monkeypatch.setattr(inspector.pymupdf, "open", MagicMock(return_value=pdf))
+
+    def convert(request, source, work, kind):
+        """只产生非PDF字节哨兵，任何页面读取均由内存元数据替代。"""
+        target = work / "generated.bin"
+        target.write_bytes(b"NOT_A_PDF_DENSE_IMAGE_SENTINEL")
+        return target
+
+    conversion = MagicMock(side_effect=convert)
+    monkeypatch.setattr(tool, "run_converter", conversion)
+    directory = tool.directory_for(context.settings, context.request["identity"])
+    if condition != "dense_images":
+        with pytest.raises(MinerUError) as error:
+            tool.ensure_conversion(context.document, context.request, context.settings)
+        assert error.value.code == ("OFFICE_PDF_INVALID" if condition == "later_line_limit" else "OFFICE_PDF_FAILED")
+        assert not (directory / "receipt.json").exists() and not list(directory.glob("*.pdf"))
+    else:
+        path, receipt = tool.ensure_conversion(context.document, context.request, context.settings)
+        signals = tool.validate_receipt(receipt, context.request["identity"])
+        assert signals.page_count == len(signals.pages) == 40
+        assert [page.page for page in signals.pages] == list(range(1, 41))
+        dense = signals.pages[37]
+        assert dense.image_count == 12639 and dense.drawing_count == 58
+        assert dense.required and dense.coverage_reason == "content_or_uncertain"
+        assert signals.pages[-1].required and signals.pages[-1].text_chars > 0
+        assert tool.checked_conversion(context.document, receipt, context.settings) == path
+        assert tool.ensure_conversion(context.document, context.request, context.settings) == (path, receipt)
+    conversion.assert_called_once()
+    validation.assert_called_once()
+    assert context.source.read_bytes() == original
 
 
 @pytest.mark.parametrize("damage", ["pdf", "missing", "source", "recipe", "pages"])

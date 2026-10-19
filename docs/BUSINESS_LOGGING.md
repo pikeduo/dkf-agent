@@ -89,9 +89,9 @@ LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次�
 | `mineru.empty_block` | 未解释的空正文/表格；step固定为TABLE_NO_BODY或STRUCTURE_NO_TEXT，page/item_index均为1-based，structure_type固定枚举，不记录HTML/图片路径/正文 |
 | `mineru.retry / failed / error_record_failed` | 云端错误分类、退避与终止；错误无法持久化时的安全提示 |
 | `router.decided / failed / fallback` | 固定策略、模式、版本、理由码、结构计数及一次完整性回退；完整结构快照在任务结果，不记录正文 |
-| `router.preflight_rejected` | PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT分别为页数、单页文本行数、单页图片数硬限制；记录总页数或触发页、实际计数及阈值。计数只接受有界非负整数，不输出路径或内容 |
+| `router.preflight_rejected` | PDF_PAGE_LIMIT / PDF_LINE_LIMIT为页数、单页文本行数硬限制；PDF_OBJECT_LIMIT仅见历史图片条目预算拒绝。记录总页数或触发页、实际计数及阈值。计数只接受有界非负整数，不输出路径或内容 |
 | `router.inspection_rejected` | Office的XML_PART_SIZE：单部件实际size_bytes与limit_count；不记录XML内容或包内私有路径 |
-| `router.preflight_geometry_limited` | 图片与绘图合计超过5000且图片未超硬限制：PDF_DRAWING_DETAIL_LIMIT；停止绘图几何细查，保留真实数量与required页、继续后续页预检，由既有PDF_COMPLEX_DRAWING规则决定auto云路由。这不是失败或已提交云任务 |
+| `router.preflight_geometry_limited` | 图片与绘图合计超过5000：图片条目本身超5000为PDF_VISUAL_DETAIL_LIMIT，其余为PDF_DRAWING_DETAIL_LIMIT。停止绘图几何细查，保留真实条目数、图片面积与required页、继续后续页预检，由既有PDF_COMPLEX_DRAWING规则决定auto云路由。这不是失败或已提交云任务 |
 | `router.guard_passed / guard_failed` | 落库前结构覆盖检查，不代表语义真值、OCR 全识别或事务已提交 |
 | `router.cloud_submitted` | 已确认源文件 batch，云文件提交数=1；重复日志需按 job_id/batch_id 去重 |
 | `router.cloud_dispatch_failed / finished` | 云交接确认失败/路由任务结束，不等于最终解析完成 |

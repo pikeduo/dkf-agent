@@ -194,18 +194,18 @@ def test_router_root_cause_is_not_a_freeform_error_export():
     assert safe_merge_diagnostic({"reason": "PRIVATE_TOKEN"}) == {}
 
 
-def test_pdf_object_limit_has_safe_page_and_counts_without_relaxing_limit(monkeypatch):
-    """大量矢量对象仍安全拒绝，诊断精确指出页/对象计数，不记录坐标或原文。"""
+def test_pdf_dense_drawings_keep_safe_page_and_counts(monkeypatch):
+    """密集矢量改为细查降级，保留页覆盖与精确计数，不记录坐标或原文。"""
     from app.core.config import Settings
     from app.parsers.routing import inspector
     events = []
-    page = SimpleNamespace(number=6, rect=SimpleNamespace(width=600, height=800),
+    page = SimpleNamespace(number=0, rect=SimpleNamespace(width=600, height=800),
         get_image_info=lambda: [], get_drawings=lambda: [{}] * 5001,
         annots=lambda: iter(()), get_text=lambda *args, **kw: {"blocks": []})
 
     class PDFStub:
         """只提供资源检查所需元数据，不创建或打开真实PDF。"""
-        needs_pass, is_repaired, page_count = False, False, 20
+        needs_pass, is_repaired, page_count = False, False, 1
 
         def __enter__(self):
             """返回隔离只读元数据。"""
@@ -215,7 +215,7 @@ def test_pdf_object_limit_has_safe_page_and_counts_without_relaxing_limit(monkey
             """无文件句柄或数据库副作用。"""
 
         def __iter__(self):
-            """只返回触发预算的页面哨兵。"""
+            """只返回触发细查降级的页面哨兵。"""
             return iter([page])
 
     def collect(event, **fields):
@@ -225,6 +225,8 @@ def test_pdf_object_limit_has_safe_page_and_counts_without_relaxing_limit(monkey
     monkeypatch.setattr(inspector.pymupdf, "open", lambda *args: PDFStub())
     monkeypatch.setattr(inspector, "log_event", collect)
     inspected = inspector.inspect_pdf("NOT_READ", Settings(_env_file=None))
-    assert inspected.uncertain and inspected.risks == ("PREFLIGHT_LIMIT",)
-    assert events == [("router.preflight_rejected", {"stage": "preflight.pdf", "step": "PDF_OBJECT_LIMIT",
-        "error_code": "PREFLIGHT_LIMIT", "page": 7, "item_count": 0, "image_count": 0, "drawing_count": 5001})]
+    assert not inspected.uncertain and "PDF_COMPLEX_DRAWING" in inspected.risks
+    assert inspected.signals.pages[0].required
+    assert events == [("router.preflight_geometry_limited", {"stage": "preflight.pdf", "step": "PDF_DRAWING_DETAIL_LIMIT",
+        "page": 1, "line_count": 0, "image_count": 0, "drawing_count": 5001,
+        "object_count": 5001, "limit_count": 5000})]

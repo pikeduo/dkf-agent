@@ -195,10 +195,11 @@ def dense_drawing_page(*, number=0, count=9207, text=""):
 
 
 @pytest.mark.parametrize("count,image_count,drawing_threshold", [
-    (5001, 0, 6), (9207, 0, 1000), (4901, 100, 1000), (2, 4999, 1000)])
+    (5001, 0, 6), (9207, 0, 1000), (4901, 100, 1000), (2, 4999, 1000),
+    (58, 12639, 1000), (0, 5001, 1000)])
 @pytest.mark.parametrize("text", ["正文", ""])
 def test_dense_drawings_route_whole_without_losing_page_coverage(monkeypatch, count, image_count, drawing_threshold, text):
-    """密集及混合绘图有界判云，不能因调高绘图阈值或缺文字而细查、判装饰或漏后续页。"""
+    """密集图片/绘图保守判云，不能因调高阈值或缺文字而判装饰或漏后续页。"""
     pages = [PageStub([], number=index, text="正文") for index in range(20)]
     target = dense_drawing_page(number=13, count=count, text=text)
     target.images = [{"bbox": (0, 0, 1, 1)}] * image_count
@@ -215,6 +216,7 @@ def test_dense_drawings_route_whole_without_losing_page_coverage(monkeypatch, co
     assert all(page.required for page in inspected.signals.pages)
     signal = inspected.signals.pages[13]
     assert signal.drawing_count == count and signal.image_count == image_count
+    assert signal.image_area_ratio == pytest.approx(min(1, image_count / (600 * 800)))
     assert signal.text_chars == len(text) and signal.decorative_drawing_count == 0
     assert signal.coverage_reason == "content_or_uncertain"
     decoration.assert_not_called()
@@ -222,9 +224,12 @@ def test_dense_drawings_route_whole_without_losing_page_coverage(monkeypatch, co
 
 
 @pytest.mark.parametrize("missing_page", [2, 3])
-def test_dense_drawings_preserve_guard_for_drawing_and_later_page(monkeypatch, missing_page):
-    """绘图页和其后正文页仍要求覆盖；云v4缺页保持PARTIAL，Native缺页仍拒绝。"""
-    inspected = inspect_stub(monkeypatch, [PageStub([], text="正文"), dense_drawing_page(number=1),
+@pytest.mark.parametrize("image_count", [0, 12639])
+def test_dense_drawings_preserve_guard_for_drawing_and_later_page(monkeypatch, missing_page, image_count):
+    """密集图片/绘图页和后续正文仍要求覆盖；云缺页保持PARTIAL，Native缺页仍拒绝。"""
+    dense = dense_drawing_page(number=1)
+    dense.images = [{"bbox": (0, 0, 1, 1)}] * image_count
+    inspected = inspect_stub(monkeypatch, [PageStub([], text="正文"), dense,
         PageStub([], number=2, text="后续正文")])
     identifier = uuid4()
     parsed = ParsedDocument(doc_id=identifier, file_name="任意.pdf", file_type="pdf", quality=ParseQuality(), blocks=[
@@ -242,11 +247,14 @@ def test_dense_drawings_preserve_guard_for_drawing_and_later_page(monkeypatch, m
         guard_result(parsed, decide_route("pdf", "native", inspected))
 
 
-def test_dense_drawings_do_not_hide_later_hard_budget_failure(monkeypatch):
-    """前页密集绘图不提前返回成功，后页文本行数超限仍拒绝整份预检。"""
+@pytest.mark.parametrize("image_count", [0, 12639])
+def test_dense_drawings_do_not_hide_later_hard_budget_failure(monkeypatch, image_count):
+    """密集视觉页不提前返回成功，后页文本行数超限仍拒绝整份预检。"""
     later = PageStub([], number=1)
     later.get_text = MagicMock(return_value={"blocks": [{"type": 0, "lines": [{}] * 2001}]})
-    inspected = inspect_stub(monkeypatch, [dense_drawing_page(), later])
+    dense = dense_drawing_page()
+    dense.images = [{"bbox": (0, 0, 1, 1)}] * image_count
+    inspected = inspect_stub(monkeypatch, [dense, later])
     decision = decide_route("pdf", "auto", inspected)
     assert inspected.uncertain and decision.route_strategy == "failed"
     assert decision.reason_codes == ("PREFLIGHT_LIMIT",)

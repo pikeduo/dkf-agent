@@ -370,7 +370,7 @@ API/Worker 业务日志为 UTF-8 中文可读摘要，共用 `LOG_DIR`，每天�
 
 MinerU远端failed会保留已知错误码或固定类别，管理`cause_code`可显示安全根因；未知供应商原文不输出，终态不自动追加收费批次。历史记录缺少原因时，用户可运行`python scripts/mineru_remote_status.py --doc-id <文档UUID>`只读检查当前Job；显式增加`--query-existing`仅GET一次原Batch，不上传、下载ZIP、写业务库或恢复任务。输出`remote_state=done`也不等于业务READY。Worker修改须待相关队列任务安全结束后由用户重启API/CPU Worker生效。
 
-遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT`及触发页、文本行数、图片/绘图数、总对象数和限制数量。硬限制分别针对总页数、单页文本行数、单页图片数（5000）；普通Retry不会解除相同硬限制。图片与绘图合计超过5000、但图片数未超限时，记录`router.preflight_geometry_limited`，保留真实绘图数与必需覆盖页、停止几何细查，auto交给整份MinerU处理。更新后待队列任务安全结束，再手动重启CPU Worker使新规则生效；此前未创建云Job的文档可能因此产生首次云提交费用。
+遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT`及触发页、实际计数和限制数量。历史`PDF_OBJECT_LIMIT`是本地图片条目预算，不表示PDF损坏；新预检中，图片与绘图合计超过5000只记录`router.preflight_geometry_limited`（图片条目超5000为`PDF_VISUAL_DETAIL_LIMIT`，其余为`PDF_DRAWING_DETAIL_LIMIT`），保留真实计数、图片面积和必需覆盖页，停止绘图几何细查并继续检查后续页。auto仍走MinerU，Office转换PDF可继续冻结及180页分片；不会忽略图片内容或放宽Hash/损坏/页数/文本行数及云端限制。CLI重新运行即可加载新代码；API/CPU Worker须待队列任务安全结束后由用户重启。此前未创建云Job的文档经业务Retry可能首次提交收费任务。
 
 调用接口生成日志后，查看当天文件：
 

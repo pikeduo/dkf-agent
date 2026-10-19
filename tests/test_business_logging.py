@@ -760,9 +760,9 @@ def test_preflight_counts_reject_non_integer_or_sensitive_values(events, field, 
     assert "SECRET" not in events.getvalue()
 
 
-@pytest.mark.parametrize("budget", ["pages", "lines", "images", "images_and_drawings"])
+@pytest.mark.parametrize("budget", ["pages", "lines", "dense_page_lines"])
 def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, budget):
-    """纯 Mock 核对页数/行数/图片硬预算拒绝日志；密集绘图不再计入硬拒绝条件。"""
+    """纯 Mock 核对页数/行数硬预算；图片及绘图密度不再冒充格式错误。"""
     from unittest.mock import MagicMock
 
     from app.parsers.routing import inspector
@@ -774,9 +774,8 @@ def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, 
     document.page_count = 1001 if budget == "pages" else 20
     document.__iter__.return_value = [page]
     page.number, page.rect.width, page.rect.height = 13, 600, 800
-    line_count = 2001 if budget == "lines" else 118
-    image_count = 5001 if budget in {"images", "images_and_drawings"} else 0
-    drawing_count = 9207 if budget == "images_and_drawings" else 0
+    line_count = 118 if budget == "pages" else 2001
+    image_count, drawing_count = (12639, 58) if budget == "dense_page_lines" else (0, 0)
     page.get_image_info.return_value = [{}] * image_count
     page.get_drawings.return_value = [{}] * drawing_count
     page.annots.return_value = []
@@ -793,17 +792,22 @@ def test_pdf_preflight_rejection_records_the_actual_budget(events, monkeypatch, 
         assert record["step"] == "PDF_PAGE_LIMIT"
         assert record["page_count"] == 1001 and record["limit_count"] == 1000
     else:
-        assert record["step"] == ("PDF_LINE_LIMIT" if budget == "lines" else "PDF_OBJECT_LIMIT")
+        assert record["step"] == "PDF_LINE_LIMIT"
         assert record["page"] == 14 and record["line_count"] == line_count
         assert record["image_count"] == image_count and record["drawing_count"] == drawing_count
         assert record["object_count"] == image_count + drawing_count
-        assert record["limit_count"] == (2000 if budget == "lines" else 5000)
+        assert record["limit_count"] == 2000
         assert "绘图数=" in events.getvalue() and "限制数量=" in events.getvalue()
     assert "SECRET" not in events.getvalue()
 
 
-def test_pdf_preflight_geometry_limited_records_safe_counts(events, monkeypatch):
-    """密集绘图记录细查降级而非失败，日志不泄漏正文或私有路径。"""
+@pytest.mark.parametrize("image_count,drawing_count,step", [
+    (0, 9207, "PDF_DRAWING_DETAIL_LIMIT"),
+    (12639, 58, "PDF_VISUAL_DETAIL_LIMIT"),
+    (5001, 0, "PDF_VISUAL_DETAIL_LIMIT"),
+])
+def test_pdf_preflight_geometry_limited_records_safe_counts(events, monkeypatch, image_count, drawing_count, step):
+    """密集图片/绘图记录降级与真实条目数，日志不泄漏正文或私有路径。"""
     from unittest.mock import MagicMock
 
     import pymupdf
@@ -816,8 +820,8 @@ def test_pdf_preflight_geometry_limited_records_safe_counts(events, monkeypatch)
     document.needs_pass, document.is_repaired, document.page_count = False, False, 1
     document.__iter__.return_value = [page]
     page.number, page.rect = 0, pymupdf.Rect(0, 0, 600, 800)
-    page.get_image_info.return_value = []
-    page.get_drawings.return_value = [{}] * 9207
+    page.get_image_info.return_value = [{"bbox": (0, 0, 1, 1)}] * image_count
+    page.get_drawings.return_value = [{}] * drawing_count
     page.annots.return_value = []
     page.get_text.return_value = {"blocks": [{"type": 0, "lines": [
         {"bbox": (40, 100, 200, 115), "spans": [{"text": "SECRET_BODY"}]}] * 118}]}
@@ -828,9 +832,9 @@ def test_pdf_preflight_geometry_limited_records_safe_counts(events, monkeypatch)
     assert decision.route_strategy == "mineru_whole"
     [record] = records(events)
     assert record["event"] == "router.preflight_geometry_limited"
-    assert record["step"] == "PDF_DRAWING_DETAIL_LIMIT" and record["page"] == 1
-    assert record["drawing_count"] == record["object_count"] == 9207
-    assert record["line_count"] == 118 and record["image_count"] == 0 and record["limit_count"] == 5000
+    assert record["step"] == step and record["page"] == 1
+    assert record["drawing_count"] == drawing_count and record["object_count"] == image_count + drawing_count
+    assert record["line_count"] == 118 and record["image_count"] == image_count and record["limit_count"] == 5000
     assert "error_code" not in record
     assert "几何细查预算" in events.getvalue() and "SECRET" not in events.getvalue()
 

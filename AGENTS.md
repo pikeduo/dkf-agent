@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33全量导入排错中：01:20快照116 READY/80 PARTIAL_READY/4 FAILED。082ebed3的v7大HTML行扫描修复待用户缓存Reindex/GPU验收，旧配方冻结。用户已选择LibreOffice，已编写Whole Office→冻结PDF→180页分片与单文档显式预算恢复，旧200页账本/失败Batch保留；软件安装、测试、转换、三份新云任务及真实向量入库均未执行。PARTIAL缺口仍待验收，不进入34，冻结200/4087不改。**
+当前阶段：**33全量导入排错中：01:20历史快照116 READY/80 PARTIAL_READY/4 FAILED。082ebed3的v7大HTML行扫描修复待用户缓存Reindex/GPU验收，旧配方冻结。已编写LibreOffice Whole Office→冻结PDF→180页分片与单文档显式预算恢复，旧200页账本/失败Batch保留。用户已执行Office转换预览；本轮将密集图片条目改为几何细查降级，保留面积/真实计数/必需覆盖并继续后续页检查，Hash及其他硬保护不变。新增Mock回归和失败即停止命令，测试与本次文档恢复待用户验收。PARTIAL缺口仍待验收，不进入34，冻结200/4087不改。**
 
 本轮新增向量输入`embedding-token-refinement-v1`：真实Tokenizer全量预检、超长正文/完整表行组重切、旧向量长度失败Retry接入及新代次提交后交接。只复用当前Block并核对旧输入Hash，保留来源与PARTIAL质量；不可拆公式/单行明确失败。代码和定向Mock/隔离DB用例已编写，未执行测试、GPU或真实恢复，上述历史快照不代表实时状态。
 

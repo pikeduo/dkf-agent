@@ -14,6 +14,7 @@
 - 共享 `.office-pdf/<配方Hash>/` 保存不可变PDF/receipt及工作目录；身份绑定原件Hash/格式、引擎Hash、安全配置Hash。冻结后用实际PDF字节/Hash/页摘要，缺失/变化停止，不自动重新渲染。应备份完整PARSED_DIR（含隐藏目录）；失败目录保留，不自动删除。超时只尝试停止本次PID树，不按名称结束其他LibreOffice。
 - 新PDF计划以180页为目标，字节超限继续二分，全片实际Hash/连续覆盖/几何验证后才首POST；原200页计划及缓存键仍按冻结策略恢复。Office原件Hash不换成PDF Hash；PDF/片Hash独立保存，逐片结果按PDF校验后映射为Office逻辑页、bbox=NULL。来源指针含派生PDF Hash，XLSX Native原式保留。
 - Guard使用已冻结转换PDF的真实页范围；缺required页仍PARTIAL，禁止虚构原Office物理页或坐标。`OFFICE_PDF_RENDER_NOT_VERIFIED`只说明渲染保真尚未人工评估，不是已发现缺文，也不据此伪造缺页。READY仍不代表Office排版/语义已证明无损。
+- 转换PDF单页图片条目超过5000不再直接报`OFFICE_PDF_INVALID`；通用预检记录`router.preflight_geometry_limited / PDF_VISUAL_DETAIL_LIMIT`，保留实际计数、图片面积及必需覆盖页，继续检查后续页后才能发布回执。总页数/文本行数预算、真实损坏、原件/派生Hash和180页/字节/费用校验仍保留。旧有效回执只读复用，失败工作目录不当作成功缓存，也不自动删除。
 - 普通Retry优先原ZIP/成功片，不能因为新增转换配方重投原Whole。仅管理员正数`office_pdf_max_new_parts`接受同Hash、已上传且明确远端失败的Whole Office；有原ZIP、未知提交、活动任务或已分片任务拒绝。新本地代次保留原Job/Batch，最多N片，实际片数超N在首POST前报OFFICE_PDF_BUDGET。该参数与`allow_new_split_parts`互斥，不是Force；其他收费历史仍阻止提交。
 - 新转换Job尚无任何提交时，准备失败可普通Retry续同Job；已授权预算保留、不扩额。只在尚未提交时可显式调整预算。已有片提交后，不再用此参数创建另一个转换任务；按原账本/ZIP及旧片续交许可处理。非预算类安全错误不可用扩额解决。
 - 安装/路径/转换错误分别保留`OFFICE_PDF_DEPENDENCY/PATH/IDENTITY/CHANGED/TIMEOUT/FAILED/INVALID/BUDGET`，管理cause可见安全码，原始进程输出/私有路径/上游原文不进日志。没有新迁移；不得将代码完成当作三份已恢复。
@@ -24,24 +25,36 @@
 
 ```powershell
 conda activate dkf-agent
-python -m pytest tests/test_office_pdf.py tests/test_office_pdf_recovery.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_pdf_cloud_acceptance.py tests/test_office_saved_snapshot.py tests/test_parse_cache.py tests/test_document_management.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_office_pdf.py tests/test_office_pdf_recovery.py tests/test_pdf_coverage.py tests/test_mineru_pdf_split.py tests/test_mineru_pdf_split_jobs.py tests/test_mineru_pdf_cloud_acceptance.py tests/test_office_saved_snapshot.py tests/test_parse_cache.py tests/test_document_management.py tests/test_business_logging.py -q -ra
 ```
 
 安装并核对LibreOffice后，先只处理第一份PPTX，`--prepare`允许本地转换/生成预览片，**没有MinerU请求、业务SQL写入、GPU或恢复POST**：
 
 ```powershell
-$officeDocId = '8a3496d6-dd9e-40bd-be60-70b4b701002a'
-$officePlanFile = "results/office_pdf_plan_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
-# 去掉--prepare为dry-run，只检查元数据和本地依赖。
-python scripts/office_pdf_plan.py --doc-id $officeDocId --prepare --output $officePlanFile
-if ($LASTEXITCODE -ne 0) { throw '本地转换/分页未通过，禁止提交云任务' }
-$officePlan = Get-Content $officePlanFile -Raw -Encoding UTF8 | ConvertFrom-Json
-$officePlan | Select-Object status,page_count,target_pages,planned_max_new_files,cloud_submitted,database_modified
-$officePlan.parts | Format-Table ordinal,page_start,page_end,size_bytes -AutoSize
-Invoke-Item -LiteralPath $officePlan.converted_pdf_path
+try {
+    $officePlan = $null
+    $officeDocId = '8a3496d6-dd9e-40bd-be60-70b4b701002a'
+    $officePlanFile = "results/office_pdf_plan_${officeDocId}_$(Get-Date -Format yyyyMMdd_HHmmssfff).json"
+    # 去掉--prepare为dry-run；本块仅适用于实际准备成功后的PDF预览。
+    python scripts/office_pdf_plan.py --doc-id $officeDocId --prepare --output $officePlanFile
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $officePlanFile -PathType Leaf)) {
+        throw '本地转换/分页未通过，停止读取预览，禁止提交云任务'
+    }
+    $officePlan = Get-Content -LiteralPath $officePlanFile -Raw -Encoding UTF8 -ErrorAction Stop |
+        ConvertFrom-Json -ErrorAction Stop
+    if ($officePlan.status -ne 'LOCAL_PLAN_READY' -or $officePlan.doc_id -ne $officeDocId) {
+        throw '预览未通过或文档身份不匹配'
+    }
+    $officePlan | Select-Object status,page_count,target_pages,planned_max_new_files,cloud_submitted,database_modified
+    $officePlan.parts | Format-Table ordinal,page_start,page_end,size_bytes -AutoSize
+    Invoke-Item -LiteralPath $officePlan.converted_pdf_path -ErrorAction Stop
+} catch {
+    $officePlan = $null
+    throw
+}
 ```
 
-应为`LOCAL_PLAN_READY`、所有页连续覆盖且每片≤180页、flags为false。人工核对PDF字体/页尾/表格/图表；预览的PDF一旦有有效回执，正式Job复用同字节，不重复转换。预览会占用磁盘并保存含正文的派生PDF，报告路径只在本机，不上传公开。缺安装/格式/预检预算/超时先修对应原因；不绕过Hash/必要预检。
+请一次执行完整`try/catch`块；交互式终端中单独一行`throw`不会阻止之后手动粘贴的其他命令。失败时不写成功计划，清空`$officePlan`并停止块内后续读取/打开，避免旧变量或不存在的JSON引发连带错误。成功应为`LOCAL_PLAN_READY`、所有页连续覆盖且每片≤180页、flags为false。人工核对PDF字体/页尾/表格/图表；预览的PDF一旦有有效回执，正式Job复用同字节，不重复转换。预览会占用磁盘并保存含正文的派生PDF，报告路径只在本机，不上传公开。缺安装/格式/预检预算/超时先修对应原因；不绕过Hash/必要预检。
 
 **只有确认PDF内容、实际片数、全部新片外传和费用后**，等待队列任务安全结束，用户手动重启API/CPU（Windows solo并发1）加载代码；GPU沿原部署，用于后续真实Embedding。下面是授权收费的单份命令，不是离线测试：
 
