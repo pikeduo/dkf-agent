@@ -2,7 +2,59 @@
 
 代码已实现，用户已开始真实导入，尚未全量通过。本轮Codex只读定位已有失败并修复代码，**未执行pytest、Adapter回放、真实上传、数据库写入、GPU或云端评测**。阶段32原件、manifest、3588条OHR及499条OCB官方QA不改写、不重采样。没有前N份/前N题参数；`--max-inflight`只控制在途任务，始终登记全部200份和4087题。仅使用OHR/OCB，不处理OmniDocBench，不调用DeepSeek或其他LLM。
 
-## 10月19日：九份Office保存快照恢复
+## 10月19日00:52快照：剩余10份分组恢复
+
+用户三份CSV最终为116 READY、74 PARTIAL_READY、10 FAILED；190份已索引项均有Block、Chunk与向量数相等且无无效向量。新增两份Office为PARTIAL_READY，不等于全部200份完整验收。剩余为六份旧外链预检、三份远端failed、一份XML预算；六份当天只有GET状态，前轮脚本遇到`c8e4ca42…`云失败后停止了组内后续提交，并非六份应用修复后再次失败。
+
+本轮不修改Adapter或旧记录。远端失败保留已知代码/固定映射到独立`_remote_failure`，管理cause可显示受控原因；远端终态保持不可自动重投，即使原因属于临时服务类别也不自动新建批次。未知原文不输出。历史三份原因未保存，新增CLI只读查原Job，可显式GET一次原Batch；不上传、下载结果、发布缓存或恢复业务。若远端仍为failed且原因未知，需平台按Batch/trace核对，不能认定可用旧ZIP恢复。
+
+由用户手动测试（Codex未执行），再确认相关队列任务安全结束，按README重启API及所有CPU Worker：
+
+```powershell
+python -m pytest tests/test_mineru_remote_status.py tests/test_stage33_office_script.py tests/test_mineru_recovery.py tests/test_mineru_post_adapter.py tests/test_document_management.py -q -ra
+```
+
+恢复余六份时先保持XML预算16。显式继续选项只跨过业务FAILED且管理failed的确定终态，仍串行每份POST一次；HTTP未确认、超时、已有Job和身份冲突仍停止。不重投前轮已成功或云失败项，最多首次提交余六份（可能收费）：
+
+```powershell
+powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteSavedOffice -AllowCloud -ContinueSavedOfficeOnFailure
+```
+
+三份原云失败仅做诊断，命令由用户执行；省略`--query-existing`仅查只读SQL，不访问MinerU：
+
+```powershell
+$remoteDocIds = @(
+    '8a3496d6-dd9e-40bd-be60-70b4b701002a',
+    '81f211b8-330f-4015-9ad7-b3d377a7392b',
+    'c8e4ca42-f739-48c4-9c2d-50120f956309'
+)
+foreach ($remoteDocId in $remoteDocIds) {
+    python scripts/mineru_remote_status.py --doc-id $remoteDocId --query-existing
+}
+```
+
+XML项`082ebed3-a4e9-4b61-934b-4025b472192e`的旧实测单部件20,204,999字节、总XML38,016,609字节。当前本地`.env`仍为16 MiB单部件预算，超限是预期保护。余六份结束后、相关任务安全退出时，用户手动将已有`ROUTER_XML_PART_MAX_MB=16`改为32，总预算保持64；重启API/CPU Worker后执行以下单文档命令。配置变化会影响新缓存身份，不借此重建已成功文档。若实时状态或Job历史与预期不符，命令停止；可能首次走云，用户须确认费用。
+
+```powershell
+$xmlDocId = '082ebed3-a4e9-4b61-934b-4025b472192e'
+$xmlBase = "http://127.0.0.1:8000/api/admin/documents/$xmlDocId"
+$xmlState = Invoke-RestMethod "$xmlBase/status" -ErrorAction Stop
+$xmlDetail = Invoke-RestMethod $xmlBase -ErrorAction Stop
+if ($xmlState.doc_id -ne $xmlDocId -or $xmlDetail.doc_id -ne $xmlDocId -or
+    $xmlState.kb_id -ne '158030a1-42d6-42ee-835d-02fdbff23f81' -or
+    $xmlDetail.kb_id -ne $xmlState.kb_id -or $xmlState.status -ne 'FAILED' -or
+    $xmlState.management.state -ne 'failed' -or $xmlState.management.cause_code -ne 'PREFLIGHT_LIMIT' -or
+    $null -eq $xmlDetail.parse_jobs -or @($xmlDetail.parse_jobs).Count -ne 0) {
+    throw '状态/身份/云历史变化，未重投；先检查当前详情。'
+}
+Invoke-RestMethod -Method Post "$xmlBase/retry" -TimeoutSec 120 -ErrorAction Stop
+# 全200份重新查询；不读旧import_checkpoint判断恢复成败。
+powershell -NoProfile -File scripts/recover_stage33_office.ps1
+```
+
+验收仍看真实status及Block/Chunk/向量，不能把受理、远端done或诊断通过当作READY。74份PARTIAL_READY及其真实缺页/外部源缺口仍未完整验收；本轮不修改质量或伪造完整状态。
+
+## 九份Office保存快照恢复（前轮实现）
 
 用户报告上一轮操作已完成，尚无新的全200份CSV，本节不猜测当前总数。只读核对这9份冻结原件及关系元数据后，确认先前“全部缺少正文附件”的分类不准确：5份DOCX/PPTX含已保存数据的图表更新源，其中1份链接图片同时有包内副本；4份XLSX包含外部工作簿更新引用，原单元格/公式仍可保留。此前统一报`EXTERNAL_ATTACHMENT_MISSING`发生在MinerU提交前，不是上一轮strong切片修复失效或MinerU解析失败。
 
@@ -30,7 +82,7 @@ powershell -NoProfile -File scripts/recover_stage33_office.ps1 -ExecuteSavedOffi
 powershell -NoProfile -File scripts/recover_stage33_office.ps1
 ```
 
-九份固定身份为下方历史清单中的4份外部工作簿及5份OLE/图片关系文档，脚本已单独列明。当前可用记录均没有Job；可能首次提交0～9个Whole云任务，并非已有ZIP的无云恢复。脚本再次读取实时详情，已有任何Job即停止新提交，不借本修复重传旧Batch；跳过READY/PARTIAL_READY及活动任务。第一份实际失败后不再提交该组后续项，但仍完整生成200份报告；HTTP确认失败/超时停止，不盲重发。
+九份固定身份为下方历史清单中的4份外部工作簿及5份OLE/图片关系文档，脚本已单独列明。此处描述前轮首次恢复前状态，当时均没有Job，可能首次提交0～9个Whole云任务，并非已有ZIP的无云恢复。脚本再次读取实时详情，已有任何Job即停止新提交，不借本修复重传旧Batch；跳过READY/PARTIAL_READY及活动任务。默认第一份实际失败后不再提交该组后续项，但仍完整生成200份报告；新显式继续开关见上节，HTTP确认失败/超时仍停止，不盲重发。
 
 验收可靠内容入库需`PARTIAL_READY`、`chunk_count=vector_count>0`、`invalid_vector_count=0`、管理done，并确认质量保留外部源告警与原公式/来源；这不能替代完整外部数据验收或宣称200份READY。若失败，使用新CSV的stage/cause/error及对应Worker原异常继续定位，不能将“路由放行”当成恢复成功。9份真实供应商转换、GPU/索引及新增测试尚未执行，必须由用户确认。
 

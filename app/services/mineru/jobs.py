@@ -490,7 +490,14 @@ def submit_step(
 
 
 def result_failure(payload: dict) -> MinerUError:
-    """对官方明确的临时失败原因做受控分类，其他失败不猜测、不暴露 err_msg。"""
+    """优先保留已知错误码，再匹配既有固定原因；未知原文不透传，也不推断可重新提交。"""
+
+    for key in ("err_code", "error_code"):
+        value = payload.get(key)
+        if type(value) in (str, int):
+            error = api_error(value)
+            if error.code != "UPSTREAM_ERROR":
+                return error
 
     transient = {
         "服务异常": "-10001",
@@ -562,10 +569,13 @@ def check_step(
     )
     if job.state == "failed":
         error = result_failure(result)
-        # 远端已终止时禁止自动新建收费批次；可恢复的 PUT/GET/下载重试仍用旧批次。
-        raise MinerUError("ROUTED_REMOTE_FAILED" if "_route_decision" in job.parse_options
-                          else error.code,
-                          "MinerU 远端解析失败，未自动降级 Native 或追加新批次")
+        # 路由终态码继续阻止重投，但安全根因独立保留，不能被管理汇总代码吞掉。
+        failure = MinerUError("ROUTED_REMOTE_FAILED" if "_route_decision" in job.parse_options
+                             else error.code,
+                             f"{error.code}：{error}；远端任务已终止，未追加新批次")
+        failure.remote_failure = {"cause_code": error.code, "batch_id": job.batch_id,
+                                  "data_id": job.data_id, "trace_id": job.trace_id}
+        raise failure
     if job.state != "done":
         # Worker停机时间不是供应商失败：已提交批次先做一次GET，done仍可回收；未完成才停止调度。
         check_deadline(job, settings)
@@ -761,6 +771,10 @@ def record_error(
                 ledger = {"state": "failed", "error_code": "HYBRID_CHECKPOINT"}
             job.parse_options = job.parse_options | {"_hybrid_result": ledger}
     job.error_code, job.error_message = error.code, str(error)
+    remote = getattr(error, "remote_failure", None)
+    if remote:
+        # 主事务已回滚，在独立失败事务保存白名单类别和原收费身份，不保存err_msg。
+        job.parse_options = job.parse_options | {"_remote_failure": remote}
     internal = getattr(error, "internal_diagnostic", None)
     if internal:
         job.parse_options = job.parse_options | {"_runtime_failure": internal}

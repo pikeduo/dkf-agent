@@ -344,6 +344,8 @@ python -m celery -A app.core.celery_app:celery_app worker -Q gpu_queue --pool=so
 
 API/Worker 业务日志为 UTF-8 中文可读摘要，共用 `LOG_DIR`，每天一份 `knowledge-service-YYYY-MM-DD.log`，重启继续追加；框架原始日志仍在终端。默认 INFO，记录接口、上传、解析、重试及结果数量，不记录正文或密钥；解析质量仍需对照原件。
 
+MinerU远端failed会保留已知错误码或固定类别，管理`cause_code`可显示安全根因；未知供应商原文不输出，终态不自动追加收费批次。历史记录缺少原因时，用户可运行`python scripts/mineru_remote_status.py --doc-id <文档UUID>`只读检查当前Job；显式增加`--query-existing`仅GET一次原Batch，不上传、下载ZIP、写业务库或恢复任务。输出`remote_state=done`也不等于业务READY。Worker修改须待相关队列任务安全结束后由用户重启API/CPU Worker生效。
+
 遇到`ROUTER_FAILED[PREFLIGHT_LIMIT]`，查看`router.preflight_rejected`的`PDF_PAGE_LIMIT / PDF_LINE_LIMIT / PDF_OBJECT_LIMIT`及触发页、文本行数、图片/绘图数、总对象数和限制数量。硬限制分别针对总页数、单页文本行数、单页图片数（5000）；普通Retry不会解除相同硬限制。图片与绘图合计超过5000、但图片数未超限时，记录`router.preflight_geometry_limited`，保留真实绘图数与必需覆盖页、停止几何细查，auto交给整份MinerU处理。更新后待队列任务安全结束，再手动重启CPU Worker使新规则生效；此前未创建云Job的文档可能因此产生首次云提交费用。
 
 调用接口生成日志后，查看当天文件：

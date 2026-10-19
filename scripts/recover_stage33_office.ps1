@@ -4,6 +4,7 @@ param(
     [switch]$ExecuteLocal,
     [switch]$ExecuteNewParse,
     [switch]$ExecuteSavedOffice,
+    [switch]$ContinueSavedOfficeOnFailure,
     [switch]$AllowCloud,
     [ValidateRange(60,86400)][int]$TimeoutSeconds = 7200
 )
@@ -11,6 +12,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $executionModes = @($ExecuteLocal, $ExecuteNewParse, $ExecuteSavedOffice) | Where-Object { $_ }
 if (@($executionModes).Count -gt 1) { throw '请分别执行本地恢复、新解析和Office保存快照恢复。' }
+if ($ContinueSavedOfficeOnFailure -and -not $ExecuteSavedOffice) {
+    throw '-ContinueSavedOfficeOnFailure仅用于显式Office保存快照恢复。'
+}
 if (($ExecuteNewParse -or $ExecuteSavedOffice) -and -not $AllowCloud) {
     throw '首次云解析可能收费；确认费用后须显式增加 -AllowCloud。'
 }
@@ -159,8 +163,10 @@ $rows = @(
             }
             $row = ConvertTo-Stage33Row $document $state
             Write-Host "处理结果：$($document.doc_id) / $($row.status) / $($row.cause)"
-            if ($ExecuteSavedOffice -and $state.status -notin @('READY','PARTIAL_READY')) {
-                # 第一份实际失败后暂停该组后续提交，仍完整生成200份状态报告供定位。
+            if ($ExecuteSavedOffice -and $state.status -notin @('READY','PARTIAL_READY') -and
+                -not ($ContinueSavedOfficeOnFailure -and $state.status -eq 'FAILED' -and
+                      $state.management.state -eq 'failed')) {
+                # 显式许可仅允许跨过明确失败项；未确认请求、超时和在途任务仍停止，绝不重投已有Job。
                 $savedOfficeStopped = $true
                 Write-Warning 'Office恢复未完成，已停止该组后续新提交；请先检查此文档原始阶段和原因。'
             }

@@ -82,10 +82,14 @@ def public_management(document) -> ManagementResponse | None:
 
 
 def safe_cause_code(code):
-    """根因仅接受既有服务白名单，不把任意异常字符串加入日志或API。"""
+    """根因仅接受既有服务及供应商错误码白名单，不把任意异常字符串加入日志或API。"""
     from app.services.embedding.service import ERRORS as embedding_errors
     from app.services.indexing import ERRORS as index_errors
     from app.parsers.routing.contracts import REASON_CODES
+    from app.services.mineru.errors import api_error
+    if isinstance(code, str) and (code in {"REMOTE_FAILED", "ROUTED_REMOTE_FAILED"}
+                                 or api_error(code).code == code):
+        return code
     return code if isinstance(code, str) and code in (
         CHUNK_CODES | embedding_errors.keys() | index_errors.keys() | REASON_CODES | LOCAL_ADAPTER_ERROR_CODES) else None
 

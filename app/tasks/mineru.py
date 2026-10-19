@@ -86,7 +86,7 @@ def publish_step(job_id: UUID, step: str = "submit", delay: int = 0) -> None:
 
 
 def execute_step(task, job_id: str, step: str) -> dict:
-    """执行短步骤并保留脱敏异常栈；本地重放不访问云端，异常不被UNKNOWN抹去。"""
+    """执行短步骤并保留脱敏异常栈和远端固定根因；本地重放不访问云端。"""
 
     try:
         identifier = UUID(job_id)
@@ -210,6 +210,7 @@ def execute_step(task, job_id: str, step: str) -> dict:
         job_id=identifier,
         step=step,
         error_code=error.code,
+        reason_codes=[error.remote_failure["cause_code"]] if getattr(error, "remote_failure", None) else None,
         error_type=internal["error_type"] if internal else None,
         **(internal["frames"][-1] if internal and internal["frames"] else {}),
         duration_ms=round((perf_counter() - started) * 1000, 2),
