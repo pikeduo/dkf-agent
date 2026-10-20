@@ -221,6 +221,15 @@ def test_application_logging_entry_roles_are_registered():
                     assert isinstance(role.value, str) and role.value in logs.ROLE_LABELS, path.name
 
 
+def test_rag_evaluation_logs_only_safe_progress(events):
+    """评测日志只含范围/计数/状态，不泄漏问题、参考答案或最终证据正文。"""
+    logs.log_event("rag_evaluation.started", kb_id=uuid4(), item_count=20,
+                   question="SECRET_QUERY", reference_answer="SECRET_ANSWER", final_evidence="SECRET_EVIDENCE")
+    logs.log_event("rag_evaluation.finished", item_count=1, status="MANUAL_REVIEW_PENDING")
+    assert "SECRET" not in events.getvalue()
+    assert "固定题单RAG质量评测" in events.getvalue() and "语义质量以人工评分为准" in events.getvalue()
+
+
 def test_fields_are_allowlisted_and_single_line(events):
     """敏感字段、正文和任意对象不进入日志；文件名控制字符不会伪造第二条记录。"""
 

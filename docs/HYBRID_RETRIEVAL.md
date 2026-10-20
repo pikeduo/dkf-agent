@@ -9,6 +9,7 @@
 `app.services.rag.llama_index.hybrid_retriever.HybridRetriever` 继承LlamaIndex BaseRetriever，组合现有DenseRetriever和BM25Retriever，而非重做两路SQL/Embedding/索引。
 
 - `HybridRetriever(kb_id, doc_ids=None, top_k=20, branch_top_k=20, rrf_k=60)`：惰性构造；两路范围相同，输入文档列表冻结。top_k/branch_top_k严格整数1～100，rrf_k严格整数1～1000。最终可设top_k=30，但不凑满不存在的候选。
+- 内部Python构造可显式传`corpus_limits=CorpusLimits(...)`，只交给原BM25实例；阶段34沿用阶段33已冻结的大库预算。省略时生产默认不变，不截断语料、不改变SQL范围或融合分；HTTP配置不变。
 - `retrieve(str / QueryBundle)`返回NodeWithScore；`aretrieve`在线程内串行执行同一入口，独立短会话，不共享线程Session；`retrieve_results`返回项目DTO。
 - 仅原query_str；禁止外部向量、变换Query或图片。字符/词项预算复用两路校验，BM25词项超限在Query模型调用前拒绝。Dense仅编码一次Query，BM25不编码；不重新处理文档。
 - 每路各Top20，排名从1开始。等权RRF：`fusion_score = Σ 1 / (rrf_k + branch_rank)`，不相加余弦/BM25原分数，不做分数归一化或Query Rewrite。以原chunk_id去重，融合分降序、同分UUID升序；正文相同但chunk_id不同仍独立。

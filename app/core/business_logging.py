@@ -147,6 +147,8 @@ EVENT_LABELS = {
     "mineru.exception_frame": "MinerU内部异常调用位置（不含异常原文或局部变量）",
     "dataset_evaluation.started": "开始固定全量数据导入或检索评测",
     "dataset_evaluation.finished": "固定全量评测步骤结束，未完成项保留在报告",
+    "rag_evaluation.started": "开始固定题单RAG质量评测",
+    "rag_evaluation.finished": "RAG评测记录已保存，语义质量以人工评分为准",
     "agent.started": "开始单次Knowledge Agent工作流",
     "agent.routed": "已选择固定Knowledge Agent路由",
     "agent.step": "Knowledge Agent节点已结束",

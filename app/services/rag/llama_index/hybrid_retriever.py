@@ -13,7 +13,7 @@ from llama_index.core.schema import NodeWithScore, QueryBundle
 
 from app.core.business_logging import log_event
 from app.schemas.retrieval import FusionProvenance, RetrievalResult
-from app.services.rag.bm25 import MAX_QUERY_TERMS, BM25RetrievalError, tokenize
+from app.services.rag.bm25 import MAX_QUERY_TERMS, BM25RetrievalError, CorpusLimits, tokenize
 from app.services.rag.dense import DenseRetrievalError, validate_doc_ids, validate_query, validate_scope
 from app.services.rag.llama_index.bm25_retriever import BM25Retriever
 from app.services.rag.llama_index.dense_retriever import DenseRetriever
@@ -119,8 +119,8 @@ class HybridRetriever(BaseRetriever):
     def __init__(self, kb_id: UUID | str, *, doc_ids=None, top_k: int = 20,
                  branch_top_k: int = 20, rrf_k: int = 60,
                  embedding_adapter: DKFEmbeddingAdapter | None = None,
-                 session_factory: Callable | None = None):
-        """惰性构造并冻结范围；两路使用已有服务/独立只读会话，不安装依赖或连接数据库。"""
+                 session_factory: Callable | None = None, corpus_limits: CorpusLimits | None = None):
+        """冻结两路范围；可显式沿用评测BM25语料预算，默认生产预算不变且不截断语料。"""
         self._kb_id, self._doc_ids = fusion_scope(kb_id, doc_ids, top_k, branch_top_k, rrf_k)
         self._top_k, self._branch_top_k, self._rrf_k = top_k, branch_top_k, rrf_k
         if (session_factory is not None and not callable(session_factory)
@@ -130,7 +130,7 @@ class HybridRetriever(BaseRetriever):
         self._dense = DenseRetriever(self._kb_id, doc_ids=self._doc_ids, top_k=branch_top_k,
                                     embedding_adapter=embedding_adapter, session_factory=session_factory)
         self._bm25 = BM25Retriever(self._kb_id, doc_ids=self._doc_ids, top_k=branch_top_k,
-                                  session_factory=session_factory)
+                                  session_factory=session_factory, corpus_limits=corpus_limits)
 
     @property
     def kb_id(self) -> UUID:

@@ -24,7 +24,7 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 
 ### 当前开发进度
 
-当前阶段：**33检索评测优化。用户run_03已完成100题/400条策略记录，零执行失败，SAMPLE_COMPLETED_WITH_QUALITY_LIMITS；200份有效索引为118 READY/82 PARTIAL_READY，55份缺历史质量元数据，均不补造完整性。日志显示上一版BM25分页热查询约163～165秒，本轮改为单次候选ID扫描及每批至多256个明确ID摘要，补充分阶段计时及OCB逐依赖四路Top20诊断。全量来源/累计预算/评分及10秒语句预算不减；仅静态检查，pytest、新run真实性能待用户验收。CLI无需CPU/GPU Worker；OCB代理指标不当问答正确率，后续再推进34。**
+当前阶段：**34 RAG质量评测工具已实现、待用户验收。阶段33用户run_03已完成100题/400次策略执行；OHR Hybrid+重排Recall@5=0.94，OCB依赖文档代理Recall@5=0.58，不追求100%召回。200份索引118 READY/82 PARTIAL_READY及未知质量保留。阶段34固定至少10个不同单文档问题，补多文档/全库及受限范围对照，复用原RAG保存同次最终证据、来源反查和分阶段耗时；人工正确性/忠实度/引用指标分开。单题至多一个LLM请求，无Fallback，默认只读预览，中断不自动重发。仅静态检查，pytest、真实付费问答及人工评分由用户执行，不能宣称问答质量通过。**
 
 既有`embedding-token-refinement-v1`、v7切片及LibreOffice/180页分片继续保留，不因检索评测重建已有文档。此前待验收的专项用例不随用户确认全量入库自动通过；后续状态以新的只读索引观察为准，不用旧导入检查点推断实时进度。
 
@@ -61,7 +61,8 @@ DKF-Agent（数知融问智能体）当前只开发 `knowledge-service`：可独
 | 31 | 既有用例状态保留；阶段32本地提取授权不等于pytest/全量回归授权 |
 | 32 | OHR100 PDF/3588题、OCB100 Office/499题及739条官方断言已本地冻结；32条Domain任务/1138条断言待审不进正式QA；双向校验通过，未做问答评测 |
 | 33 | run_03的100题/400条策略记录已全部执行成功，质量限制保留。已补BM25单次候选扫描/明确ID批次Hash和阶段计时、OCB逐依赖Top20诊断；新回归及独立run性能待用户执行 |
-| 34 及后续 | 按后续阶段计划，在检索基线后推进RAG质量、专项能力、性能与Demo；付费云调用及实际测试仍须单独授权 |
+| 34 | 已补固定题单、原RAG同次证据/来源核对、逐题收费意图与续跑保护、人工三指标及离线报告；默认20次问答含范围对照，测试/真实LLM和人工质量待用户验收，详见阶段34文档 |
+| 35 及后续 | 待RAG实际质量评测后推进专项能力、性能与Demo；付费云调用及实际测试仍须单独授权 |
 
 - 当前代码迁移head为`0009_parse_quality`：可空解析质量/Block来源及PARTIAL_READY约束；不回填历史数据。用户已确认编写但未由Codex执行迁移，“已实现”不等于已验收。
 - 解析后 CHUNKING，切片后 EMBEDDING，/embed 本地向量完成后 INDEXING，独立 /index 全部向量事务入库后 READY；READY只表示数据入库完成。HTTP搜索/问答复用原Hybrid/Reranker/RAG，Dense/BM25独立Python入口不变。
@@ -331,6 +332,7 @@ Windows 基础服务由用户手动管理，本节优先于其他文档中的旧
 | 管理接口、恢复编排、删除所有权及人工验收 | [Admin文档管理](docs/DOCUMENT_MANAGEMENT.md) |
 | 阶段26云miss/费用前置/本地超时与跨语言对照 | [阶段26补充](docs/STAGE26_SUPPLEMENT.md) |
 | 全200原件/4087题导入、四策略、断点与评分分母 | [阶段33评测](docs/STAGE33_EVALUATION.md) |
+| 固定题单RAG、收费检查点、三类人工质量指标与同次证据 | [阶段34评测](docs/STAGE34_EVALUATION.md) |
 | 公式提取、表达式语法、语义来源及人工验收 | [公式语义结构化](docs/FORMULA_SEMANTICS.md) |
 | Agent状态/路由、薄Tool、费用与有限图验收 | [Knowledge Agent](docs/KNOWLEDGE_AGENT.md) |
 | 预置素材、导入与阶段推进、幂等及人工验收 | [预置导入](docs/PRESET_IMPORT.md) |
