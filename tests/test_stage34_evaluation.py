@@ -130,6 +130,98 @@ def test_plan_or_runtime_change_cannot_mix_existing_answers(tmp_path):
         tool.execute(tmp_path, plan, RuntimeStub(), max_cloud_calls=2, limit=1)
 
 
+def retry_source(tmp_path, monkeypatch, record_changes=None):
+    """准备本地检查点字段桩；一题完成、一题检索失败、一题未开始，不运行任何模型或服务。"""
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    source = tool.run_directory("stage34_run_03")
+    plan = fixture_plan(3)
+    write_json(source / "plan.json", {"sha256": tool.plan_id(plan), "plan": plan})
+    completed = {"case_id": plan["cases"][0]["case_id"], "plan_sha256": tool.plan_id(plan),
+        "status": "COMPLETED", "llm_attempted": True, "llm_attempts": [{"status": "COMPLETED"}]}
+    failed = {"case_id": plan["cases"][1]["case_id"], "plan_sha256": tool.plan_id(plan),
+        "status": "FAILED", "error_code": "RAG_RETRIEVAL", "failure_stage": "retrieval",
+        "index_check": "MATCHED", "llm_attempted": False, "llm_attempts": [],
+        "actual_provider": None, "actual_model": None, "raw_llm_output": None, "final_evidence": []}
+    failed.update(record_changes or {})
+    write_json(tool.case_path(source, plan["cases"][0]), completed)
+    write_json(tool.case_path(source, plan["cases"][1]), failed)
+    return source, plan, failed
+
+
+def test_retry_plan_preserves_scope_index_and_original_results(tmp_path, monkeypatch):
+    """新计划仅含未收费检索失败题，原题目/范围/策略不变，旧目录字节完全保留。"""
+    source, plan, failed = retry_source(tmp_path, monkeypatch)
+    before = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    retry = tool.make_retry_plan("stage34_run_03")
+    assert retry["cases"] == [plan["cases"][1]]
+    assert all(retry[name] == value for name, value in plan.items() if name != "cases")
+    assert retry["retry_source"] == {"run": "stage34_run_03", "planned": 3,
+        "plan_sha256": tool.plan_id(plan), "failed_results_sha256": {failed["case_id"]: digest(failed)}}
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == before
+    result = tool.summarize(retry, {}, [])
+    assert result["planned"] == result["not_attempted"] == 1 and result["completed"] == 0
+    assert result["retry_source"] == retry["retry_source"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"status": "STARTED"}, {"status": "COMPLETED"}, {"failure_stage": "llm"},
+    {"error_code": "LLM_NETWORK"}, {"index_check": "CHANGED_OR_UNAVAILABLE"},
+    {"llm_attempted": True}, {"llm_attempts": [{"status": "STARTED"}]},
+    {"llm_attempts": None}, {"actual_provider": "deepseek"}, {"actual_model": "deepseek-chat"},
+    {"raw_llm_output": "PRIVATE_OUTPUT"}, {"final_evidence": [{"chunk_id": "private"}]},
+])
+def test_retry_plan_excludes_paid_uncertain_and_nonretrieval_cases(tmp_path, monkeypatch, changes):
+    """请求已发、请求未知、索引变化或其他阶段失败不能被此入口选中并再次收费。"""
+    retry_source(tmp_path, monkeypatch, changes)
+    with pytest.raises(tool.Stage34Error, match="NO_UNPAID_RETRIEVAL_FAILURES"):
+        tool.make_retry_plan("stage34_run_03")
+
+
+def test_retry_plan_rejects_missing_request_ledger(tmp_path, monkeypatch):
+    """旧格式缺失请求账本时无法证明未发请求，必须拒绝补跑。"""
+    source, plan, failed = retry_source(tmp_path, monkeypatch)
+    failed.pop("llm_attempts")
+    write_json(tool.case_path(source, plan["cases"][1]), failed)
+    with pytest.raises(tool.Stage34Error, match="NO_UNPAID_RETRIEVAL_FAILURES"):
+        tool.make_retry_plan("stage34_run_03")
+
+
+def test_retry_plan_cli_saves_only_new_plan_and_starts_new_runtime_identity(tmp_path, monkeypatch, capsys):
+    """新run独立保存当前身份，仅执行补跑题；不覆盖旧记录，也不为旧成功题重新申请LLM。"""
+    source, plan, _ = retry_source(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli, "run_directory", tool.run_directory)
+    old = {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()}
+    arguments = ["--step", "retry-plan", "--run", "stage34_run_04", "--retry-source-run", "stage34_run_03"]
+    assert cli.main(arguments) == 0 and "固定1题" in capsys.readouterr().out
+    destination = tool.run_directory("stage34_run_04")
+    assert not destination.exists()
+    assert cli.main([*arguments, "--execute"]) == 0
+    assert not (destination / "runtime.json").exists() and not (destination / "cases").exists()
+    assert "原计划3题" in (destination / "summary.md").read_text(encoding="utf-8")
+    retry = tool.load_plan(destination)
+    runtime = RuntimeStub()
+    records = tool.execute(destination, retry, runtime, max_cloud_calls=1, limit=3)
+    assert list(records) == [plan["cases"][1]["case_id"]] and len(runtime.calls) == 1
+    # 原run中的成功结果及失败现场仍保留，不能把不同代码版本混成原run已完成。
+    assert {path.relative_to(source): path.read_bytes() for path in source.rglob("*") if path.is_file()} == old
+    before = {path.relative_to(destination): path.read_bytes() for path in destination.rglob("*") if path.is_file()}
+    assert cli.main([*arguments, "--execute"]) == 1
+    assert "PLAN_EXISTS_OR_CHANGED" in capsys.readouterr().out
+    assert {path.relative_to(destination): path.read_bytes() for path in destination.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize("arguments", [
+    ["--step", "retry-plan", "--run", "stage34_run_04"],
+    ["--step", "retry-plan", "--run", "stage34_run_03", "--retry-source-run", "stage34_run_03"],
+    ["--step", "report", "--retry-source-run", "stage34_run_03"],
+])
+def test_retry_plan_cli_rejects_missing_same_or_misplaced_source(tmp_path, monkeypatch, capsys, arguments):
+    """补跑必须指向独立旧run，非法参数在创建目录或加载运行时之前拒绝。"""
+    monkeypatch.setattr(tool, "ROOT", tmp_path)
+    assert cli.main(arguments) == 1
+    assert "RETRY_SOURCE_RUN" in capsys.readouterr().out and not (tmp_path / "results").exists()
+
+
 def test_post_snapshot_failure_preserves_paid_answer_and_stops(tmp_path):
     """后置索引变化保留本次已付费回答，标明原安全原因，不继续收费或重问。"""
     class ChangedRuntime(RuntimeStub):

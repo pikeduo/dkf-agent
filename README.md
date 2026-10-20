@@ -595,7 +595,7 @@ python scripts/migrate_llm_env.py --apply
 
 如需网络故障时自动切换，在`.env`模型组配置`LLM_PROVIDER=custom`、`LLM_FALLBACK_ENABLED=true`、`LLM_FALLBACK_PROVIDER=deepseek`，并保留双方有效配置。**true表示确认两方均可接收同一问题/证据/公式并接受最多两次潜在费用；每次业务仍须allow_cloud=true。** 仅网络/连接或读取超时、HTTP 5xx、429允许custom→官方DeepSeek一次。普通4xx（含400/401/403/402/408）、坏JSON、截断、非法引用/参数/不支持公式或证据不足不切换；备用再失败直接结束。原Prompt/上下文/JSON要求不变，双方独立模型、Key、输出预算和超时不混用。超时不证明主请求未计费，总等待可能接近两方超时加检索时间；不要因客户端等待过久直接重发。详见[Fallback配置与验收](docs/DEEPSEEK_RAG.md#显式授权的一次fallback)。
 
-固定题单问答入口同样遵循此主备配置，逐次记录提供方和请求预算；运行计划冻结后改变备用策略须使用新运行名，旧记录保留。操作见[阶段34运行手册](docs/STAGE34_EVALUATION.md)。
+固定题单问答入口同样遵循此主备配置，逐次记录提供方和请求预算；运行计划冻结后改变备用策略须使用新运行名，旧记录保留。修复代码后，可用`--step retry-plan --retry-source-run 旧运行名 --run 新运行名`独立准备尚未发起LLM的检索失败题，不覆盖旧结果或重问成功题；计划准备不调用模型或云端，实际问答仍须显式授权外传和费用。操作见[阶段34运行手册](docs/STAGE34_EVALUATION.md#31-修复后仅补跑未调用llm的检索失败题)。
 
 **显式`allow_cloud=True`表示确认本次内容可外传给已授权的提供方且接受费用；开启Fallback时包括主备双方**。仅下载原件或MinerU许可不等于此许可。不对同一提供方自动重试，不静默降级回答；输出截断/引用未知或上下文超限均失败。`RAG_MAX_CONTEXT_CHARS`为完整Prompt字符预算，不是精确token数；保留整份最终证据，不自动裁剪或Refine多次调用。需要现有PostgreSQL/READY数据、匹配的本地BGE-M3和Reranker；先停止同卡GPU Worker，注意8GB双模型显存。Redis/API/Worker无需为只读问答另行启动。
 

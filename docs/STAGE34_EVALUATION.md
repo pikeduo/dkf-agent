@@ -83,6 +83,45 @@ python scripts/evaluate_stage34.py --step evaluate --run $ragRunName --execute -
 
 每题前后通过短只读观察核对原200文档索引身份；有引用时另调用原`EvidenceService.resolve_answer`核对字符、Hash、来源和页语义。这不是长期锁库或不可变数据库快照。来源失败仍保存原答案并单独标明错误，不通过重问掩盖。运行时冻结双方模型、端点Hash、预算/超时、主备开关、Prompt及主要代码Hash，变化后不能续写原run。旧单请求计划遇到开启备用的新配置会在加载模型前报`LLM_POLICY_CHANGED`；旧run仍可离线生成报告，不改其原始结果。
 
+### 3.1 修复后仅补跑未调用LLM的检索失败题
+
+`stage34_run_03`的20题中，17道单文档题执行完成，3道全库对照题在BM25的首批来源摘要查询被取消（57014），这3题没有LLM请求。SQL已改为物化本批全部Chunk来源列，外层直接使用批次，避免只物化ID后又连接整张Chunk表。10秒语句/2秒锁等待、完整来源Hash及200份检索范围保持。实际超时是否消除，须以用户复测为准。
+
+代码指纹已变化，直接续跑`stage34_run_03`会触发`RUNTIME_CHANGED`。新增`--step retry-plan --retry-source-run stage34_run_03`，在独立新run里只选择`FAILED/RAG_RETRIEVAL/retrieval`、索引核对通过、明确没有请求意图/响应/最终证据的题。保留原问题、全库范围、索引快照和主备策略，并绑定父计划及失败记录Hash；不重新抽样、不复制成功答案。付费/请求未知/中断/其他阶段失败不能通过此入口重问。旧run的17题与失败现场不变；补跑报告的分母仅为3题，不能当成原run在同一代码下完成20题。
+
+在项目根目录的`dkf-agent`环境执行。以下是完整新增操作，不用重跑先前20题；CLI直接使用本地模型，无需CPU/GPU Worker：
+
+```powershell
+& {
+    $ErrorActionPreference = "Stop"
+    python -m pytest tests/test_bm25.py tests/test_bm25_retriever.py tests/test_hybrid_retriever.py tests/test_stage34_evaluation.py tests/test_stage34_runtime.py tests/test_stage34_fallback.py -q -ra
+    if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止补跑" }
+
+    # run_04必须未使用；计划准备仅操作本地JSON，不连接数据库或调用模型/云端。
+    python scripts/evaluate_stage34.py --step retry-plan --run stage34_run_04 --retry-source-run stage34_run_03 --execute
+    if ($LASTEXITCODE -ne 0) { throw "补跑计划准备失败" }
+    $ragRetryPlan = Get-Content "results/stage34/stage34_run_04/plan.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+    $ragRetryPlan.plan.cases | Select-Object case_id,dataset,scope | Format-Table -AutoSize
+    if ($ragRetryPlan.plan.cases.Count -ne 3 -or $ragRetryPlan.plan.policy.fallback -ne $false) {
+        throw "本次预期3题且关闭备用；请核对计划后再设请求预算"
+    }
+
+    # 此处开始真实问答：问题和最终证据交给官方DeepSeek，本补跑run累计最多3次请求。
+    python scripts/evaluate_stage34.py --step evaluate --run stage34_run_04 --execute --allow-cloud --max-cloud-calls 3 --limit 1
+    if ($LASTEXITCODE -ne 0) { throw "首道补跑失败，停止；查看bm25.failed及cases中的安全诊断" }
+    Get-Content "results/stage34/stage34_run_04/summary.md" -Encoding UTF8
+}
+```
+
+首题预期`完成1/3；失败0；未执行2`，日志应出现`bm25.snapshot_finished`，不再卡在首批`SOURCE_HASH_BATCH`；冷启动仍需读取完整语料并建索引，不承诺固定耗时。检查首题回答及来源后，手动继续剩余两题：
+
+```powershell
+python scripts/evaluate_stage34.py --step evaluate --run stage34_run_04 --execute --resume --allow-cloud --max-cloud-calls 3 --limit 3
+Get-Content "results/stage34/stage34_run_04/summary.md" -Encoding UTF8
+```
+
+预期`完成3/3；失败0；中断0`，来源检查通过，人工指标仍待评分；合理拒答计执行完成。如果仍失败，保留新run，提供`bm25.failed`的`operation/batch_index/chunk_count/SQLSTATE/耗时`及新题安全错误，不删检查点或反复发送已付费题。旧run和补跑run独立保留；不能把新run的3/3描述成全部20题正确率100%。
+
 ## 4. 人工评分与离线报告
 
 本地文件包含业务正文，应限制访问，不公开上传：

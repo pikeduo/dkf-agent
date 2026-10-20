@@ -12,7 +12,7 @@ from uuid import UUID
 
 from sqlalchemy import String, Text, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import load_only
+from sqlalchemy.orm import aliased, load_only
 
 from app.models import Document, DocumentChunk, KnowledgeBase
 from app.services.indexing import INDEX_VERSION
@@ -124,44 +124,48 @@ def tokenize(text: str, *, max_terms=MAX_CORPUS_TOKENS) -> list[str]:
 
 
 def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapshot=False, ids_only=False):
-    """候选ID只筛选一次；摘要按明确ID先物化小批，再复核范围并计算完整Hash。"""
+    """候选只筛选一次；摘要先按明确ID物化完整来源列，外层不再连接整张Chunk表。"""
     if (type(snapshot) is not bool or type(ids_only) is not bool or (snapshot and ids_only)
             or (snapshot and chunk_ids is None) or (ids_only and chunk_ids is not None)):
         raise BM25RetrievalError("BM25_INPUT")
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
-    config = Document.index_config
-    parse_id = cast(Document.processing_task_id, String)
-    filters = [DocumentChunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
-        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]), Document.index_task_id.is_not(None),
-        config["version"].as_string() == INDEX_VERSION,
-        config["source_parse_task_id"].as_string() == parse_id,
-        config["source_chunk_task_id"].as_string() == cast(Document.chunk_task_id, String),
-        config["embedding_task_id"].as_string() == cast(Document.embedding_task_id, String),
-        DocumentChunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id]
-    if doc_ids is not None:
-        filters.append(DocumentChunk.doc_id.in_(doc_ids))
     if chunk_ids is not None:
         if (not isinstance(chunk_ids, (list, tuple))
                 or not 1 <= len(chunk_ids) <= (SOURCE_BATCH_SIZE if snapshot else 100)
                 or any(not isinstance(value, UUID) for value in chunk_ids)
                 or len(set(chunk_ids)) != len(chunk_ids)):
             raise BM25RetrievalError("BM25_INPUT")
-        if not snapshot:
-            filters.append(DocumentChunk.chunk_id.in_(chunk_ids))
+    chunk = DocumentChunk
     if snapshot:
-        # 物化屏障内只有主键批次，不再反复从全库筛选下一页合格ID。
-        batch = (select(DocumentChunk.chunk_id).where(DocumentChunk.chunk_id.in_(chunk_ids))
+        # 只物化ID仍允许外层重扫全表并解码来源JSON；屏障必须包含摘要和校验所需列。
+        batch = (select(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS))
+            .where(DocumentChunk.chunk_id.in_(chunk_ids))
             .cte("bm25_source_batch").prefix_with("MATERIALIZED", dialect="postgresql"))
-        fields = [getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
+        chunk = aliased(DocumentChunk, batch)
+    config = Document.index_config
+    parse_id = cast(Document.processing_task_id, String)
+    filters = [chunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
+        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]), Document.index_task_id.is_not(None),
+        config["version"].as_string() == INDEX_VERSION,
+        config["source_parse_task_id"].as_string() == parse_id,
+        config["source_chunk_task_id"].as_string() == cast(Document.chunk_task_id, String),
+        config["embedding_task_id"].as_string() == cast(Document.embedding_task_id, String),
+        chunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id]
+    if doc_ids is not None:
+        filters.append(chunk.doc_id.in_(doc_ids))
+    if chunk_ids is not None and not snapshot:
+        filters.append(chunk.chunk_id.in_(chunk_ids))
+    if snapshot:
+        fields = [getattr(chunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
         fields += [getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS]
-        return (select(DocumentChunk.chunk_id, func.octet_length(DocumentChunk.text).label("text_bytes"),
-                func.sha256(func.convert_to(DocumentChunk.text, "UTF8")).label("text_hash"),
+        return (select(chunk.chunk_id, func.octet_length(chunk.text).label("text_bytes"),
+                func.sha256(func.convert_to(chunk.text, "UTF8")).label("text_hash"),
                 func.sha256(func.convert_to(cast(func.jsonb_build_array(*fields), Text), "UTF8")).label("source_hash"))
-            .select_from(batch).join(DocumentChunk, DocumentChunk.chunk_id == batch.c.chunk_id)
-            .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
+            .select_from(chunk)
+            .join(Document, (chunk.doc_id == Document.doc_id) & (chunk.kb_id == Document.kb_id))
             .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
-            .order_by(DocumentChunk.chunk_id.asc()).execution_options(populate_existing=True))
+            .order_by(chunk.chunk_id.asc()).execution_options(populate_existing=True))
     statement = (select(DocumentChunk.chunk_id) if ids_only else select(DocumentChunk, Document).options(
         load_only(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS), raiseload=True),
         load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True)))

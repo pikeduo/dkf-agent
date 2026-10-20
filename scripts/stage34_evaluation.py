@@ -181,6 +181,28 @@ def load_records(run, plan):
     return records
 
 
+def make_retry_plan(source_run):
+    """只读提取尚未发起LLM的检索失败题到新计划，保留原问题、范围、策略及索引身份。"""
+    source = run_directory(source_run)
+    plan = load_plan(source)
+    records = load_records(source, plan)
+    cases, failures = [], {}
+    for case in plan["cases"]:
+        record = records.get(case["case_id"], {})
+        # 缺请求账本、已发/未知请求、后置索引变化均不在安全补跑范围内。
+        if (record.get("status") == "FAILED" and record.get("error_code") == "RAG_RETRIEVAL"
+                and record.get("failure_stage") == "retrieval" and record.get("index_check") == "MATCHED"
+                and record.get("llm_attempted") is False and record.get("llm_attempts") == []
+                and record.get("actual_provider") is None and record.get("actual_model") is None
+                and record.get("raw_llm_output") is None and record.get("final_evidence") == []):
+            cases.append(case)
+            failures[case["case_id"]] = digest(record)
+    if not cases:
+        raise Stage34Error("NO_UNPAID_RETRIEVAL_FAILURES")
+    return {**plan, "cases": cases, "retry_source": {"run": source_run,
+        "plan_sha256": plan_id(plan), "planned": len(plan["cases"]), "failed_results_sha256": failures}}
+
+
 def request_count(record):
     """按逐请求意图计数；旧单次请求记录仍可离线报告，不改写原结果。"""
     if "llm_attempts" in record:
@@ -314,7 +336,7 @@ def quality_metrics(reviews):
 
 
 def summarize(plan, records, reviews):
-    """分别报告执行、人工语义指标与自动来源检查；完整分母始终可见。"""
+    """分别报告执行、人工指标及来源检查；补跑保留原计划关联，不混算不同代码的成绩。"""
     cases = {c["case_id"]: c for c in plan["cases"]}
     if len({r["case_id"] for r in reviews}) != len(reviews) or any(r["case_id"] not in records for r in reviews):
         raise Stage34Error("REVIEW_SET")
@@ -358,6 +380,7 @@ def summarize(plan, records, reviews):
         "source_failed_answers": source_failed, "manual_pending_cases": pending,
         "snapshot_limitations": any(r.get("index_check") != "MATCHED" for r in records.values()),
         "manual_metrics": metrics, "timings_seconds_completed_cases": timings,
+        **({"retry_source": plan["retry_source"]} if "retry_source" in plan else {}),
         "manual_metrics_by_group": grouped,
         "scope_counts": dict(Counter(c["scope"] for c in cases.values())),
         "tag_review_counts": dict(Counter(t for r in reviews for t in r["tags"])),
@@ -371,7 +394,7 @@ def summarize(plan, records, reviews):
 
 
 def report(run, plan):
-    """离线汇总逐方请求/原结果及人工评分；不改旧记录，不访问模型或云端。"""
+    """离线汇总请求、来源及评分；补跑显示原运行与独立分母，不改旧记录或访问云端。"""
     records = load_records(run, plan)
     review_path = run / "reviews.json"
     reviews = read_json(review_path) if review_path.exists() else []
@@ -388,6 +411,10 @@ def report(run, plan):
         f"请求意图 {result['llm_attempts_recorded']}；预算占额 {result['llm_budget_reserved']}；"
         f"备用题数 {result['fallback_cases']}；逐方请求 {result['llm_requests_by_provider']}。", "",
         "| 人工指标 | 通过/总数 | 比率 | 已评题数 |", "|---|---:|---:|---:|"]
+    if "retry_source" in plan:
+        source = plan["retry_source"]
+        lines[2:2] = [f"补跑来源：{source['run']}（原计划{source['planned']}题）；"
+            f"本报告只含{len(plan['cases'])}道未发起LLM的检索失败题，原运行结果不变。", ""]
     for name, metric in result["manual_metrics"].items():
         rate = f"{metric['rate']:.2%}" if metric["rate"] is not None else "待评分"
         lines.append(f"| {name} | {metric['passed']}/{metric['total']} | {rate} | {metric['reviewed_cases']} |")

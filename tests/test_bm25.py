@@ -8,7 +8,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import visitors
 from sqlalchemy.sql.functions import FunctionElement
-from sqlalchemy.sql.selectable import CTE
+from sqlalchemy.sql.selectable import CTE, Join
 
 from app.models import Document, DocumentChunk
 from app.services.rag import bm25 as tool
@@ -277,13 +277,13 @@ def test_cursor_close_failure_uses_safe_database_error():
 
 
 def test_snapshot_projection_covers_full_sources_without_returning_corpus_text():
-    """按真实列映射验证摘要参数完整，避免ORM属性名及SQL字符串格式造成误判。"""
+    """摘要字段经批次代理仍完整；正文与来源仅计算Hash，不返回全库正文或JSON。"""
     kb_id, doc_id = uuid4(), uuid4()
     statement = tool.source_statement(kb_id, [doc_id], snapshot=True, chunk_ids=[UUID(int=1)])
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert tuple(statement.selected_columns.keys()) == ('chunk_id', 'text_bytes', 'text_hash', 'source_hash')
     assert sql.count('sha256(') == 2 and 'jsonb_build_array(' in sql
-    assert 'document_chunks.doc_id IN' in sql and 'documents.status IN' in sql
+    assert 'bm25_source_batch.doc_id IN' in sql and 'documents.status IN' in sql
     # chunk_metadata对应数据库metadata列；直接检查摘要参数，不把WHERE出现字段算作摘要覆盖。
     source_array = next(value for value in visitors.iterate(statement.selected_columns['source_hash'])
         if isinstance(value, FunctionElement) and value.name == 'jsonb_build_array')
@@ -323,7 +323,7 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
 
 
 def test_snapshot_bounds_id_batch_before_hashing_full_sources():
-    """候选资格只全库扫描一次；摘要屏障只按主键取明确ID，外层保留完整范围核对。"""
+    """物化完整批次来源列后再核对范围和Hash，外层不能重新连接全库Chunk或解析其JSON。"""
     kb_id, doc_id = uuid4(), uuid4()
     chunk_ids = [UUID(int=number) for number in range(1, tool.SOURCE_BATCH_SIZE + 1)]
     candidates = tool.source_statement(kb_id, [doc_id], ids_only=True)
@@ -338,10 +338,29 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources():
         if isinstance(value, CTE) and value.name == 'bm25_source_batch')
     batch_sql = str(batch.element.compile(dialect=postgresql.dialect()))
     assert 'bm25_source_batch AS MATERIALIZED' in str(compiled)
-    assert tuple(batch.element.selected_columns.keys()) == ('chunk_id',)
-    assert batch.element.selected_columns['chunk_id'].shares_lineage(DocumentChunk.chunk_id.property.columns[0])
+    expected = [getattr(DocumentChunk, name).property.columns[0] for name in tool.SOURCE_CHUNK_FIELDS]
+    actual = tuple(batch.element.selected_columns)
+    assert len(actual) == len(expected)
+    assert all(column.shares_lineage(mapped) for column, mapped in zip(actual, expected))
     assert 'sha256(' not in batch_sql and 'jsonb_build_array(' not in batch_sql
     assert 'document_chunks.chunk_id IN' in batch_sql and 'JOIN' not in batch_sql
+    assert 'bm25_source_batch.doc_id IN' in str(compiled)
+    # 检查最外层关系树；遍历整个AST会误把CTE内部合法的主键读取也算作外层全表连接。
+    relations, pending = [], list(statement.get_final_froms())
+    while pending:
+        relation = pending.pop()
+        if isinstance(relation, Join):
+            pending.extend((relation.left, relation.right))
+        else:
+            relations.append(relation)
+    assert any(relation is batch for relation in relations)
+    assert all(relation is not DocumentChunk.__table__ for relation in relations)
+    source_array = next(value for value in visitors.iterate(statement.selected_columns['source_hash'])
+        if isinstance(value, FunctionElement) and value.name == 'jsonb_build_array')
+    assert all(column.table is batch for column in tuple(source_array.clauses)[:len(expected) - 1])
+    text_conversion = next(value for value in visitors.iterate(statement.selected_columns['text_hash'])
+        if isinstance(value, FunctionElement) and value.name == 'convert_to')
+    assert tuple(text_conversion.clauses)[0].table is batch
     assert 'OFFSET' not in str(compiled) and chunk_ids in compiled.params.values()
     assert ['READY', 'PARTIAL_READY'] in compiled.params.values() and [doc_id] in compiled.params.values()
     assert {'source_parse_task_id', 'source_chunk_task_id', 'embedding_task_id'} <= set(

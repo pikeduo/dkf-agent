@@ -9,16 +9,17 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.stage33_common import read_json, write_json
-from scripts.stage34_evaluation import (Stage34Error, execute, load_plan, make_plan, plan_id,
+from scripts.stage34_evaluation import (Stage34Error, execute, load_plan, make_plan, make_retry_plan, plan_id,
                                         report, run_directory, run_lock)
 
 
 def build_parser():
     """默认只读预览，不连接数据库、加载模型或发送云请求。"""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--step", choices=["plan", "evaluate", "report"], default="plan")
+    parser.add_argument("--step", choices=["plan", "retry-plan", "evaluate", "report"], default="plan")
     parser.add_argument("--run", default="stage34_run_01")
     parser.add_argument("--source-run", default="stage33_run_03")
+    parser.add_argument("--retry-source-run", help="仅retry-plan：从旧阶段34运行提取未发起LLM的检索失败题")
     parser.add_argument("--single-count", type=int, default=10)
     parser.add_argument("--office-count", type=int, default=5)
     parser.add_argument("--sample-seed", type=int, default=34)
@@ -31,25 +32,35 @@ def build_parser():
 
 
 def main(argv=None):
-    """收费许可及主备预算分别前置；只续跑新题，报告不加载模型或请求云端。"""
+    """许可和预算前置；补跑只另建未收费检索失败题计划，旧记录与代码身份保持冻结。"""
     args = build_parser().parse_args(argv)
     try:
         run = run_directory(args.run)
+        if args.step == "retry-plan":
+            if not args.retry_source_run or args.retry_source_run == args.run:
+                raise Stage34Error("RETRY_SOURCE_RUN")
+        elif args.retry_source_run is not None:
+            raise Stage34Error("RETRY_SOURCE_RUN")
         if not 1 <= args.limit <= 200 or not 0 <= args.max_cloud_calls <= 400:
             raise Stage34Error("BUDGET_ARGUMENTS")
         if args.step == "evaluate" and args.execute and not args.allow_cloud:
             raise Stage34Error("CLOUD_PERMISSION_REQUIRED")
         if args.step == "evaluate" and args.execute and args.max_cloud_calls < 1:
             raise Stage34Error("CLOUD_BUDGET")
-        plan = make_plan(args.source_run, single_count=args.single_count,
-            office_count=args.office_count, seed=args.sample_seed) if args.step == "plan" else load_plan(run)
+        if args.step == "plan":
+            plan = make_plan(args.source_run, single_count=args.single_count,
+                office_count=args.office_count, seed=args.sample_seed)
+        elif args.step == "retry-plan":
+            plan = make_retry_plan(args.retry_source_run)
+        else:
+            plan = load_plan(run)
         if not args.execute:
             print(f"DRY_RUN：固定{len(plan['cases'])}题；最多每题{plan['policy']['llm_calls_per_case_max']}次LLM请求；"
                   f"Fallback={'开启' if plan['policy']['fallback'] else '关闭'}；"
                   "未请求云端/加载模型/连接数据库/写报告。")
             return 0
         with run_lock(run):
-            if args.step == "plan":
+            if args.step in {"plan", "retry-plan"}:
                 path = run / "plan.json"
                 if path.exists():
                     if not args.resume or read_json(path) != {"sha256": plan_id(plan), "plan": plan}:
