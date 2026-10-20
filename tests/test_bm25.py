@@ -8,6 +8,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql import visitors
 from sqlalchemy.sql.functions import FunctionElement
+from sqlalchemy.sql.selectable import CTE
 
 from app.models import Document, DocumentChunk
 from app.services.rag import bm25 as tool
@@ -319,3 +320,83 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
     with pytest.raises(tool.BM25RetrievalError, match='BM25_LIMIT'):
         tool.read_source_snapshot(session, first[0].kb_id, limits=budget)
     assert session.results[0].closed
+
+
+def test_snapshot_bounds_id_batch_before_hashing_full_sources():
+    """物化屏障只排序合格ID，单批后再计算全量来源Hash；范围/代次过滤不后移。"""
+    kb_id, doc_id, after = uuid4(), uuid4(), UUID(int=10)
+    statement = tool.source_statement(kb_id, [doc_id], snapshot=True, after_chunk_id=after)
+    compiled = statement.compile(dialect=postgresql.dialect())
+    batch = next(value for value in visitors.iterate(statement)
+        if isinstance(value, CTE) and value.name == 'bm25_source_batch')
+    candidate_sql = str(batch.element.compile(dialect=postgresql.dialect()))
+    assert 'bm25_source_batch AS MATERIALIZED' in str(compiled)
+    assert tuple(batch.element.selected_columns.keys()) == ('chunk_id',)
+    assert batch.element.selected_columns['chunk_id'].shares_lineage(DocumentChunk.chunk_id.property.columns[0])
+    assert 'sha256(' not in candidate_sql and 'jsonb_build_array(' not in candidate_sql
+    assert 'document_chunks.doc_id IN' in candidate_sql and 'documents.status IN' in candidate_sql
+    assert 'document_chunks.chunk_id >' in candidate_sql and 'OFFSET' not in str(compiled)
+    assert compiled.params['source_batch_limit'] == tool.SOURCE_BATCH_SIZE
+    assert compiled.params['source_after_chunk_id'] == after
+    assert ['READY', 'PARTIAL_READY'] in compiled.params.values() and [doc_id] in compiled.params.values()
+    assert {'source_parse_task_id', 'source_chunk_task_id', 'embedding_task_id'} <= set(
+        value for value in compiled.params.values() if isinstance(value, str))
+    assert 'document_chunks.embedding' not in str(compiled)
+
+
+@pytest.mark.parametrize('count', [0, 1, 2, 3, 4, 5])
+def test_snapshot_keyset_reads_every_row_and_proves_end_of_exact_batch(monkeypatch, count):
+    """空库及整批边界均正确结束，续批不漏行/重复，完整摘要不因分页大小改变。"""
+    kb_id = uuid4()
+    rows = [stored_pair(kb_id, number) for number in range(1, count + 1)]
+    expected = tool.read_source_snapshot(SqlSessionStub(rows), kb_id)
+    monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
+    session = SqlSessionStub(rows)
+    assert tool.read_source_snapshot(session, kb_id) == expected
+    assert len(session.statements) == count // 2 + 1
+    assert all(result.closed and len(result.rows) <= 2 for result in session.results)
+    for position, statement in enumerate(session.statements):
+        params = statement.compile().params
+        assert params['source_batch_limit'] == 2
+        assert params.get('source_after_chunk_id') == (UUID(int=position * 2) if position else None)
+
+
+@pytest.mark.parametrize('budget_kind', ['chunks', 'bytes'])
+def test_snapshot_budgets_accumulate_across_sql_pages(monkeypatch, budget_kind):
+    """后续批次超过累计行数或字节预算时仍整批失败，不把每页预算当整库预算。"""
+    monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
+    kb_id = uuid4()
+    rows = [stored_pair(kb_id, number) for number in range(1, 5)]
+    byte_limit = sum(len(row[0].text.encode('utf-8')) for row in rows[:2])
+    limits = tool.CorpusLimits(2 if budget_kind == 'chunks' else 10,
+        4096 if budget_kind == 'chunks' else byte_limit, 100)
+    session = SqlSessionStub(rows)
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_LIMIT') as caught:
+        tool.read_source_snapshot(session, kb_id, limits=limits)
+    assert caught.value.source_progress == {'batch_index': 2, 'chunk_count': 2}
+    assert len(session.results) == 2 and all(result.closed for result in session.results)
+
+
+def test_snapshot_late_page_metadata_change_invalidates_full_fingerprint(monkeypatch):
+    """非首批且未命中项仅改来源也使完整摘要失效，正文Hash列表仍保持原样。"""
+    monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
+    kb_id = uuid4()
+    rows = [stored_pair(kb_id, number) for number in range(1, 6)]
+    before, items = tool.read_source_snapshot(SqlSessionStub(rows), kb_id)
+    rows[-1][0].chunk_metadata['source_spans'][0]['page'] = 5
+    changed, same_items = tool.read_source_snapshot(SqlSessionStub(rows), kb_id)
+    assert changed != before and same_items == items and len(items) == len(rows)
+
+
+@pytest.mark.parametrize('after', [True, 1, 'PRIVATE_CURSOR', UUID(int=0)])
+def test_snapshot_rejects_invalid_keyset_cursor(after):
+    """UUID续读参数必须有效，不接受布尔、字符串或零UUID，不回显输入。"""
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_INPUT') as caught:
+        tool.source_statement(uuid4(), snapshot=True, after_chunk_id=after)
+    assert 'PRIVATE_CURSOR' not in str(caught.value)
+
+
+def test_full_source_statement_cannot_silently_use_snapshot_cursor():
+    """完整证据入口不接收摘要游标，避免误用时静默漏掉前缀证据。"""
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_INPUT'):
+        tool.source_statement(uuid4(), after_chunk_id=UUID(int=1))

@@ -76,7 +76,7 @@ class BM25Retriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """每题核对全量来源摘要，变化时完整验证；同一只读快照取回并校验Top-K证据。"""
+        """每题在同一快照分页核对全量摘要及Top-K证据；失败记录安全批次进度。"""
         started, stage = perf_counter(), "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
@@ -163,8 +163,10 @@ class BM25Retriever(BaseRetriever):
                 error = BM25RetrievalError("BM25_DATABASE", database_error=exc)
             else:
                 error = BM25RetrievalError("BM25_RESULT" if stage in {"node_adapter", "score"} else "BM25_INDEX")
+            progress = error.source_progress or {}
             log_event("bm25.failed", level=logging.WARNING, **scope_log, stage=stage,
                       step=(error.database_diagnostic or {}).get("sqlstate"),
+                      batch_index=progress.get("batch_index"), chunk_count=progress.get("chunk_count"),
                       error_code=error.code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 

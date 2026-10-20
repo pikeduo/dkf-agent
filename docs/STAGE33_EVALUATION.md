@@ -4,11 +4,11 @@
 
 用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。按用户最新要求，先从OHR、OCB各固定抽取50条QA，共100题/400条策略执行记录；检索范围仍是全部200份。原始4087条QA和已入库向量不改动，不重传、重解析或重建索引，也不自动清除质量警告。以下流程优先于后文历史导入排错步骤。
 
-已实现只读索引快照、显式质量政策、固定抽样及四策略报告。用户提供的`stage33_run_03`已有100题/400条记录，其中373成功、27失败，涉及OCB的9题；全200份索引有效，但执行状态仍INCOMPLETE。本轮补数据库安全分类、Dense标量距离物化及BM25全量摘要验证复用；仅编写回归，pytest和实际性能由用户手动验收。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准。
+已实现只读索引快照、显式质量政策、固定抽样及四策略报告。用户提供的最新`stage33_run_03`已有100题/400条记录，其中385成功、15失败，集中在OCB的5题；Dense全部成功，5次BM25摘要查询取消，同5题的Hybrid/重排分支失败。全200份索引有效，执行状态仍INCOMPLETE。本轮针对摘要SQL改为UUID续读、每批至多256个ID物化后计算完整Hash，范围/来源/评分不减，仍保持10秒语句预算；新增回归仅编写，pytest和实际续跑由用户手动验收。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准。
 
 ### 当前失败题续跑
 
-旧日志8次Dense失败耗时约10秒，与现有statement_timeout相近；缺SQLSTATE不能据此确认根因。本轮保持10秒语句/2秒锁等待预算，优化查询并在首次捕获点保留SQLSTATE。取消、锁不可用、连接和资源错误各有固定码；`qa_execution.csv / failures_and_unscorable.csv / retrieval_diagnostics.csv`增加`database_reason / sqlstate`，逐题JSON保留`database_diagnostic`。旧错误不能事后补造原因。
+2026-10-20日志显示剩余5次BM25失败都在`source_snapshot`，SQLSTATE=57014，耗时约10秒，与现有statement_timeout吻合；仅凭状态仍不能排除外部取消。原单条全库摘要SQL的`yield_per=256`只控制驱动取批，未将SQL摘要处理规模限定到单批，实际数据库执行计划尚未测量。本轮使用UUID递增续读，先物化一批合格ID，再计算完整正文/来源摘要，避免每批前缀重算或OFFSET跳过；全部批次与Top-K证据处于同一快照。保持10秒语句/2秒锁等待预算，不以提高超时或返回半份语料掩盖失败。摘要失败日志保留批次号及已检查Chunk数。取消、锁不可用、连接和资源错误各有固定码；`qa_execution.csv / failures_and_unscorable.csv / retrieval_diagnostics.csv`保留`database_reason / sqlstate`，逐题JSON保留`database_diagnostic`。旧错误不能事后补造原因。
 
 先由用户运行定向回归：
 
@@ -25,7 +25,7 @@ $run = "stage33_run_03"
 python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed --qa-per-dataset 50 --sample-seed 33 --retry-failed
 ```
 
-该命令仅重跑含失败策略的9题（每题四路），91题成功断点保留；不是导入恢复的`--retry-failed-only`。选题、索引和模型身份冻结不变。全部成功才可完成抽样执行，PARTIAL质量和OCB不可评分边界继续保留。报告汇总会混合原91题与新9题耗时，不能据此当作优化后全100题的新性能基线；本轮先验证失败消除与热查询行为。
+按当前报告，该命令仅重跑含失败策略的5题（每题四路），95题成功断点保留；不是导入恢复的`--retry-failed-only`。选题、索引和模型身份冻结不变。全部成功才可完成抽样执行，PARTIAL质量和OCB不可评分边界继续保留。报告汇总会混合历史成功题与新5题耗时，不能据此当作优化后全100题的新性能基线；本轮先验证失败消除与热查询行为。若仍失败，用`bm25.failed`中的`stage / step / batch_index / chunk_count`确认失败阶段、SQLSTATE及分页进度，不重解析或重建向量。
 
 ### 1. 用户执行定向回归
 

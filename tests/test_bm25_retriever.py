@@ -17,7 +17,7 @@ from app.core import business_logging as logs
 from app.services.rag import bm25 as core
 from app.services.rag.llama_index import bm25_retriever as retrievers, embedding_adapter, node_adapter
 from app.services.rag.llama_index.bm25_retriever import BM25Retriever
-from bm25_stubs import factory_for
+from bm25_stubs import StreamingSessionStub, factory_for
 from test_dense_sql import stored_pair
 
 
@@ -383,4 +383,80 @@ def test_source_snapshot_database_failure_never_returns_cached_results(monkeypat
     assert sessions[0].closed
     fields = next(fields for event, fields in events if event == 'bm25.failed')
     assert fields['step'] == '55P03' and fields['stage'] == 'source_snapshot'
+    assert 'PRIVATE' not in repr(events) + str(caught.value)
+
+
+def test_paginated_snapshot_reuses_only_fully_validated_corpus(monkeypatch):
+    """多批冷/热查询结果与证据相同；热查询遍历所有摘要页但仅构造命中Node。"""
+    monkeypatch.setattr(core, 'SOURCE_BATCH_SIZE', 2)
+    first = lexical_pair(number=1)
+    rows = [first] + [lexical_pair(first[0].kb_id, number, text='ESA') for number in range(2, 6)]
+    factory, sessions = factory_for(rows)
+    calls, convert = [], retrievers.corpus_item
+
+    def tracked(chunk, document):
+        """记录完整语料Adapter校验，保持原转换行为与完整来源。"""
+        calls.append(chunk.chunk_id)
+        return convert(chunk, document)
+
+    monkeypatch.setattr(retrievers, 'corpus_item', tracked)
+    retriever = BM25Retriever(first[0].kb_id, session_factory=factory)
+    before = retriever.retrieve('NASA')
+    index = retriever._index
+    after = retriever.retrieve('NASA')
+    assert [node.model_dump() for node in before] == [node.model_dump() for node in after]
+    assert len(before) == 1 and len(calls) == len(rows) and retriever._index is index
+    for session in sessions:
+        snapshots = [statement for statement in session.statements
+            if 'source_hash' in statement.selected_columns.keys()]
+        assert len(snapshots) == 3 and session.closed
+        assert all(result.closed for result in session.results)
+        assert session.settings == ['SET TRANSACTION READ ONLY',
+            'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', "SET LOCAL statement_timeout = '10s'",
+            "SET LOCAL lock_timeout = '2s'"]
+
+
+def test_later_snapshot_page_failure_preserves_state_and_safe_progress(monkeypatch):
+    """已有词频缓存时第二批取消仍整题失败，保留SQLSTATE与进度且不输出正文/连接信息。"""
+    from test_retrieval_database import driver_error
+
+    monkeypatch.setattr(core, 'SOURCE_BATCH_SIZE', 2)
+    first = lexical_pair(number=1)
+    rows = [first] + [lexical_pair(first[0].kb_id, number, text='ESA') for number in range(2, 5)]
+    factory, _ = factory_for(rows)
+    retriever = BM25Retriever(first[0].kb_id, session_factory=factory)
+    assert retriever.retrieve('NASA')
+
+    class FailedSecondPage(StreamingSessionStub):
+        """仅后续摘要SELECT失败，不连接数据库或修改已有语料。"""
+
+        def execute(self, statement):
+            """首批正常返回，UUID续读时模拟驱动取消，不重复尝试查询。"""
+            if statement.is_select and statement.compile().params.get('source_after_chunk_id') is not None:
+                raise driver_error('57014')
+            return super().execute(statement)
+
+    session = FailedSecondPage(rows)
+
+    def failing_factory():
+        """返回本次可观测的内存会话，以检查异常路径释放。"""
+        return session
+
+    retriever._session_factory = failing_factory
+    events = []
+
+    def log(event, **fields):
+        """只捕获已有白名单字段，不写真实运行日志。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(retrievers, 'log_event', log)
+    with pytest.raises(core.BM25RetrievalError, match='BM25_DATABASE_QUERY_CANCELED') as caught:
+        retriever.retrieve('NASA')
+    assert caught.value.database_diagnostic == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
+    assert caught.value.source_progress == {'batch_index': 2, 'chunk_count': 2}
+    assert session.closed and len(session.results) == 1 and session.results[0].closed
+    fields = next(fields for event, fields in events if event == 'bm25.failed')
+    assert (fields['stage'], fields['step'], fields['batch_index'], fields['chunk_count']) == (
+        'source_snapshot', '57014', 2, 2)
+    assert not any(event in {'bm25.finished', 'bm25.empty', 'bm25.index_reused'} for event, _ in events)
     assert 'PRIVATE' not in repr(events) + str(caught.value)
