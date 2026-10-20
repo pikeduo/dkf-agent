@@ -338,6 +338,72 @@ def test_ocb_diagnosis_is_explicitly_document_proxy():
         "category": "HIT_AT_5", "basis": "document_dependency_proxy", "error_code": None}
 
 
+@pytest.mark.parametrize('ranks,category', [
+    ({'hybrid_reranker': 5}, 'HIT_AT_5'),
+    ({'hybrid_reranker': 6}, 'RERANK_LOW_RANK'),
+    ({}, 'BRANCH_RECALL_MISS'),
+    ({'hybrid': 20}, 'RERANK_OUTPUT_MISS'),
+    ({'dense': 20}, 'BRANCH_HIT_FINAL_MISS_UNRESOLVED'),
+    ({'bm25': 1}, 'BRANCH_HIT_FINAL_MISS_UNRESOLVED'),
+])
+def test_ocb_flow_distinguishes_saved_branch_and_rerank_observations(ranks, category):
+    """按四路真实保存的排名定位；缺21～30候选时不得把未知归因为融合或重排丢失。"""
+    qa = indexed_inputs()['questions'][1]
+    file_id = qa['source_file_ids'][0]
+    strategies = {}
+    for strategy in common.STRATEGIES:
+        rank = ranks.get(strategy)
+        hits = [{'file_id': 'other'} for _ in range(20)]
+        if rank is not None:
+            hits[rank - 1] = {'file_id': file_id}
+        strategies[strategy] = {'status': 'SUCCESS', 'hits': hits}
+    original = deepcopy(strategies)
+    diagnostic, = analysis.diagnose_document_flow(qa, {'strategies': strategies})
+    assert diagnostic['category'] == category and diagnostic['source_file_id'] == file_id
+    assert diagnostic['basis'] == 'document_dependency_proxy' and diagnostic['observation'] == 'saved_top20_only'
+    assert all(diagnostic[name + '_rank'] == ranks.get(name) for name in common.STRATEGIES)
+    assert strategies == original and 'PRIVATE_QUERY' not in repr(diagnostic)
+
+
+@pytest.mark.parametrize('status', ['FAILED', 'NOT_EXECUTED'])
+def test_ocb_flow_keeps_failed_or_unexecuted_branches_inconclusive(status):
+    """失败/未执行分支不能被当作空召回；多依赖逐项记录，不缩小或冒充QA正确率分母。"""
+    qa = deepcopy(indexed_inputs()['questions'][1])
+    qa['source_file_ids'] = ['target-a', 'target-b']
+    strategies = {name: {'status': 'SUCCESS', 'hits': [{'file_id': 'target-a'}]}
+                  for name in common.STRATEGIES}
+    strategies['bm25'] = {'status': status, 'hits': []}
+    rows = analysis.diagnose_document_flow(qa, {'strategies': strategies})
+    assert len(rows) == 2 and all(row['category'] == 'INCOMPLETE_EXECUTION' for row in rows)
+    assert rows[0]['dense_rank'] == 1 and rows[1]['dense_rank'] is None
+    assert all(row['strategy_statuses']['bm25'] == status for row in rows)
+    assert analysis.diagnose_document_flow(indexed_inputs()['questions'][0], {'strategies': strategies}) == []
+
+
+def test_ocb_flow_report_preserves_cases_and_does_not_change_metrics(tmp_path, monkeypatch):
+    """本地报告新增逐依赖JSON/CSV，不执行检索或改写逐题断点，不更改已有指标口径。"""
+    import csv
+
+    data, kb, calls = indexed_inputs(), UUID(int=999), []
+    rows = indexed_rows(data, kb)
+    run_mock_evaluation(data, rows, kb, tmp_path, monkeypatch, calls)
+    before = {path.name: path.read_bytes() for path in (tmp_path / 'cases').glob('*.json')}
+    call_count = len(calls)
+    report = reports.generate(data, tmp_path)
+    assert report['qa_strategy_records'] == 8 and report['metrics_status'] == 'VALID_EXECUTION_RECORDS'
+    diagnostic = common.read_json(tmp_path / 'document_recall_diagnostics.json')
+    assert diagnostic['metrics_status'] == report['metrics_status']
+    assert sum(diagnostic['counts'].values()) == 1
+    assert len(diagnostic['cases']) == 1 and diagnostic['cases'][0]['dataset'] == 'ocb'
+    assert diagnostic['cases'][0]['source_file_id'] == data['questions'][1]['source_file_ids'][0]
+    with (tmp_path / 'document_recall_diagnostics.csv').open(encoding='utf-8-sig', newline='') as handle:
+        csv_rows = list(csv.DictReader(handle))
+    assert len(csv_rows) == 1 and csv_rows[0]['basis'] == 'document_dependency_proxy'
+    assert 'NEVER_SEND' not in repr(diagnostic) and 'PRIVATE_QUERY' not in repr(diagnostic)
+    assert len(calls) == call_count
+    assert before == {path.name: path.read_bytes() for path in (tmp_path / 'cases').glob('*.json')}
+
+
 def test_cli_exposes_readonly_snapshot_and_explicit_index_policy():
     """命令行保留严格默认，同时提供无需云许可的只读快照与显式部分索引评测。"""
     parser = cli.build_parser()

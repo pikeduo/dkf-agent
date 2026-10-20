@@ -29,7 +29,7 @@ def lexical_pair(kb_id=None, number=1, text='NASA RX-7800-XT 100'):
 
 
 def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
-    """构造不读库；冷启动同快照读取摘要、完整验证及命中证据，始终不调用Embedding。"""
+    """构造不读库；冷启动同快照枚举ID、读摘要、验证及取证，始终不调用Embedding。"""
     pair = lexical_pair()
     factory, sessions = factory_for([pair])
 
@@ -43,7 +43,7 @@ def test_constructor_is_lazy_and_retrieval_never_calls_embedding(monkeypatch):
     assert sessions == [] and retriever._index is None
     nodes = retriever.retrieve(QueryBundle(query_str='NASA'))
     assert len(nodes) == 1 and nodes[0].node.embedding is None and nodes[0].score > 0
-    assert sessions[0].closed and len(sessions[0].statements) == 3
+    assert sessions[0].closed and len(sessions[0].statements) == 4
     assert sessions[0].settings == ['SET TRANSACTION READ ONLY',
         'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', "SET LOCAL statement_timeout = '10s'",
         "SET LOCAL lock_timeout = '2s'"]
@@ -182,7 +182,7 @@ def test_invalid_document_scope_is_rejected_before_sql(ids):
 
 
 def test_logs_are_aggregated_sanitized_and_conversion_default_is_preserved(monkeypatch):
-    """BM25语料转换不按每Chunk刷成功日志，原Adapter默认保持原行为，错误及摘要仍记录。"""
+    """只记录全量摘要/索引/结果阶段，无逐块成功日志或正文，原Adapter默认行为保持。"""
     pair = lexical_pair(text='PRIVATE_BODY NASA')
     factory, _ = factory_for([pair])
     retriever = BM25Retriever(pair[0].kb_id, session_factory=factory)
@@ -199,6 +199,7 @@ def test_logs_are_aggregated_sanitized_and_conversion_default_is_preserved(monke
         retriever.retrieve('NASA')
         output = stream.getvalue()
         assert 'event=bm25.index_built' in output and 'event=bm25.index_reused' in output
+        assert output.count('event=bm25.snapshot_finished') == 2
         assert 'event=rag.node_converted' not in output
         assert 'PRIVATE_QUERY' not in output and 'PRIVATE_BODY' not in output
         assert 'BM25' in output
@@ -214,7 +215,7 @@ def test_logs_are_aggregated_sanitized_and_conversion_default_is_preserved(monke
 
 
 def test_full_corpus_nodes_are_not_retained_and_evidence_select_is_top_k(monkeypatch):
-    """冷启动逐行完整验证后释放，第三次SQL只绑定Top-K，摘要扫描不构造Node。"""
+    """冷启动逐行验证后释放；单次ID与摘要查询不构造Node，最后一次SQL只绑定Top-K。"""
     first = lexical_pair(number=1)
     rows = [first] + [lexical_pair(first[0].kb_id, number=number) for number in range(2, 10)]
     factory, sessions = factory_for(rows)
@@ -236,14 +237,16 @@ def test_full_corpus_nodes_are_not_retained_and_evidence_select_is_top_k(monkeyp
     statements = sessions[0].statements
     assert all(statement.get_execution_options()['yield_per'] == core.SOURCE_BATCH_SIZE for statement in statements)
     assert 'document_chunks.chunk_id IN' not in str(statements[0])
-    assert 'document_chunks.chunk_id IN' not in str(statements[1])
-    assert 'document_chunks.chunk_id IN' in str(statements[2])
-    assert [row[0].chunk_id for row in rows[:2]] in statements[2].compile().params.values()
+    assert tuple(statements[0].selected_columns.keys()) == ('chunk_id',)
+    assert [row[0].chunk_id for row in rows] in statements[1].compile().params.values()
+    assert 'document_chunks.chunk_id IN' not in str(statements[2])
+    assert 'document_chunks.chunk_id IN' in str(statements[3])
+    assert [row[0].chunk_id for row in rows[:2]] in statements[3].compile().params.values()
     assert all(result.closed for result in sessions[0].results)
 
 
 def test_nonmatching_corrupt_evidence_still_fails_entire_query():
-    """未命中证据变化使摘要失效并重做完整校验，已有词频不能掩盖坏页码。"""
+    """未命中来源变化经ID/摘要读取后触发完整校验，已有词频不能掩盖坏页码。"""
     first = lexical_pair(number=1)
     second = lexical_pair(first[0].kb_id, number=2, text='ESA')
     rows = [first, second]
@@ -253,7 +256,7 @@ def test_nonmatching_corrupt_evidence_still_fails_entire_query():
     second[0].page_end = 0
     with pytest.raises(core.BM25RetrievalError, match='BM25_RESULT'):
         retriever.retrieve('NASA')
-    assert len(sessions[-1].statements) == 2 and sessions[-1].closed
+    assert len(sessions[-1].statements) == 3 and sessions[-1].closed
     assert all(result.closed for result in sessions[-1].results)
 
 
@@ -301,7 +304,7 @@ def test_rebuilding_releases_stale_index_before_allocating_replacement(monkeypat
 
 
 def test_unchanged_full_snapshot_skips_repeated_node_validation(monkeypatch):
-    """热查询完整核对全部摘要，仅构造命中证据Node，不重复全库ORM与Adapter工作。"""
+    """热查询单次枚举ID并核对全部摘要，仅取Top-K证据，不重复全库ORM与Adapter工作。"""
     first = lexical_pair(number=1)
     rows = [first, lexical_pair(first[0].kb_id, number=2, text='ESA')]
     factory, sessions = factory_for(rows)
@@ -320,16 +323,17 @@ def test_unchanged_full_snapshot_skips_repeated_node_validation(monkeypatch):
     after = retriever.retrieve('NASA')
     assert len(calls) == len(rows) and retriever._index is index
     assert [node.model_dump() for node in before] == [node.model_dump() for node in after]
-    assert len(sessions[0].statements) == 3 and len(sessions[1].statements) == 2
-    assert 'source_hash' in sessions[1].statements[0].selected_columns.keys()
-    assert 'document_chunks.chunk_id IN' in str(sessions[1].statements[1])
+    assert len(sessions[0].statements) == 4 and len(sessions[1].statements) == 3
+    assert tuple(sessions[1].statements[0].selected_columns.keys()) == ('chunk_id',)
+    assert 'source_hash' in sessions[1].statements[1].selected_columns.keys()
+    assert 'document_chunks.chunk_id IN' in str(sessions[1].statements[2])
     assert set(node_adapter.CHUNK_FIELDS) <= set(core.SOURCE_CHUNK_FIELDS)
     assert set(node_adapter.DOCUMENT_FIELDS) <= set(core.SOURCE_DOCUMENT_FIELDS)
 
 
 @pytest.mark.parametrize('change', ['text', 'source_spans', 'page', 'file_name', 'model'])
 def test_nonwinning_source_changes_require_full_validation(monkeypatch, change):
-    """未命中项的正文/来源/页/文件名/模型元数据变化均重新全量验证，不能凭数量或代次复用。"""
+    """未命中正文/来源变化经单次ID和摘要查询后仍须全量验证，不能凭数量或代次复用。"""
     first = lexical_pair(number=1)
     second = lexical_pair(first[0].kb_id, number=2, text='ESA')
     factory, sessions = factory_for([first, second])
@@ -356,7 +360,7 @@ def test_nonwinning_source_changes_require_full_validation(monkeypatch, change):
     else:
         second[1].index_config['result']['model']['model_fingerprint'] = 'c' * 64
     assert retriever.retrieve('NASA')[0].node.node_id == str(first[0].chunk_id)
-    assert len(calls) == 4 and len(sessions[1].statements) == 3
+    assert len(calls) == 4 and len(sessions[1].statements) == 4
     assert (retriever._index is previous) == (change != 'text')
 
 
@@ -387,7 +391,7 @@ def test_source_snapshot_database_failure_never_returns_cached_results(monkeypat
 
 
 def test_paginated_snapshot_reuses_only_fully_validated_corpus(monkeypatch):
-    """多批冷/热查询结果与证据相同；热查询遍历所有摘要页但仅构造命中Node。"""
+    """多批冷/热查询结果与证据相同；各只枚举一次ID，热查询不重复完整验证。"""
     monkeypatch.setattr(core, 'SOURCE_BATCH_SIZE', 2)
     first = lexical_pair(number=1)
     rows = [first] + [lexical_pair(first[0].kb_id, number, text='ESA') for number in range(2, 6)]
@@ -410,6 +414,8 @@ def test_paginated_snapshot_reuses_only_fully_validated_corpus(monkeypatch):
         snapshots = [statement for statement in session.statements
             if 'source_hash' in statement.selected_columns.keys()]
         assert len(snapshots) == 3 and session.closed
+        assert sum(tuple(statement.selected_columns.keys()) == ('chunk_id',)
+                   for statement in session.statements) == 1
         assert all(result.closed for result in session.results)
         assert session.settings == ['SET TRANSACTION READ ONLY',
             'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ', "SET LOCAL statement_timeout = '10s'",
@@ -431,8 +437,9 @@ def test_later_snapshot_page_failure_preserves_state_and_safe_progress(monkeypat
         """仅后续摘要SELECT失败，不连接数据库或修改已有语料。"""
 
         def execute(self, statement):
-            """首批正常返回，UUID续读时模拟驱动取消，不重复尝试查询。"""
-            if statement.is_select and statement.compile().params.get('source_after_chunk_id') is not None:
+            """ID及首批Hash正常返回，第二批Hash模拟驱动取消，不重复尝试查询。"""
+            if (statement.is_select and 'source_hash' in statement.selected_columns.keys()
+                    and any('source_hash' in previous.selected_columns.keys() for previous in self.statements)):
                 raise driver_error('57014')
             return super().execute(statement)
 
@@ -453,10 +460,34 @@ def test_later_snapshot_page_failure_preserves_state_and_safe_progress(monkeypat
     with pytest.raises(core.BM25RetrievalError, match='BM25_DATABASE_QUERY_CANCELED') as caught:
         retriever.retrieve('NASA')
     assert caught.value.database_diagnostic == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
-    assert caught.value.source_progress == {'batch_index': 2, 'chunk_count': 2}
-    assert session.closed and len(session.results) == 1 and session.results[0].closed
+    assert caught.value.source_progress == {'operation': 'SOURCE_HASH_BATCH', 'batch_index': 2, 'chunk_count': 2}
+    assert session.closed and len(session.results) == 2 and all(result.closed for result in session.results)
     fields = next(fields for event, fields in events if event == 'bm25.failed')
     assert (fields['stage'], fields['step'], fields['batch_index'], fields['chunk_count']) == (
         'source_snapshot', '57014', 2, 2)
+    assert fields['operation'] == 'SOURCE_HASH_BATCH'
     assert not any(event in {'bm25.finished', 'bm25.empty', 'bm25.index_reused'} for event, _ in events)
     assert 'PRIVATE' not in repr(events) + str(caught.value)
+
+
+def test_snapshot_and_index_logs_record_separate_phase_durations(monkeypatch):
+    """冷/热查询均记录摘要耗时，完整验证/建索引耗时独立汇总，不输出每批或正文。"""
+    pair = lexical_pair(text='NASA PRIVATE_BODY')
+    factory, _ = factory_for([pair])
+    events = []
+
+    def log(event, **fields):
+        """捕获阶段摘要，不写磁盘或执行真实性能评测。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(retrievers, 'log_event', log)
+    retriever = BM25Retriever(pair[0].kb_id, session_factory=factory)
+    retriever.retrieve('NASA PRIVATE_QUERY')
+    retriever.retrieve('NASA')
+    phases = [(event, fields) for event, fields in events if event in {
+        'bm25.snapshot_finished', 'bm25.index_built', 'bm25.index_reused'}]
+    assert [event for event, _ in phases] == ['bm25.snapshot_finished', 'bm25.index_built',
+        'bm25.snapshot_finished', 'bm25.index_reused']
+    assert all(fields['duration_ms'] >= 0 and fields['chunk_count'] == 1 for _, fields in phases)
+    assert phases[-1][1]['step'] == 'SOURCE_VALIDATION_REUSED'
+    assert 'PRIVATE' not in repr(events)

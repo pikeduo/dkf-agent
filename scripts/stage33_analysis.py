@@ -1,5 +1,6 @@
 """检索评测的事后分组与失败定位；真值只用于分析，不参与检索或排序。"""
 
+from scripts.stage33_common import STRATEGIES
 from scripts.stage33_retrieval import aggregate
 
 
@@ -49,6 +50,33 @@ def diagnose_retrieval(result, strategy):
     else:
         category = "TARGET_DOCUMENT_MISS"
     return {"category": category, "basis": basis, "error_code": None}
+
+
+def diagnose_document_flow(qa, result):
+    """逐依赖比较OCB四路已存Top20；候选池未完整保存时不猜测融合或重排的丢失位置。"""
+    if qa["dataset"] != "ocb":
+        return []
+    strategies = result.get("strategies", {})
+    statuses = {name: strategies.get(name, {}).get("status", "NOT_EXECUTED") for name in STRATEGIES}
+    rows = []
+    for file_id in qa["source_file_ids"]:
+        ranks = {name: next((rank for rank, hit in enumerate(strategies.get(name, {}).get("hits", [])[:20], 1)
+                            if hit.get("file_id") == file_id), None) for name in STRATEGIES}
+        final_rank = ranks["hybrid_reranker"]
+        if any(status != "SUCCESS" for status in statuses.values()):
+            category = "INCOMPLETE_EXECUTION"
+        elif final_rank is not None:
+            category = "HIT_AT_5" if final_rank <= 5 else "RERANK_LOW_RANK"
+        elif ranks["hybrid"] is not None:
+            category = "RERANK_OUTPUT_MISS"
+        elif ranks["dense"] is None and ranks["bm25"] is None:
+            category = "BRANCH_RECALL_MISS"
+        else:
+            category = "BRANCH_HIT_FINAL_MISS_UNRESOLVED"
+        rows.append({"source_file_id": file_id, "category": category,
+            "basis": "document_dependency_proxy", "observation": "saved_top20_only",
+            "strategy_statuses": statuses, **{name + "_rank": rank for name, rank in ranks.items()}})
+    return rows
 
 
 def grouped_metrics(questions, strategies):

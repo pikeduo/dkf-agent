@@ -61,7 +61,7 @@ LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次�
 
 阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。
 
-Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_code`记录查询取消/锁不可用/连接/资源分类，`step`仅记录五位SQLSTATE；不增加日志字段，不记录SQL、参数、连接信息或驱动原文。57014只证明查询取消，不等同于已证实超时。BM25分页摘要失败沿用`batch_index / chunk_count`记录当前批次号与此前已检查的行数，不记录UUID续读游标；这些计数不表示已返回部分检索结果。BM25索引摘要的`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`表示完整来源验证/全量摘要相同后的验证复用，均不跳过本题来源快照核对。
+Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_code`记录查询取消/锁不可用/连接/资源分类，`step`仅记录五位SQLSTATE；不增加日志字段，不记录SQL、参数、连接信息或驱动原文。57014只证明查询取消，不等同于已证实超时。BM25摘要失败沿用`batch_index / chunk_count`记录当前批次号与此前已检查的行数，`operation=SOURCE_IDS / SOURCE_HASH_BATCH`区分单次候选扫描和Hash批次，不记录候选ID；这些计数不表示已返回部分检索结果。`bm25.snapshot_finished.duration_ms`表示全量摘要耗时；索引事件的`duration_ms`表示后续锁等待、完整验证及构建/复用耗时；不逐批输出成功日志。`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`表示完整来源验证/全量摘要相同后的验证复用，均不跳过本题来源快照核对。
 
 | 事件 | 含义 |
 |---|---|
@@ -121,7 +121,7 @@ Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_c
 | `rag.query_encoded / nodes_reused` | Query 委托既有共享服务 / 原 Node 向量复用；仅维度/数量/耗时，不输出输入或向量 |
 | `rag.adapter_failed` | 固定适配边界错误码与步骤，不透传 Pydantic 输入、路径、Node 或模型异常 |
 | `dense.started / finished / empty / failed` | 指定知识库/可选文档只读检索开始/成功/空集/安全失败；kb_id、top_k、指定文档数量及单文档doc_id、结果数量/维度/步骤/耗时/固定错误码，不记录ID数组、Query/Node/向量或SQL |
-| `bm25.started / index_built / index_reused / finished / empty / failed` | 当前READY快照的关键词检索、派生索引构建/复用及结果摘要；仅UUID/范围数量/Chunk数/复用/耗时/安全码，不记录Query/词项/正文/索引摘要或SQL，批量Node转换不刷逐项成功日志 |
+| `bm25.started / snapshot_finished / index_built / index_reused / finished / empty / failed` | 当前READY快照的关键词检索、全量摘要与索引阶段计时、结果摘要；仅UUID/范围数量/Chunk数/复用/耗时/安全码，不记录Query/词项/正文/索引摘要或SQL，批量Node转换不刷逐项成功日志 |
 | `fusion.started / branch_finished / finished / empty / failed` | 同范围两路检索及稳定RRF摘要；stage区分dense/bm25/rrf，记录UUID/范围数量/结果数/耗时及安全分支错误码，不记录Query/Node/原分数/异常原文，不新增日志文件 |
 | `rerank.model_loaded / scored / score_failed / started / finished / skipped / failed` | 项目共享模型加载、完整原文对批量评分、Top Evidence选择及错误/空候选摘要；仅模型名/设备/数量/批次/知识库/耗时/固定安全码，加载及评分不是质量验收，不记录Query/正文/分数/路径/指纹 |
 | `llm.started / finished / failed` | 单次所选LLM请求/完整响应接收/安全失败；provider只允许deepseek/custom，模型名、HTTP状态、耗时/错误码；不记录URL/问题/Prompt/响应/Key，finished不是引用或忠实度验收。旧deepseek事件标签保留兼容，不重复发两套事件 |

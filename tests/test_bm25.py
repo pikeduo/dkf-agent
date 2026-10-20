@@ -279,7 +279,7 @@ def test_cursor_close_failure_uses_safe_database_error():
 def test_snapshot_projection_covers_full_sources_without_returning_corpus_text():
     """按真实列映射验证摘要参数完整，避免ORM属性名及SQL字符串格式造成误判。"""
     kb_id, doc_id = uuid4(), uuid4()
-    statement = tool.source_statement(kb_id, [doc_id], snapshot=True)
+    statement = tool.source_statement(kb_id, [doc_id], snapshot=True, chunk_ids=[UUID(int=1)])
     sql = str(statement.compile(dialect=postgresql.dialect()))
     assert tuple(statement.selected_columns.keys()) == ('chunk_id', 'text_bytes', 'text_hash', 'source_hash')
     assert sql.count('sha256(') == 2 and 'jsonb_build_array(' in sql
@@ -323,21 +323,26 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
 
 
 def test_snapshot_bounds_id_batch_before_hashing_full_sources():
-    """物化屏障只排序合格ID，单批后再计算全量来源Hash；范围/代次过滤不后移。"""
-    kb_id, doc_id, after = uuid4(), uuid4(), UUID(int=10)
-    statement = tool.source_statement(kb_id, [doc_id], snapshot=True, after_chunk_id=after)
+    """候选资格只全库扫描一次；摘要屏障只按主键取明确ID，外层保留完整范围核对。"""
+    kb_id, doc_id = uuid4(), uuid4()
+    chunk_ids = [UUID(int=number) for number in range(1, tool.SOURCE_BATCH_SIZE + 1)]
+    candidates = tool.source_statement(kb_id, [doc_id], ids_only=True)
+    candidate_sql = str(candidates.compile(dialect=postgresql.dialect()))
+    assert tuple(candidates.selected_columns.keys()) == ('chunk_id',)
+    assert 'sha256(' not in candidate_sql and 'jsonb_build_array(' not in candidate_sql
+    assert 'document_chunks.doc_id IN' in candidate_sql and 'documents.status IN' in candidate_sql
+    assert candidates._limit_clause.value == tool.MAX_CORPUS_CHUNKS + 1
+    statement = tool.source_statement(kb_id, [doc_id], snapshot=True, chunk_ids=chunk_ids)
     compiled = statement.compile(dialect=postgresql.dialect())
     batch = next(value for value in visitors.iterate(statement)
         if isinstance(value, CTE) and value.name == 'bm25_source_batch')
-    candidate_sql = str(batch.element.compile(dialect=postgresql.dialect()))
+    batch_sql = str(batch.element.compile(dialect=postgresql.dialect()))
     assert 'bm25_source_batch AS MATERIALIZED' in str(compiled)
     assert tuple(batch.element.selected_columns.keys()) == ('chunk_id',)
     assert batch.element.selected_columns['chunk_id'].shares_lineage(DocumentChunk.chunk_id.property.columns[0])
-    assert 'sha256(' not in candidate_sql and 'jsonb_build_array(' not in candidate_sql
-    assert 'document_chunks.doc_id IN' in candidate_sql and 'documents.status IN' in candidate_sql
-    assert 'document_chunks.chunk_id >' in candidate_sql and 'OFFSET' not in str(compiled)
-    assert compiled.params['source_batch_limit'] == tool.SOURCE_BATCH_SIZE
-    assert compiled.params['source_after_chunk_id'] == after
+    assert 'sha256(' not in batch_sql and 'jsonb_build_array(' not in batch_sql
+    assert 'document_chunks.chunk_id IN' in batch_sql and 'JOIN' not in batch_sql
+    assert 'OFFSET' not in str(compiled) and chunk_ids in compiled.params.values()
     assert ['READY', 'PARTIAL_READY'] in compiled.params.values() and [doc_id] in compiled.params.values()
     assert {'source_parse_task_id', 'source_chunk_task_id', 'embedding_task_id'} <= set(
         value for value in compiled.params.values() if isinstance(value, str))
@@ -345,25 +350,26 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources():
 
 
 @pytest.mark.parametrize('count', [0, 1, 2, 3, 4, 5])
-def test_snapshot_keyset_reads_every_row_and_proves_end_of_exact_batch(monkeypatch, count):
-    """空库及整批边界均正确结束，续批不漏行/重复，完整摘要不因分页大小改变。"""
+def test_snapshot_scans_ids_once_and_hashes_each_exact_batch(monkeypatch, count):
+    """空库及整批边界均正确结束；仅一次候选ID查询，Hash批次不重复筛选全库。"""
     kb_id = uuid4()
     rows = [stored_pair(kb_id, number) for number in range(1, count + 1)]
     expected = tool.read_source_snapshot(SqlSessionStub(rows), kb_id)
     monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
     session = SqlSessionStub(rows)
     assert tool.read_source_snapshot(session, kb_id) == expected
-    assert len(session.statements) == count // 2 + 1
-    assert all(result.closed and len(result.rows) <= 2 for result in session.results)
-    for position, statement in enumerate(session.statements):
+    assert len(session.statements) == 1 + (count + 1) // 2
+    assert tuple(session.statements[0].selected_columns.keys()) == ('chunk_id',)
+    assert all(result.closed for result in session.results)
+    assert all(len(result.rows) <= 2 for result in session.results[1:])
+    for position, statement in enumerate(session.statements[1:]):
         params = statement.compile().params
-        assert params['source_batch_limit'] == 2
-        assert params.get('source_after_chunk_id') == (UUID(int=position * 2) if position else None)
+        assert [row[0].chunk_id for row in rows[position * 2:position * 2 + 2]] in params.values()
 
 
 @pytest.mark.parametrize('budget_kind', ['chunks', 'bytes'])
 def test_snapshot_budgets_accumulate_across_sql_pages(monkeypatch, budget_kind):
-    """后续批次超过累计行数或字节预算时仍整批失败，不把每页预算当整库预算。"""
+    """后续批次超过累计行数或字节预算仍整批失败；候选扫描和Hash均关闭游标。"""
     monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
     kb_id = uuid4()
     rows = [stored_pair(kb_id, number) for number in range(1, 5)]
@@ -373,8 +379,10 @@ def test_snapshot_budgets_accumulate_across_sql_pages(monkeypatch, budget_kind):
     session = SqlSessionStub(rows)
     with pytest.raises(tool.BM25RetrievalError, match='BM25_LIMIT') as caught:
         tool.read_source_snapshot(session, kb_id, limits=limits)
-    assert caught.value.source_progress == {'batch_index': 2, 'chunk_count': 2}
-    assert len(session.results) == 2 and all(result.closed for result in session.results)
+    assert caught.value.source_progress == {'batch_index': 2, 'chunk_count': 2,
+        'operation': 'SOURCE_IDS' if budget_kind == 'chunks' else 'SOURCE_HASH_BATCH'}
+    assert len(session.results) == (2 if budget_kind == 'chunks' else 3)
+    assert all(result.closed for result in session.results)
 
 
 def test_snapshot_late_page_metadata_change_invalidates_full_fingerprint(monkeypatch):
@@ -388,15 +396,105 @@ def test_snapshot_late_page_metadata_change_invalidates_full_fingerprint(monkeyp
     assert changed != before and same_items == items and len(items) == len(rows)
 
 
-@pytest.mark.parametrize('after', [True, 1, 'PRIVATE_CURSOR', UUID(int=0)])
-def test_snapshot_rejects_invalid_keyset_cursor(after):
-    """UUID续读参数必须有效，不接受布尔、字符串或零UUID，不回显输入。"""
+@pytest.mark.parametrize('options', [
+    {'snapshot': True}, {'snapshot': True, 'ids_only': True},
+    {'ids_only': 'PRIVATE_MODE'}, {'ids_only': True, 'chunk_ids': [UUID(int=1)]},
+    {'snapshot': True, 'chunk_ids': [UUID(int=1)] * 2},
+    {'snapshot': True, 'chunk_ids': [UUID(int=n) for n in range(1, tool.SOURCE_BATCH_SIZE + 2)]},
+])
+def test_snapshot_rejects_unbounded_or_conflicting_modes(options):
+    """摘要必须绑定有界唯一ID，候选扫描不能混用摘要或Top-K模式，不回显非法参数。"""
     with pytest.raises(tool.BM25RetrievalError, match='BM25_INPUT') as caught:
-        tool.source_statement(uuid4(), snapshot=True, after_chunk_id=after)
-    assert 'PRIVATE_CURSOR' not in str(caught.value)
+        tool.source_statement(uuid4(), **options)
+    assert 'PRIVATE_MODE' not in str(caught.value)
 
 
-def test_full_source_statement_cannot_silently_use_snapshot_cursor():
-    """完整证据入口不接收摘要游标，避免误用时静默漏掉前缀证据。"""
+def test_full_evidence_keeps_original_top_k_id_limit():
+    """摘要可读256个ID不放宽完整证据Top-K的100项上限。"""
     with pytest.raises(tool.BM25RetrievalError, match='BM25_INPUT'):
-        tool.source_statement(uuid4(), after_chunk_id=UUID(int=1))
+        tool.source_statement(uuid4(), chunk_ids=[UUID(int=n) for n in range(1, 102)])
+
+
+@pytest.mark.parametrize('damage', ['missing', 'duplicate', 'reordered', 'unexpected'])
+def test_snapshot_requires_exact_candidate_and_hash_row_alignment(damage):
+    """摘要缺行、重复、错序或混入其他ID均整题失败，不能发布看似完整的前缀摘要。"""
+    first = stored_pair()
+    rows = [first, stored_pair(first[0].kb_id, 2)]
+
+    class MisalignedSession(SqlSessionStub):
+        """仅破坏Hash返回行，候选ID仍来自完整受控列表。"""
+
+        def execute(self, statement):
+            """模拟驱动/返回结构偏差，不在Stub里替生产代码纠正结果。"""
+            result = super().execute(statement)
+            if 'source_hash' in statement.selected_columns.keys():
+                if damage == 'missing':
+                    result.rows = result.rows[:1]
+                elif damage == 'duplicate':
+                    result.rows = [result.rows[0], result.rows[0]]
+                elif damage == 'reordered':
+                    result.rows = list(reversed(result.rows))
+                else:
+                    result.rows = [(UUID(int=99), *result.rows[0][1:])]
+            return result
+
+    session = MisalignedSession(rows)
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_RESULT'):
+        tool.read_source_snapshot(session, first[0].kb_id)
+    assert all(result.closed for result in session.results)
+
+
+@pytest.mark.parametrize('ids', [[UUID(int=0)], ['PRIVATE_ID'], [UUID(int=2), UUID(int=1)],
+                                 [UUID(int=1), UUID(int=1)]])
+def test_candidate_ids_are_validated_before_hash_batch(ids):
+    """候选ID无效、逆序或重复时不执行Hash查询，不泄露内部ID或返回旧索引。"""
+    class InvalidCandidateSession(SqlSessionStub):
+        """模拟候选投影不符合数据库契约。"""
+
+        def execute(self, statement):
+            """只替换ID投影结果，并记录游标以检查失败释放。"""
+            result = super().execute(statement)
+            if tuple(statement.selected_columns.keys()) == ('chunk_id',):
+                result.rows = [(value,) for value in ids]
+            return result
+
+    session = InvalidCandidateSession([])
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_RESULT') as caught:
+        tool.read_source_snapshot(session, uuid4())
+    assert len(session.statements) == 1 and session.results[0].closed
+    assert caught.value.source_progress['operation'] == 'SOURCE_IDS'
+    assert 'PRIVATE_ID' not in str(caught.value)
+
+
+def test_candidate_fetch_failure_after_hash_batch_preserves_sqlstate_and_closes_cursors(monkeypatch):
+    """候选游标续读取消时保留最初SQLSTATE/进度；关闭次生异常不得覆盖根因。"""
+    from test_retrieval_database import driver_error
+
+    monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
+    first = stored_pair()
+    rows = [first, stored_pair(first[0].kb_id, 2), stored_pair(first[0].kb_id, 3)]
+
+    class FailedCandidates(StreamingResultStub):
+        """仅候选投影第二次拉取失败，Hash批次仍可完整读取。"""
+
+        def __iter__(self):
+            """候选前两项可读，下一批模拟取消；Hash结果不注入故障。"""
+            if self.rows and len(self.rows[0]) == 1:
+                yield from self.rows[:2]
+                raise driver_error('57014')
+            yield from self.rows
+
+        def close(self):
+            """关闭候选时再模拟连接异常，验证清理不会替换首次取消原因。"""
+            super().close()
+            if self.rows and len(self.rows[0]) == 1:
+                raise driver_error('08006')
+
+    session = SqlSessionStub(rows)
+    session.result_type = FailedCandidates
+    with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE_QUERY_CANCELED') as caught:
+        tool.read_source_snapshot(session, first[0].kb_id)
+    assert caught.value.database_diagnostic == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
+    assert caught.value.source_progress == {'operation': 'SOURCE_IDS', 'batch_index': 2, 'chunk_count': 2}
+    assert len(session.results) == 2 and all(result.closed for result in session.results)
+    assert 'PRIVATE' not in str(caught.value)

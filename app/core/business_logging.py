@@ -317,6 +317,7 @@ EVENT_LABELS = {
     "dense.empty": "Dense 检索无同模型 READY 结果，未扩大范围或重编码",
     "dense.failed": "Dense 检索安全失败，未返回部分结果",
     "bm25.started": "开始当前 READY 证据的只读 BM25 检索",
+    "bm25.snapshot_finished": "BM25 全量正文与来源摘要核对完成",
     "bm25.index_built": "已构建可重建的本地 BM25 派生索引",
     "bm25.index_reused": "复用 BM25 词频索引，证据仍来自本次查询",
     "bm25.finished": "BM25 检索完成，已保留原 Chunk 证据",

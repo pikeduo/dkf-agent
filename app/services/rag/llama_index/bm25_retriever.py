@@ -76,7 +76,7 @@ class BM25Retriever(BaseRetriever):
         return await asyncio.to_thread(self.retrieve, str_or_query_bundle)
 
     def _retrieve(self, query_bundle: str | QueryBundle) -> list[NodeWithScore]:
-        """每题在同一快照分页核对全量摘要及Top-K证据；失败记录安全批次进度。"""
+        """每题在同一快照单次枚举ID、分批核对全部摘要；记录阶段耗时及安全失败进度。"""
         started, stage = perf_counter(), "input"
         scope_log = {"kb_id": self._kb_id, "top_k": self._top_k}
         try:
@@ -104,10 +104,14 @@ class BM25Retriever(BaseRetriever):
                 session.execute(text("SET LOCAL lock_timeout = '2s'"))
                 budget_args = {"limits": self._corpus_limits} if self._corpus_limits is not None else {}
                 stage = "source_snapshot"
+                phase_started = perf_counter()
                 fingerprint, snapshot_items = read_source_snapshot(session, kb_id, doc_ids, **budget_args)
                 chunk_count = len(snapshot_items)
+                log_event("bm25.snapshot_finished", **scope_log, chunk_count=chunk_count,
+                          duration_ms=(perf_counter() - phase_started) * 1000)
                 snapshot_key = (kb_id, doc_ids, ADAPTER_VERSION, fingerprint)
                 # 不是凭代次或数量推断未变化：全量SHA256包含正文、全部来源及Adapter输入。
+                phase_started = perf_counter()
                 with self._index_lock:
                     validated = self._index is not None and self._validated_snapshot == snapshot_key
                     if not validated:
@@ -134,7 +138,8 @@ class BM25Retriever(BaseRetriever):
                     index = self._index
                 log_event("bm25.index_reused" if reused else "bm25.index_built", **scope_log,
                           step="SOURCE_VALIDATION_REUSED" if validated else "SOURCE_VALIDATED",
-                          chunk_count=chunk_count, artifact_reused=reused)
+                          chunk_count=chunk_count, artifact_reused=reused,
+                          duration_ms=(perf_counter() - phase_started) * 1000)
                 stage = "score"
                 ranked = index.search(query, self._top_k)
                 expected = {snapshot_items[position][0]: snapshot_items[position][1] for position, _ in ranked}
@@ -166,6 +171,7 @@ class BM25Retriever(BaseRetriever):
             progress = error.source_progress or {}
             log_event("bm25.failed", level=logging.WARNING, **scope_log, stage=stage,
                       step=(error.database_diagnostic or {}).get("sqlstate"),
+                      operation=progress.get("operation"),
                       batch_index=progress.get("batch_index"), chunk_count=progress.get("chunk_count"),
                       error_code=error.code, duration_ms=(perf_counter() - started) * 1000)
             raise error from None

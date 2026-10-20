@@ -53,6 +53,20 @@ def records(stream):
     return [read_log_line(line) for line in stream.getvalue().splitlines()]
 
 
+def test_bm25_snapshot_and_progress_logs_use_registered_safe_summary(events):
+    """全量摘要事件和失败批次只显示安全计数/耗时/固定操作，不暴露正文或候选ID列表。"""
+    logs.log_event('bm25.snapshot_finished', chunk_count=86528, duration_ms=1250.5,
+        text='PRIVATE_BODY', query='PRIVATE_QUERY', source_hash='PRIVATE_HASH')
+    logs.log_event('bm25.failed', stage='source_snapshot', operation='SOURCE_HASH_BATCH',
+        step='57014', batch_index=2, chunk_count=256, error_code='BM25_DATABASE_QUERY_CANCELED',
+        chunk_ids=['PRIVATE_IDS'], sql='PRIVATE_SQL')
+    completed, failed = records(events)
+    assert completed['chunk_count'] == 86528 and completed['duration_ms'] == 1250.5
+    assert failed['operation'] == 'SOURCE_HASH_BATCH' and failed['batch_index'] == 2
+    assert 'BM25 全量正文与来源摘要核对完成' in events.getvalue()
+    assert 'PRIVATE' not in events.getvalue()
+
+
 def test_office_pdf_events_only_log_safe_summary_with_registered_role(events):
     """转换CLI角色集中注册，过程/费用许可日志不暴露配置、路径、凭据和引擎输出。"""
     assert logs.ROLE_LABELS["office-pdf-cli"] == "Office PDF CLI"

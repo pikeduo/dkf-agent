@@ -7,9 +7,10 @@ import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import nsmallest
+from itertools import islice
 from uuid import UUID
 
-from sqlalchemy import String, Text, bindparam, cast, func, select
+from sqlalchemy import String, Text, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import load_only
 
@@ -54,7 +55,7 @@ class BM25RetrievalError(Exception):
     """只传递固定错误，不暴露正文、Query、SQL、连接串或底层异常。"""
 
     def __init__(self, code: str, *, database_error=None):
-        """保留安全SQLSTATE及可选分页进度，不传递原SQL、UUID游标或异常消息。"""
+        """保留安全SQLSTATE及可选批次进度，不传递原SQL、候选ID或异常消息。"""
         self.source_progress = None
         self.database_diagnostic = database_diagnostic(database_error) if code == "BM25_DATABASE" else None
         if self.database_diagnostic and self.database_diagnostic["reason"] in DATABASE_REASONS:
@@ -122,11 +123,10 @@ def tokenize(text: str, *, max_terms=MAX_CORPUS_TOKENS) -> list[str]:
     return tokens
 
 
-def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapshot=False, after_chunk_id=None):
-    """完整证据沿用原范围；摘要先物化至多256个合格ID再计算Hash，UUID游标仅用于摘要分页。"""
-    if type(snapshot) is not bool:
-        raise BM25RetrievalError("BM25_INPUT")
-    if after_chunk_id is not None and (not snapshot or not isinstance(after_chunk_id, UUID) or after_chunk_id.int == 0):
+def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapshot=False, ids_only=False):
+    """候选ID只筛选一次；摘要按明确ID先物化小批，再复核范围并计算完整Hash。"""
+    if (type(snapshot) is not bool or type(ids_only) is not bool or (snapshot and ids_only)
+            or (snapshot and chunk_ids is None) or (ids_only and chunk_ids is not None)):
         raise BM25RetrievalError("BM25_INPUT")
     budget = checked_limits(limits)
     kb_id, doc_ids = bm25_scope(kb_id, doc_ids=doc_ids)
@@ -142,38 +142,34 @@ def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapsh
     if doc_ids is not None:
         filters.append(DocumentChunk.doc_id.in_(doc_ids))
     if chunk_ids is not None:
-        if (not isinstance(chunk_ids, (list, tuple)) or not 1 <= len(chunk_ids) <= 100
+        if (not isinstance(chunk_ids, (list, tuple))
+                or not 1 <= len(chunk_ids) <= (SOURCE_BATCH_SIZE if snapshot else 100)
                 or any(not isinstance(value, UUID) for value in chunk_ids)
                 or len(set(chunk_ids)) != len(chunk_ids)):
             raise BM25RetrievalError("BM25_INPUT")
-        filters.append(DocumentChunk.chunk_id.in_(chunk_ids))
+        if not snapshot:
+            filters.append(DocumentChunk.chunk_id.in_(chunk_ids))
     if snapshot:
-        statement = select(DocumentChunk.chunk_id)
-    else:
-        statement = select(DocumentChunk, Document).options(
-            load_only(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS), raiseload=True),
-            load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True))
-    statement = (statement.select_from(DocumentChunk)
+        # 物化屏障内只有主键批次，不再反复从全库筛选下一页合格ID。
+        batch = (select(DocumentChunk.chunk_id).where(DocumentChunk.chunk_id.in_(chunk_ids))
+            .cte("bm25_source_batch").prefix_with("MATERIALIZED", dialect="postgresql"))
+        fields = [getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
+        fields += [getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS]
+        return (select(DocumentChunk.chunk_id, func.octet_length(DocumentChunk.text).label("text_bytes"),
+                func.sha256(func.convert_to(DocumentChunk.text, "UTF8")).label("text_hash"),
+                func.sha256(func.convert_to(cast(func.jsonb_build_array(*fields), Text), "UTF8")).label("source_hash"))
+            .select_from(batch).join(DocumentChunk, DocumentChunk.chunk_id == batch.c.chunk_id)
+            .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
+            .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
+            .order_by(DocumentChunk.chunk_id.asc()).execution_options(populate_existing=True))
+    statement = (select(DocumentChunk.chunk_id) if ids_only else select(DocumentChunk, Document).options(
+        load_only(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS), raiseload=True),
+        load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True)))
+    return (statement.select_from(DocumentChunk)
         .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
         .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
         .order_by(DocumentChunk.chunk_id.asc()).limit(budget.chunks + 1)
         .execution_options(populate_existing=True))
-    if not snapshot:
-        return statement
-    if after_chunk_id is not None:
-        statement = statement.where(DocumentChunk.chunk_id > bindparam("source_after_chunk_id", after_chunk_id))
-    # yield_per仅控制驱动取批，不能限制排序前的计算量。这里把ID分页与完整Hash计算隔开；
-    # UUID递增且无OFFSET，每批沿用同一事务快照和全部资格过滤，不反复Hash已检查的前缀。
-    batch = (statement.limit(bindparam("source_batch_limit", min(SOURCE_BATCH_SIZE, budget.chunks + 1)))
-        .cte("bm25_source_batch").prefix_with("MATERIALIZED", dialect="postgresql"))
-    fields = [getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
-    fields += [getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS]
-    return (select(DocumentChunk.chunk_id, func.octet_length(DocumentChunk.text).label("text_bytes"),
-            func.sha256(func.convert_to(DocumentChunk.text, "UTF8")).label("text_hash"),
-            func.sha256(func.convert_to(cast(func.jsonb_build_array(*fields), Text), "UTF8")).label("source_hash"))
-        .select_from(batch).join(DocumentChunk, DocumentChunk.chunk_id == batch.c.chunk_id)
-        .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
-        .order_by(DocumentChunk.chunk_id.asc()).execution_options(populate_existing=True))
 
 
 @contextmanager
@@ -203,45 +199,61 @@ def source_cursor(session, statement):
 
 
 def read_source_snapshot(session, kb_id, doc_ids=None, *, limits=None):
-    """同一只读事务按UUID分页完整核对摘要；跨批累计预算，失败仅附安全进度，不返回半份指纹。"""
+    """同一事务流式枚举一次ID并逐批核对摘要；累计预算、严格对齐，失败不返回半份指纹。"""
     budget = checked_limits(limits)
     digest = hashlib.sha256(("bm25-source-snapshot-v1:" + BM25_VERSION + ":" + TOKENIZER_VERSION).encode("ascii"))
     items, total, last, batch_index = [], 0, None, 0
-    page_limit = min(SOURCE_BATCH_SIZE, budget.chunks + 1)
+    operation = "SOURCE_IDS"
     try:
-        while True:
-            batch_index += 1
-            count = 0
-            statement = source_statement(kb_id, doc_ids, limits=limits,
-                snapshot=True, after_chunk_id=last)
-            with source_cursor(session, statement) as rows:
-                for row in rows:
-                    count += 1
-                    if len(items) >= budget.chunks:
-                        raise BM25RetrievalError("BM25_LIMIT")
-                    if count > page_limit:
-                        raise BM25RetrievalError("BM25_RESULT")
+        statement = source_statement(kb_id, doc_ids, limits=limits, ids_only=True)
+        with source_cursor(session, statement) as candidates:
+            candidates = iter(candidates)
+            while True:
+                batch_index += 1
+                operation = "SOURCE_IDS"
+                batch = list(islice(candidates, SOURCE_BATCH_SIZE))
+                if not batch:
+                    break
+                chunk_ids = []
+                for row in batch:
                     try:
-                        chunk_id, text_bytes, text_hash, source_hash = row
+                        chunk_id, = row
                         if (not isinstance(chunk_id, UUID) or chunk_id.int == 0
-                                or (last is not None and chunk_id.int <= last.int)
-                                or type(text_bytes) is not int or text_bytes < 1
-                                or not isinstance(text_hash, (bytes, memoryview)) or len(text_hash) != 32
-                                or not isinstance(source_hash, (bytes, memoryview)) or len(source_hash) != 32):
+                                or (last is not None and chunk_id.int <= last.int)):
                             raise ValueError
-                        text_hash, source_hash = bytes(text_hash), bytes(source_hash)
-                    except (ValueError, TypeError):
+                    except (TypeError, ValueError):
                         raise BM25RetrievalError("BM25_RESULT") from None
-                    total += text_bytes
-                    if total > budget.bytes:
-                        raise BM25RetrievalError("BM25_LIMIT")
-                    digest.update(chunk_id.bytes + text_bytes.to_bytes(8, "big") + text_hash + source_hash)
-                    items.append((chunk_id, text_hash))
+                    chunk_ids.append(chunk_id)
                     last = chunk_id
-            if count < page_limit:
-                break
+                if len(items) + len(chunk_ids) > budget.chunks:
+                    raise BM25RetrievalError("BM25_LIMIT")
+                operation = "SOURCE_HASH_BATCH"
+                statement = source_statement(kb_id, doc_ids, limits=limits,
+                    snapshot=True, chunk_ids=chunk_ids)
+                count = 0
+                with source_cursor(session, statement) as rows:
+                    for row in rows:
+                        try:
+                            chunk_id, text_bytes, text_hash, source_hash = row
+                            if (count >= len(chunk_ids) or chunk_id != chunk_ids[count]
+                                    or type(text_bytes) is not int or text_bytes < 1
+                                    or not isinstance(text_hash, (bytes, memoryview)) or len(text_hash) != 32
+                                    or not isinstance(source_hash, (bytes, memoryview)) or len(source_hash) != 32):
+                                raise ValueError
+                            text_hash, source_hash = bytes(text_hash), bytes(source_hash)
+                        except (ValueError, TypeError):
+                            raise BM25RetrievalError("BM25_RESULT") from None
+                        total += text_bytes
+                        if total > budget.bytes:
+                            raise BM25RetrievalError("BM25_LIMIT")
+                        digest.update(chunk_id.bytes + text_bytes.to_bytes(8, "big") + text_hash + source_hash)
+                        items.append((chunk_id, text_hash))
+                        count += 1
+                if count != len(chunk_ids):
+                    raise BM25RetrievalError("BM25_RESULT")
+            operation = "SOURCE_IDS"
     except BM25RetrievalError as exc:
-        exc.source_progress = {"batch_index": batch_index, "chunk_count": len(items)}
+        exc.source_progress = {"operation": operation, "batch_index": batch_index, "chunk_count": len(items)}
         raise
     return digest.hexdigest(), items
 

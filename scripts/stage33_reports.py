@@ -6,7 +6,9 @@ from tempfile import TemporaryFile
 
 from scripts.stage33_common import (STRATEGIES, Stage33Error, digest, encoded, read_json, write_csv,
                                    write_json, publish_stream)
-from scripts.stage33_analysis import diagnose_retrieval, gate_metrics, grouped_metrics, question_context
+from scripts.stage33_analysis import (
+    diagnose_document_flow, diagnose_retrieval, gate_metrics, grouped_metrics, question_context,
+)
 from scripts.stage33_retrieval import aggregate, truth
 from scripts.stage33_runtime import is_indexed
 
@@ -54,7 +56,7 @@ def fee_summary(documents):
 
 
 def generate(data, run, *, fatal_code=None):
-    """汇总完整范围及安全数据库分类，区分抽样/全量成绩；不访问数据库、模型或云端。"""
+    """汇总指标、安全数据库分类及OCB逐依赖召回路径；不访问数据库、模型或云端。"""
     from app.services.parse_cache import atomic_write
     checkpoint = run / "import_checkpoint.json"
     imported = read_json(checkpoint) if checkpoint.exists() else {}
@@ -80,6 +82,7 @@ def generate(data, run, *, fatal_code=None):
         and (snapshot is None or snapshot["scope"] == config.get("scope")))
     by_file = {doc["file_id"]: doc for doc in documents}
     diagnostics, diagnostic_counts = [], Counter()
+    document_flows, flow_counts = [], Counter()
     executions, hits_buffer = [], TemporaryFile(dir=run)
     hit_csv = TemporaryFile(mode="w+", encoding="utf-8", newline="", dir=run)
     import csv
@@ -106,6 +109,11 @@ def generate(data, run, *, fatal_code=None):
                 for fid in qa["source_file_ids"]], "dependency_status": {
                     fid: imported.get(fid, {}).get("execution_status", "NOT_ATTEMPTED") for fid in qa["source_file_ids"]}}
         executions.append(execution)
+        for flow in diagnose_document_flow(qa, result):
+            source = by_file.get(flow["source_file_id"], {})
+            document_flows.append({"dataset": qa["dataset"], "qa_id": qa["qa_id"],
+                "doc_id": source.get("doc_id"), "file_type": source.get("file_type"), **flow})
+            flow_counts[flow["category"]] += 1
         for strategy, value in result["strategies"].items():
             diagnostic = diagnose_retrieval(result, strategy)
             database = value.get("database_diagnostic") or {}
@@ -213,6 +221,13 @@ def generate(data, run, *, fatal_code=None):
     write_csv(run / "retrieval_diagnostics.csv", diagnostics, ["dataset", "qa_id", "strategy", "status",
         "category", "basis", "source_file_ids", "doc_ids", "source_quality", "file_type_group",
         "required_evidence_pages_missing", "error_code", "database_reason", "sqlstate"])
+    write_json(run / "document_recall_diagnostics.json", {"metrics_status": report["metrics_status"],
+        "basis": "document_dependency_proxy", "counts": dict(sorted(flow_counts.items())),
+        "note": "OCB逐依赖Top20观测，不是QA正确率或解析失败证明；旧Hybrid未存21～30候选，分支命中但最终缺失的具体环节可能未知。",
+        "cases": document_flows})
+    write_csv(run / "document_recall_diagnostics.csv", document_flows, ["dataset", "qa_id", "source_file_id",
+        "doc_id", "file_type", "category", "basis", "observation", "dense_rank", "bm25_rank",
+        "hybrid_rank", "hybrid_reranker_rank", "strategy_statuses"])
     for name in ("ohr", "ocb", "overall"):
         write_json(run / f"metrics_{name}.json", metrics[name])
     write_json(run / "costs_and_timing.json", {"fees": report["fees"], "strategies": metrics,
@@ -253,6 +268,7 @@ def generate(data, run, *, fatal_code=None):
             row["latency_seconds"]["mean"], row["latency_seconds"]["p95"])) + " |")
     text += ["", "指标分母不按成功子集缩小；本run选定QA未完整执行或快照无效时，不可宣称评测通过。",
         "质量/格式分组见metrics_breakdown.csv；漏召回及低排名定位见retrieval_diagnostics.csv。",
+        "OCB逐依赖四路Top20观测见document_recall_diagnostics.csv；不能仅凭依赖文档未命中认定解析失败。",
         "文档代理指标见JSON/CSV，不代表OCB断言正确或LLM问答准确率。金额须人工核对账单。"]
     if selection is not None:
         text += ["", f"固定QA抽样：每数据集{selection['per_dataset']}题；种子{selection['seed']}；"

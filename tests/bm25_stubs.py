@@ -61,7 +61,7 @@ class StreamingSessionStub(SqlSessionStub):
         return False
 
     def execute(self, statement):
-        """模拟摘要UUID续读及单批上限，完整来源仍保留坏行用于校验，不执行真实SQL。"""
+        """区分单次候选ID、按ID摘要及完整证据；不替生产代码排序或修复坏行。"""
         if not statement.is_select:
             self.settings.append(str(statement))
             return self
@@ -73,11 +73,9 @@ class StreamingSessionStub(SqlSessionStub):
             if key.startswith('chunk_id_') and isinstance(value, (list, tuple))), None)
         rows = self.rows if chunk_ids is None else [row for row in self.rows if row[0].chunk_id in chunk_ids]
         if "source_hash" in statement.selected_columns.keys():
-            after = params.get('source_after_chunk_id')
-            if after is not None:
-                rows = [row for row in rows if row[0].chunk_id.int > after.int]
-            rows = rows[:params['source_batch_limit']]
             rows = [snapshot_row(row) for row in rows]
+        elif tuple(statement.selected_columns.keys()) == ('chunk_id',):
+            rows = [(row[0].chunk_id,) for row in rows[:statement._limit_clause.value]]
         result = self.result_type(rows)
         self.results.append(result)
         return result

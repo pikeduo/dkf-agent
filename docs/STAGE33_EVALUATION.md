@@ -4,11 +4,15 @@
 
 用户已确认全部200份入库。2026-10-19 20:04报告为118 READY、82 PARTIAL_READY、0 FAILED，全部Chunk与向量数量一致。按用户最新要求，先从OHR、OCB各固定抽取50条QA，共100题/400条策略执行记录；检索范围仍是全部200份。原始4087条QA和已入库向量不改动，不重传、重解析或重建索引，也不自动清除质量警告。以下流程优先于后文历史导入排错步骤。
 
-已实现只读索引快照、显式质量政策、固定抽样及四策略报告。用户提供的最新`stage33_run_03`已有100题/400条记录，其中385成功、15失败，集中在OCB的5题；Dense全部成功，5次BM25摘要查询取消，同5题的Hybrid/重排分支失败。全200份索引有效，执行状态仍INCOMPLETE。本轮针对摘要SQL改为UUID续读、每批至多256个ID物化后计算完整Hash，范围/来源/评分不减，仍保持10秒语句预算；新增回归仅编写，pytest和实际续跑由用户手动验收。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准。
+已实现只读索引快照、显式质量政策、固定抽样及四策略报告。最新`stage33_run_03`的100题/400条策略记录全部执行成功，零失败，状态为`SAMPLE_COMPLETED_WITH_QUALITY_LIMITS`；全200份索引有效，118 READY/82 PARTIAL_READY，55份缺历史解析质量元数据。OHR重排Recall@5=0.94、Recall@10=1.00；OCB只有依赖文档代理指标，不能等同答案正确率。原4087题未全量评测，质量限制不消除。后续方向以[新阶段计划](KNOWLEDGE_SERVICE_NEXT_PHASE_PLAN.md)为准。
 
-### 当前失败题续跑
+### 当前优化：单次候选扫描与OCB召回路径
 
-2026-10-20日志显示剩余5次BM25失败都在`source_snapshot`，SQLSTATE=57014，耗时约10秒，与现有statement_timeout吻合；仅凭状态仍不能排除外部取消。原单条全库摘要SQL的`yield_per=256`只控制驱动取批，未将SQL摘要处理规模限定到单批，实际数据库执行计划尚未测量。本轮使用UUID递增续读，先物化一批合格ID，再计算完整正文/来源摘要，避免每批前缀重算或OFFSET跳过；全部批次与Top-K证据处于同一快照。保持10秒语句/2秒锁等待预算，不以提高超时或返回半份语料掩盖失败。摘要失败日志保留批次号及已检查Chunk数。取消、锁不可用、连接和资源错误各有固定码；`qa_execution.csv / failures_and_unscorable.csv / retrieval_diagnostics.csv`保留`database_reason / sqlstate`，逐题JSON保留`database_diagnostic`。旧错误不能事后补造原因。
+2026-10-20日志显示，上一版分页消除了本轮执行失败，但BM25冷启动约214秒、热查询约163～165秒；复用索引后至最终返回只约0.25～0.30秒，耗时集中在全库摘要核对。代码中每页重复执行全库资格筛选和排序；实际数据库执行计划尚未测量。本轮改为一次候选ID查询、同连接流式产出有序ID，再按每批至多256个明确ID物化并计算完整正文/来源Hash，避免重复寻找下一页候选。不改变摘要配方、范围、评分、完整JSONB来源或累计预算，所有批次和Top-K证据仍在同一只读REPEATABLE READ事务，保留10秒语句/2秒锁等待预算。
+
+新增`bm25.snapshot_finished.duration_ms`单列全量摘要时间；索引事件单列锁等待、完整验证及建索引/复用时间，最终事件保留总耗时。失败保留SQLSTATE、`batch_index / chunk_count`，并以`operation=SOURCE_IDS / SOURCE_HASH_BATCH`定位候选读取或摘要批次。新实现、驱动游标兼容性和性能尚未实际验收，不能仅凭静态代码宣称已提速。
+
+OCB旧记录中有19题在重排Top20未找到依赖文档：18题Dense/BM25各自Top20均未命中，1题Dense第20名命中但后续去向未知；另有2题在重排6～20名命中。旧Hybrid仅保存Top20，而实际融合池为30，不能确定未知项在融合还是重排丢失。新增`document_recall_diagnostics.json/csv`按每个官方依赖文档记录四路首命中排名，类别为`HIT_AT_5 / RERANK_LOW_RANK / BRANCH_RECALL_MISS / RERANK_OUTPUT_MISS / BRANCH_HIT_FINAL_MISS_UNRESOLVED / INCOMPLETE_EXECUTION`。这些是事后Top20观测，不是QA正确率、全库不可召回证明或解析失败原因；多依赖题按依赖计数，不冒充QA分母。本轮不根据抽样成绩调整生产权重、翻译问题或重建索引。
 
 先由用户运行定向回归：
 
@@ -17,15 +21,15 @@ conda activate dkf-agent
 python -m pytest tests/test_retrieval_database.py tests/test_dense_sql.py tests/test_dense_retriever.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_hybrid_retriever.py tests/test_stage33_indexed_evaluation.py tests/test_business_logging.py -q -ra
 ```
 
-通过后，在原评测进程已结束、同卡Worker无在途任务且已正常停止的前提下，启动新CLI加载代码；只需现有PostgreSQL和本地模型，不需要API/Worker或云调用：
+通过后，可先重新汇总原run以生成新增诊断；只读本地输入/断点，不连接数据库或加载模型，不重跑检索，也不修改逐题断点：
 
 ```powershell
 $kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
 $run = "stage33_run_03"
-python scripts/evaluate_stage33.py --step evaluate --run $run --kb-id $kbId --execute --resume --index-policy indexed --qa-per-dataset 50 --sample-seed 33 --retry-failed
+python scripts/evaluate_stage33.py --step report --run $run --kb-id $kbId --execute --resume --qa-per-dataset 50 --sample-seed 33
 ```
 
-按当前报告，该命令仅重跑含失败策略的5题（每题四路），95题成功断点保留；不是导入恢复的`--retry-failed-only`。选题、索引和模型身份冻结不变。全部成功才可完成抽样执行，PARTIAL质量和OCB不可评分边界继续保留。报告汇总会混合历史成功题与新5题耗时，不能据此当作优化后全100题的新性能基线；本轮先验证失败消除与热查询行为。若仍失败，用`bm25.failed`中的`stage / step / batch_index / chunk_count`确认失败阶段、SQLSTATE及分页进度，不重解析或重建向量。
+当前run已无失败题，`--retry-failed`不会产生新性能数据。旧汇总混合多次续跑耗时，不能当优化后的全100题基线；比较性能应使用下方新run，同样每集50题、种子33、全200份库。只需现有PostgreSQL和本地模型，不需要API/CPU Worker/GPU Worker、Redis或云调用。原评测进程结束、同卡任务安全结束后再正常停止多余推理进程，启动新CLI加载本轮代码。若失败，用`bm25.failed`的`stage / operation / step / batch_index / chunk_count`定位，不重解析或重建向量。
 
 ### 1. 用户执行定向回归
 
@@ -39,11 +43,11 @@ python -m pytest tests/test_stage33_qa_sampling.py tests/test_stage33_indexed_ev
 
 ### 2. 新建评测run并只读观察当前索引
 
-保留原`stage33_run_01/02`；以下抽样使用新的`stage33_run_03`。若该编号已存在，恢复同一run须增加`--resume`。抽样数、种子及索引必须一致，不能把旧全量run改成100题或覆盖旧结果。
+保留原`stage33_run_01/02/03`；以下以时间戳创建独立性能run。同一终端接着执行下一步evaluate，保持`$run`值不变。恢复已创建的同一run须使用原名称并增加`--resume`，不能将旧全量run改成100题或覆盖旧结果。
 
 ```powershell
 $kbId = "158030a1-42d6-42ee-835d-02fdbff23f81"
-$run = "stage33_run_03"
+$run = "stage33_perf_$(Get-Date -Format yyyyMMdd_HHmmssfff)"
 python scripts/evaluate_stage33.py --step snapshot --run $run --kb-id $kbId --execute --qa-per-dataset 50 --sample-seed 33
 if ($LASTEXITCODE -ne 0) { throw "索引快照未通过，先查看本run的summary.md和import_report.csv" }
 ```
@@ -87,11 +91,14 @@ Import-Csv "$dir/metrics_breakdown.csv" -Encoding UTF8 |
     Format-Table dimension,group,strategy,total_questions,recall_at_5,document_recall_at_5 -AutoSize
 Import-Csv "$dir/retrieval_diagnostics.csv" -Encoding UTF8 |
     Group-Object strategy,category | Sort-Object Count -Descending | Format-Table Name,Count -AutoSize
+Import-Csv "$dir/document_recall_diagnostics.csv" -Encoding UTF8 |
+    Group-Object category | Sort-Object Count -Descending | Format-Table Name,Count -AutoSize
 ```
 
 - `strategy_comparison.csv`：本run固定100题分母的四策略对比及耗时，`qa_scope=sampled`；OHR使用官方物理证据页，OCB证据Recall/MRR为null，文档依赖代理指标单列，不能算作答案或断言正确率。
 - `metrics_breakdown.json/csv`：按依赖质量和格式组合分组。READY但历史质量为空单列`READY_WITHOUT_QUALITY_METADATA`；含PARTIAL的题保留在整体分母。跨格式多文档题只进入一个组合组，不重复增大分母。
 - `retrieval_diagnostics.json/csv`：区分空候选、未召回目标文档、召回文档但证据页未命中、晚命中和多页部分召回，另列官方证据页与已记录缺页的交集。它是事后诊断，不代表已证明原件缺文，不自动重投文件；OCB诊断明确标注文档代理口径。
+- `document_recall_diagnostics.json/csv`：OCB每个依赖文档在四路Top20的首命中排名和可确定/未知的漏召回环节；失败、未执行记录为不可判定，不会误计为分支未召回。
 - `evaluation_setup.json`和`costs_and_timing.json`：模型初始化耗时单列；Hybrid/重排耗时包含上游分支，不能把四列相加作总时间。快速索引检查未观察解析Job历史时费用历史标未知，不把它误报为零收费。
 
 100题、全策略均成功执行且快照有效时，存在PARTIAL显示`SAMPLE_COMPLETED_WITH_QUALITY_LIMITS`，全READY时显示`SAMPLE_COMPLETED`，均正常退出。全量run保留原`COMPLETED_WITH_QUALITY_LIMITS/PASS`。样本报告不能当作4087题完整成绩或全部题型/文档均已覆盖，也不表示每题召回正确或RAG通过。未执行题保留null；失败按样本固定分母保守计零；无效/变化快照使整体及分组正式指标变null。
@@ -760,6 +767,7 @@ python scripts/evaluate_stage33.py --step evaluate --run stage33_run_01 --kb-id 
 | plan.json / run.json | 全200清单、成本参考、输入Hash及KB绑定 |
 | import_checkpoint.json / import_report.json / import_report.csv | 200份逐文件状态、路线/分片Batch、Block/Chunk/向量、管理错误及恢复意图 |
 | index_snapshot.json | 独立当前索引观察，保留全部200份身份/质量；不覆盖旧导入检查点或恢复意图 |
+| document_recall_diagnostics.json / csv | OCB逐依赖四路Top20观测；区分分支未召回、重排低排名与候选轨迹未知，不是QA正确率或解析失败清单 |
 | qa_selection.json（抽样run） | 固定选定QA身份、种子、每集题量及原始池规模，不改写阶段32输入 |
 | qa_execution.jsonl / qa_execution.csv | 全4087题原字段/断言/依赖、file_id→doc_id、四路状态与评分资格 |
 | retrieval_results.jsonl / retrieval_results.csv | 所有成功检索的Top20原Chunk/Doc/File ID、页/section、原分数及来源；JSONL保留字符来源与Hash，不复制正文 |
