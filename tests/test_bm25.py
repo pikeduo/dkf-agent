@@ -322,9 +322,9 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
     assert session.results[0].closed
 
 
-@pytest.mark.parametrize('clone_statement', [False, True])
-def test_snapshot_bounds_id_batch_before_hashing_full_sources(clone_statement):
-    """原语句及克隆按SQL结构核对批次屏障，外层不能重新连接全库Chunk或解析其JSON。"""
+@pytest.mark.parametrize('streaming_statement', [False, True], ids=['base', 'streaming'])
+def test_snapshot_bounds_id_batch_before_hashing_full_sources(streaming_statement):
+    """原语句及生产流式执行选项均保留批次屏障，外层不能重新连接全库Chunk或解析其JSON。"""
     kb_id, doc_id = uuid4(), uuid4()
     chunk_ids = [UUID(int=number) for number in range(1, tool.SOURCE_BATCH_SIZE + 1)]
     candidates = tool.source_statement(kb_id, [doc_id], ids_only=True)
@@ -334,9 +334,14 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources(clone_statement):
     assert 'document_chunks.doc_id IN' in candidate_sql and 'documents.status IN' in candidate_sql
     assert candidates._limit_clause.value == tool.MAX_CORPUS_CHUNKS + 1
     statement = tool.source_statement(kb_id, [doc_id], snapshot=True, chunk_ids=chunk_ids)
-    if clone_statement:
-        statement = visitors.cloned_traverse(statement, {}, {})
+    if streaming_statement:
+        # source_cursor只通过生成式执行选项复制语句；底层深遍历会干扰ORM的CTE列绑定。
+        original_sql = str(statement.compile(dialect=postgresql.dialect()))
+        statement = statement.execution_options(yield_per=tool.SOURCE_BATCH_SIZE)
+        assert statement.get_execution_options()['yield_per'] == tool.SOURCE_BATCH_SIZE
     compiled = statement.compile(dialect=postgresql.dialect())
+    if streaming_statement:
+        assert str(compiled) == original_sql
     batch = next(value for value in visitors.iterate(statement)
         if isinstance(value, CTE) and value.name == 'bm25_source_batch')
     batch_sql = str(batch.element.compile(dialect=postgresql.dialect()))
