@@ -322,8 +322,9 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
     assert session.results[0].closed
 
 
-def test_snapshot_bounds_id_batch_before_hashing_full_sources():
-    """物化完整批次来源列后再核对范围和Hash，外层不能重新连接全库Chunk或解析其JSON。"""
+@pytest.mark.parametrize('clone_statement', [False, True])
+def test_snapshot_bounds_id_batch_before_hashing_full_sources(clone_statement):
+    """原语句及克隆按SQL结构核对批次屏障，外层不能重新连接全库Chunk或解析其JSON。"""
     kb_id, doc_id = uuid4(), uuid4()
     chunk_ids = [UUID(int=number) for number in range(1, tool.SOURCE_BATCH_SIZE + 1)]
     candidates = tool.source_statement(kb_id, [doc_id], ids_only=True)
@@ -333,6 +334,8 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources():
     assert 'document_chunks.doc_id IN' in candidate_sql and 'documents.status IN' in candidate_sql
     assert candidates._limit_clause.value == tool.MAX_CORPUS_CHUNKS + 1
     statement = tool.source_statement(kb_id, [doc_id], snapshot=True, chunk_ids=chunk_ids)
+    if clone_statement:
+        statement = visitors.cloned_traverse(statement, {}, {})
     compiled = statement.compile(dialect=postgresql.dialect())
     batch = next(value for value in visitors.iterate(statement)
         if isinstance(value, CTE) and value.name == 'bm25_source_batch')
@@ -353,14 +356,16 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources():
             pending.extend((relation.left, relation.right))
         else:
             relations.append(relation)
-    assert any(relation is batch for relation in relations)
-    assert all(relation is not DocumentChunk.__table__ for relation in relations)
+    # ORM生成FROM时可能克隆CTE；核对表达式结构，不能依赖Python对象身份。
+    assert len(relations) == 3  # 批次CTE、Document和KnowledgeBase，不允许额外的全表连接。
+    assert any(relation.compare(batch) for relation in relations)
+    assert all(not relation.compare(DocumentChunk.__table__) for relation in relations)
     source_array = next(value for value in visitors.iterate(statement.selected_columns['source_hash'])
         if isinstance(value, FunctionElement) and value.name == 'jsonb_build_array')
-    assert all(column.table is batch for column in tuple(source_array.clauses)[:len(expected) - 1])
+    assert all(column.table.compare(batch) for column in tuple(source_array.clauses)[:len(expected) - 1])
     text_conversion = next(value for value in visitors.iterate(statement.selected_columns['text_hash'])
         if isinstance(value, FunctionElement) and value.name == 'convert_to')
-    assert tuple(text_conversion.clauses)[0].table is batch
+    assert tuple(text_conversion.clauses)[0].table.compare(batch)
     assert 'OFFSET' not in str(compiled) and chunk_ids in compiled.params.values()
     assert ['READY', 'PARTIAL_READY'] in compiled.params.values() and [doc_id] in compiled.params.values()
     assert {'source_parse_task_id', 'source_chunk_task_id', 'embedding_task_id'} <= set(
