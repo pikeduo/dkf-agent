@@ -48,8 +48,17 @@ def run_lock(run):
             lock_file(stream.fileno(), unlock=True)
 
 
-def make_plan(source_run, *, single_count=10, office_count=5, seed=34):
-    """从阶段33冻结题目按身份选题，不读取检索成绩；默认最多20次单请求问答。"""
+def llm_policy(settings=None):
+    """只读当前主备开关以冻结单题请求上界；不创建服务、校验密钥或联网。"""
+    if settings is None:
+        from app.core.config import get_settings
+        settings = get_settings()
+    fallback = settings.llm_fallback_enabled
+    return {"fallback": fallback, "llm_calls_per_case_max": 2 if fallback else 1}
+
+
+def make_plan(source_run, *, single_count=10, office_count=5, seed=34, settings=None):
+    """从阶段33按身份固定选题，冻结现有主备策略；不读取检索成绩或发送请求。"""
     from scripts.stage33_common import load_dataset, select_questions
     from scripts.stage33_runtime import check_scope, scope_identity
     if not re.fullmatch(r"stage33_run_[0-9]+", source_run) or not 10 <= single_count <= 50:
@@ -120,7 +129,7 @@ def make_plan(source_run, *, single_count=10, office_count=5, seed=34):
         "bm25_corpus_limits": backend["bm25_corpus_limits"],
         "documents": documents, "index_snapshot": snapshot, "cases": cases,
         "policy": {"single_count": single_count, "office_count": office_count,
-            "llm_calls_per_case_max": 1, "fallback": False, "automatic_judge": False,
+            **llm_policy(settings), "automatic_judge": False,
             "selection": "identity_hash_without_retrieval_scores"}}
 
 
@@ -145,10 +154,11 @@ def safe_error(exc):
     if isinstance(exc, Stage33Error):
         return "STAGE33_" + exc.code
     from app.services.llm import ERRORS as llm_errors
+    from app.services.deepseek import ERRORS as deepseek_errors
     from app.services.rag.synthesis import ERRORS as rag_errors
     from app.services.rag.evidence import ERRORS as evidence_errors
     code = getattr(exc, "code", None)
-    return code if isinstance(code, str) and code in set(llm_errors) | set(rag_errors) | set(evidence_errors) else "EVALUATION_RUNTIME"
+    return code if isinstance(code, str) and code in set(llm_errors) | set(deepseek_errors) | set(rag_errors) | set(evidence_errors) else "EVALUATION_RUNTIME"
 
 
 def case_path(run, case):
@@ -171,16 +181,35 @@ def load_records(run, plan):
     return records
 
 
+def request_count(record):
+    """按逐请求意图计数；旧单次请求记录仍可离线报告，不改写原结果。"""
+    if "llm_attempts" in record:
+        return len(record["llm_attempts"])
+    return int(bool(record.get("llm_attempted", False)))
+
+
+def reserved_calls(records, per_case):
+    """中断题保守占完整单题上界，其他题按已保存意图计数，不把预算当成实际收费。"""
+    return sum(max(per_case, request_count(r)) if r["status"] == "STARTED" else request_count(r)
+               for r in records.values())
+
+
 def execute(run, plan, runtime, *, max_cloud_calls, limit):
-    """串行执行未开始题；请求前落盘意图，结果与失败均保留，续跑不重发旧题。"""
+    """串行执行新题；主备分别落盘意图及计预算，失败/中断题永不自动重发。"""
     records = load_records(run, plan)
     pending = [c for c in plan["cases"] if c["case_id"] not in records][:limit]
-    # STARTED按一次可能已发生的请求保守计费，不因进程中断重新获得预算。
-    reserved = sum(r["status"] == "STARTED" or r.get("llm_attempted", False) for r in records.values())
-    if max_cloud_calls < reserved + len(pending):
+    policy = {name: plan["policy"][name] for name in ("fallback", "llm_calls_per_case_max")}
+    per_case = policy["llm_calls_per_case_max"]
+    if (type(policy["fallback"]) is not bool or type(per_case) is not int
+            or per_case != (2 if policy["fallback"] else 1)):
+        raise Stage34Error("LLM_POLICY_CHANGED")
+    reserved = reserved_calls(records, per_case)
+    if max_cloud_calls < reserved + len(pending) * per_case:
         raise Stage34Error("CLOUD_BUDGET")
     if not pending:
         return records
+    if runtime.cloud_policy() != policy:
+        raise Stage34Error("LLM_POLICY_CHANGED")
     runtime.validate_snapshot(plan)
     identity = runtime.identity()
     identity_path = run / "runtime.json"
@@ -192,15 +221,25 @@ def execute(run, plan, runtime, *, max_cloud_calls, limit):
         path = case_path(run, case)
         value = {"case_id": case["case_id"], "plan_sha256": plan_id(plan), "status": "STARTED",
             "started_at": datetime.now(UTC).isoformat(), "llm_attempted": False,
-            "runtime_sha256": digest(identity)}
+            "llm_attempts": [], "runtime_sha256": digest(identity)}
         write_json(path, value)
 
-        def before_cloud():
-            """真正调用唯一LLM服务之前保存意图；写盘失败时不得发出请求。"""
-            if value["llm_attempted"]:
+        def before_cloud(*, provider, model):
+            """每方最多一次且先落盘；新增意图写入失败不计已发送，也不得发出HTTP。"""
+            nonlocal reserved
+            ordinal = len(value["llm_attempts"])
+            providers = [identity["provider"]] + (["deepseek"] if policy["fallback"] else [])
+            if ordinal >= per_case or provider != providers[ordinal]:
                 raise Stage34Error("DUPLICATE_CLOUD_CALL")
-            value["llm_attempted"] = True
-            write_json(path, value)
+            if reserved >= max_cloud_calls:
+                raise Stage34Error("CLOUD_BUDGET")
+            attempt = {"ordinal": ordinal + 1, "provider": provider, "model": model,
+                "status": "STARTED", "started_at": datetime.now(UTC).isoformat()}
+            updated = dict(value, llm_attempted=True, llm_attempts=[*value["llm_attempts"], attempt])
+            write_json(path, updated)
+            value.update(updated)
+            reserved += 1
+            return attempt
 
         started = perf_counter()
         try:
@@ -211,6 +250,9 @@ def execute(run, plan, runtime, *, max_cloud_calls, limit):
             value.update(status="FAILED", error_code=safe_error(exc),
                 failure_stage=runtime.stage, timings_seconds=dict(runtime.timings),
                 final_evidence=list(runtime.final_evidence), raw_llm_output=runtime.raw_output)
+        responses = [a for a in value["llm_attempts"] if a["status"] == "COMPLETED"]
+        value["actual_provider"] = responses[-1]["provider"] if responses else None
+        value["actual_model"] = responses[-1]["model"] if responses else None
         value["timings_seconds"]["total"] = perf_counter() - started
         # 不覆盖已取得的答案；后置来源/快照失败单独标记，不通过重问修复。
         try:
@@ -222,7 +264,8 @@ def execute(run, plan, runtime, *, max_cloud_calls, limit):
         write_json(path, value)
         records[case["case_id"]] = value
         print(f"CASE：{len(records)}/{len(plan['cases'])}；{value['status']}")
-        if (value["index_check"] != "MATCHED" or value.get("error_code", "").startswith("LLM_")
+        if (value["index_check"] != "MATCHED" or value.get("error_code", "").startswith(("LLM_", "DEEPSEEK_"))
+                or value.get("status") == "FAILED" and value.get("failure_stage") == "llm"
                 or value.get("source_check", {}).get("status") == "FAILED"):
             break
     return records
@@ -302,8 +345,15 @@ def summarize(plan, records, reviews):
     return {"status": status, "planned": len(cases), "completed": len(completed),
         "failed": states["FAILED"], "interrupted": states["STARTED"], "not_attempted": len(cases) - len(records),
         "execution_complete": len(completed) == len(cases), "refusals": refused,
-        "llm_attempts_recorded": sum(r.get("llm_attempted", False) for r in records.values()),
-        "llm_attempts_uncertain": states["STARTED"], "actual_cost": None,
+        "llm_attempts_recorded": sum(request_count(r) for r in records.values()),
+        "llm_attempts_uncertain": sum(sum(a["status"] == "STARTED" for a in r["llm_attempts"])
+            if "llm_attempts" in r else int(r["status"] == "STARTED") for r in records.values()),
+        "llm_budget_reserved": reserved_calls(records, plan["policy"]["llm_calls_per_case_max"]),
+        "llm_requests_by_provider": dict(Counter(a["provider"] for r in records.values()
+                                                 for a in r.get("llm_attempts", []))),
+        "llm_response_cases_by_provider": dict(Counter(r["actual_provider"] for r in records.values()
+                                                       if r.get("actual_provider"))),
+        "fallback_cases": sum(request_count(r) > 1 for r in records.values()), "actual_cost": None,
         "post_index_matched": matched, "source_verified_answers": verified,
         "source_failed_answers": source_failed, "manual_pending_cases": pending,
         "snapshot_limitations": any(r.get("index_check") != "MATCHED" for r in records.values()),
@@ -321,7 +371,7 @@ def summarize(plan, records, reviews):
 
 
 def report(run, plan):
-    """仅从本地检查点生成摘要和评审表；已有人工评分永不自动覆盖。"""
+    """离线汇总逐方请求/原结果及人工评分；不改旧记录，不访问模型或云端。"""
     records = load_records(run, plan)
     review_path = run / "reviews.json"
     reviews = read_json(review_path) if review_path.exists() else []
@@ -335,6 +385,8 @@ def report(run, plan):
     lines = ["# 阶段34 RAG质量评测", "", f"状态：{result['status']}。",
         f"计划 {result['planned']}；完成 {result['completed']}；失败 {result['failed']}；"
         f"中断 {result['interrupted']}；未执行 {result['not_attempted']}；拒答 {result['refusals']}。", "",
+        f"请求意图 {result['llm_attempts_recorded']}；预算占额 {result['llm_budget_reserved']}；"
+        f"备用题数 {result['fallback_cases']}；逐方请求 {result['llm_requests_by_provider']}。", "",
         "| 人工指标 | 通过/总数 | 比率 | 已评题数 |", "|---|---:|---:|---:|"]
     for name, metric in result["manual_metrics"].items():
         rate = f"{metric['rate']:.2%}" if metric["rate"] is not None else "待评分"

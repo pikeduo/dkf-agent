@@ -255,24 +255,30 @@ class FallbackLLMService:
             raise
 
 
-def create_llm_service(settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None) -> ChatCompletionService | FallbackLLMService:
-    """默认只实例化所选服务；显式启用才冻结独立备用服务，任何构造失败不触发HTTP。"""
+def create_llm_service(settings: Settings | None = None, *, transport: httpx.BaseTransport | None = None,
+                       service_wrapper=None) -> ChatCompletionService | FallbackLLMService:
+    """按配置构造原切换策略；可选薄代理逐提供方记账，不替换Fallback判断或触发HTTP。"""
     try:
         config = settings if settings is not None else get_settings()
     except Exception:
         raise LLMError("LLM_CONFIG") from None
+
+    def wrap(service):
+        """在组合备用策略前包装独立服务；默认原样返回，保留各方配置与异常。"""
+        return service if service_wrapper is None else service_wrapper(service)
+
     if config.llm_provider == "deepseek":
         if getattr(config, "llm_fallback_enabled", False):
             raise LLMError("LLM_CONFIG")
         from app.services.deepseek import DeepSeekService
-        return DeepSeekService(config, transport=transport)
+        return wrap(DeepSeekService(config, transport=transport))
     if config.llm_provider == "custom":
         from app.services.custom_llm import CustomLLMService
-        primary = CustomLLMService(config, transport=transport)
+        primary = wrap(CustomLLMService(config, transport=transport))
         if getattr(config, "llm_fallback_enabled", False):
             if config.llm_fallback_provider != "deepseek":
                 raise LLMError("LLM_CONFIG")
             from app.services.deepseek import DeepSeekService
-            return FallbackLLMService(primary, DeepSeekService(config, transport=transport))
+            return FallbackLLMService(primary, wrap(DeepSeekService(config, transport=transport)))
         return primary
     raise LLMError("LLM_CONFIG")

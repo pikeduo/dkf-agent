@@ -25,17 +25,17 @@ def build_parser():
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--allow-cloud", action="store_true", help="确认题单问题与最终证据外传及费用")
-    parser.add_argument("--max-cloud-calls", type=int, default=0, help="本run累计请求上限；中断请求保守计一次")
+    parser.add_argument("--max-cloud-calls", type=int, default=0, help="本run累计请求上限；含主备各次请求及中断保守预留")
     parser.add_argument("--limit", type=int, default=1, help="本次最多新执行题数，默认先验证1题")
     return parser
 
 
 def main(argv=None):
-    """收费步骤单独许可；报告只读本地结果，不因resume重试中断或失败的收费请求。"""
+    """收费许可及主备预算分别前置；只续跑新题，报告不加载模型或请求云端。"""
     args = build_parser().parse_args(argv)
     try:
         run = run_directory(args.run)
-        if not 1 <= args.limit <= 200 or not 0 <= args.max_cloud_calls <= 200:
+        if not 1 <= args.limit <= 200 or not 0 <= args.max_cloud_calls <= 400:
             raise Stage34Error("BUDGET_ARGUMENTS")
         if args.step == "evaluate" and args.execute and not args.allow_cloud:
             raise Stage34Error("CLOUD_PERMISSION_REQUIRED")
@@ -44,7 +44,8 @@ def main(argv=None):
         plan = make_plan(args.source_run, single_count=args.single_count,
             office_count=args.office_count, seed=args.sample_seed) if args.step == "plan" else load_plan(run)
         if not args.execute:
-            print(f"DRY_RUN：固定{len(plan['cases'])}题；最多每题1次LLM请求；Fallback关闭；"
+            print(f"DRY_RUN：固定{len(plan['cases'])}题；最多每题{plan['policy']['llm_calls_per_case_max']}次LLM请求；"
+                  f"Fallback={'开启' if plan['policy']['fallback'] else '关闭'}；"
                   "未请求云端/加载模型/连接数据库/写报告。")
             return 0
         with run_lock(run):

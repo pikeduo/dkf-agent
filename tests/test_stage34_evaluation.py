@@ -12,9 +12,10 @@ from scripts.stage33_common import digest, read_json, write_json
 from scripts.stage34_runtime import MeteredLLM, TimedComponent
 
 
-def fixture_plan(count=3):
-    """只创建内存题单字段，不生成原件、解析结果或真实验收样本。"""
+def fixture_plan(count=3, *, fallback=False):
+    """只创建内存题单及明确请求策略，不生成原件、解析结果或真实验收样本。"""
     return {"version": tool.VERSION, "kb_id": str(UUID(int=1)), "source_scope": "scope",
+        "policy": {"fallback": fallback, "llm_calls_per_case_max": 2 if fallback else 1},
         "index_snapshot": {"documents": {"f": {"status": "PARTIAL_READY", "parse_quality": {"content": "PARTIAL"}}}},
         "cases": [{"case_id": digest([i])[:24], "question": "PRIVATE_QUESTION", "scope": "single",
             "doc_ids": [str(UUID(int=2))], "dataset": "ohr", "expected_behavior": "answerable",
@@ -38,16 +39,22 @@ class RuntimeStub:
         """提供固定内存身份，不加载模型或读取密钥。"""
         return {"provider": "custom", "fallback": False}
 
+    def cloud_policy(self):
+        """模拟关闭备用的固定策略，供模型加载前核对。"""
+        return {"fallback": False, "llm_calls_per_case_max": 1}
+
     def query(self, kb_id, question, *, doc_ids, before_cloud):
-        """验证题单范围原样传入；显式调用检查点后才模拟返回。"""
+        """范围原样传入；请求前保存具体提供方意图，响应后更新内存状态。"""
         self.calls.append((kb_id, question, doc_ids))
         self.stage = "llm"
-        before_cloud()
+        attempt = before_cloud(provider="custom", model="custom-model")
         if self.interrupt:
             raise KeyboardInterrupt
         if self.fail:
             from app.services.llm import LLMError
+            attempt.update(status="FAILED", error_code="LLM_NETWORK")
             raise LLMError("LLM_NETWORK", provider="custom")
+        attempt["status"] = "COMPLETED"
         return {"answer": {"status": "insufficient_evidence" if self.refuse else "success",
             "insufficient_evidence": self.refuse, "answer": "PRIVATE_ANSWER", "citations": []},
             "final_evidence": [], "source_check": {"status": "NOT_APPLICABLE" if self.refuse else "VERIFIED"},
@@ -76,6 +83,23 @@ def test_budget_rejection_precedes_models_and_query(tmp_path):
         tool.execute(tmp_path, fixture_plan(), runtime, max_cloud_calls=1, limit=2)
     assert runtime.calls == [] and runtime.snapshot_checks == 0
     assert not (tmp_path / "runtime.json").exists()
+
+
+def test_duplicate_provider_request_rejected_before_second_intent(tmp_path):
+    """即使调用方错误地重复主请求，也不得绕过单题上界或追加第二条意图。"""
+    class DuplicateRuntime(RuntimeStub):
+        """模拟同一题在成功后再次调用主提供方的错误编排。"""
+
+        def query(self, kb_id, question, *, doc_ids, before_cloud):
+            """先完成正常一次，再错误地申请重复请求；后者必须在HTTP前拒绝。"""
+            super().query(kb_id, question, doc_ids=doc_ids, before_cloud=before_cloud)
+            before_cloud(provider="custom", model="custom-model")
+
+    records = tool.execute(tmp_path, fixture_plan(2), DuplicateRuntime(), max_cloud_calls=2, limit=2)
+    record = next(iter(records.values()))
+    assert len(records) == len(record["llm_attempts"]) == 1
+    assert record["error_code"] == "STAGE34_DUPLICATE_CLOUD_CALL"
+    assert record["failure_stage"] == "llm" and record["status"] == "FAILED"
 
 
 def test_paid_network_failure_saved_and_not_retried(tmp_path, capsys):
@@ -184,7 +208,7 @@ def test_review_staleness_and_partial_review_stay_visible(tmp_path):
 
 
 def test_metered_service_persists_intent_before_one_original_call():
-    """计费代理不改Prompt，先写检查点，再调用原服务一次，不增备用或自动重试。"""
+    """独立提供方代理不改Prompt；先写意图，再调用原服务一次并记录结果。"""
     calls = []
 
     def complete(system, user):
@@ -192,13 +216,16 @@ def test_metered_service_persists_intent_before_one_original_call():
         calls.append((system, user))
         return "PRIVATE_RESPONSE"
 
-    def before_cloud():
-        """用调用顺序模拟原子意图回执。"""
+    def before_cloud(*, provider, model):
+        """用调用顺序模拟指定提供方的原子意图回执。"""
         assert calls == []
+        assert (provider, model) == ("custom", "custom-model")
         calls.append("intent")
+        return {"status": "STARTED"}
 
     runtime = RuntimeStub()
-    proxy = MeteredLLM(SimpleNamespace(complete=complete), runtime, before_cloud)
+    proxy = MeteredLLM(SimpleNamespace(provider="custom", model_name="custom-model", complete=complete),
+                       runtime, before_cloud)
     assert proxy.complete("system", "user") == "PRIVATE_RESPONSE"
     assert calls == ["intent", ("system", "user")] and runtime.raw_output == "PRIVATE_RESPONSE"
 
@@ -207,11 +234,12 @@ def test_checkpoint_failure_prevents_network_call():
     """保存请求意图失败时，服务不得先发请求再补检查点。"""
     calls = []
 
-    def before_cloud():
+    def before_cloud(**metadata):
         """模拟本地磁盘写入失败。"""
         raise OSError("PRIVATE_PATH")
 
-    proxy = MeteredLLM(SimpleNamespace(complete=lambda *args: calls.append(args)), RuntimeStub(), before_cloud)
+    proxy = MeteredLLM(SimpleNamespace(provider="custom", model_name="custom-model",
+        complete=lambda *args: calls.append(args)), RuntimeStub(), before_cloud)
     with pytest.raises(OSError):
         proxy.complete("system", "user")
     assert calls == []
@@ -254,8 +282,23 @@ def test_report_preserves_manual_reviews_and_does_not_call_runtime(tmp_path):
     assert "PRIVATE_QUESTION" in (tmp_path / "review_packet.md").read_text(encoding="utf-8")
 
 
+def test_legacy_one_request_record_still_reports_without_rewriting_it(tmp_path):
+    """旧Boolean单请求记录可离线汇总；缺实际提供方保持未知，不改原结果或评分身份。"""
+    plan = fixture_plan(1)
+    record = next(iter(tool.execute(tmp_path, plan, RuntimeStub(fail=True), max_cloud_calls=1, limit=1).values()))
+    for name in ("llm_attempts", "actual_provider", "actual_model"):
+        record.pop(name)
+    path = tool.case_path(tmp_path, plan["cases"][0])
+    write_json(path, record)
+    before = path.read_bytes()
+    result = tool.report(tmp_path, plan)
+    assert result["llm_attempts_recorded"] == result["llm_budget_reserved"] == 1
+    assert result["llm_requests_by_provider"] == result["llm_response_cases_by_provider"] == {}
+    assert path.read_bytes() == before
+
+
 def test_plan_selection_does_not_read_retrieval_results(tmp_path, monkeypatch):
-    """固定十个不同单文档及真实多文档范围；只读取冻结身份，不读取检索成绩挑题。"""
+    """固定选题不依赖成绩或主备开关；只冻结调用策略，不读取密钥或联网。"""
     from scripts import stage33_common, stage33_runtime
     documents = [{"file_id": f"f{i}", "sha256": f"sha{i}"} for i in range(14)]
     questions = [{"dataset": "ohr", "qa_id": f"q{i}", "question": f"问题{i}",
@@ -283,7 +326,8 @@ def test_plan_selection_does_not_read_retrieval_results(tmp_path, monkeypatch):
     monkeypatch.setattr(stage33_common, "select_questions", lambda data, **kwargs: data)
     monkeypatch.setattr(stage33_runtime, "check_scope", lambda *args, **kwargs: None)
     monkeypatch.setattr(stage33_runtime, "scope_identity", lambda rows: "scope")
-    plan = tool.make_plan("stage33_run_03", office_count=1)
+    config = SimpleNamespace(llm_fallback_enabled=False)
+    plan = tool.make_plan("stage33_run_03", office_count=1, settings=config)
     singles = [c for c in plan["cases"] if c["scope"] == "single" and c["purpose"] == "official_question"]
     assert len(singles) == 10 and len({c["doc_ids"][0] for c in singles}) == 10
     assert sum(c["scope"] == "multi" for c in plan["cases"]) == 1
@@ -294,5 +338,10 @@ def test_plan_selection_does_not_read_retrieval_results(tmp_path, monkeypatch):
     for c in controls:
         assert all(rows[fid]["doc_id"] not in c["doc_ids"] for fid in c["source_file_ids"])
     questions.reverse()
-    assert tool.make_plan("stage33_run_03", office_count=1) == plan
+    assert tool.make_plan("stage33_run_03", office_count=1, settings=config) == plan
+    config.llm_fallback_enabled = True
+    enabled = tool.make_plan("stage33_run_03", office_count=1, settings=config)
+    assert enabled["cases"] == plan["cases"]
+    assert enabled["policy"]["fallback"] is True and enabled["policy"]["llm_calls_per_case_max"] == 2
+    assert tool.plan_id(enabled) != tool.plan_id(plan)
     assert all("retrieval" not in name for name in reads)

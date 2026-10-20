@@ -4,7 +4,7 @@
 
 ## 范围与边界
 
-`scripts/evaluate_stage34.py`复用原Hybrid → Top30 → BGE重排Top5 → 项目RAG合成。只将原问题及最终证据正文交给当前`LLM_PROVIDER`；参考答案、官方断言、来源页标签不传给检索或LLM。复用已有`rag-cli`角色，日志仅含计数、状态和KB；正文仅保存在本地忽略目录`results/stage34/`。
+`scripts/evaluate_stage34.py`复用原Hybrid → Top30 → BGE重排Top5 → 项目RAG合成。原问题及最终证据正文交给当前`LLM_PROVIDER`；启用备用时也允许同一内容交给官方DeepSeek。参考答案、官方断言、来源页标签不传给检索或LLM。复用已有`rag-cli`角色，日志仅含计数、状态和KB；正文仅保存在本地忽略目录`results/stage34/`。
 
 默认从`stage33_run_03`的已选100题按身份Hash固定选择：
 
@@ -22,50 +22,66 @@
 项目根目录、已有`dkf-agent`环境；Codex未运行这些测试。
 
 ```powershell
-python -m pytest tests/test_stage34_evaluation.py tests/test_stage34_runtime.py tests/test_rag_query_engine.py tests/test_hybrid_retriever.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_stage34_evaluation.py tests/test_stage34_fallback.py tests/test_stage34_runtime.py tests/test_llm_fallback.py tests/test_llm_service.py tests/test_rag_query_engine.py -q -ra
 if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止问答评测" }
 
+# run_01保留原503失败和已发生请求；修复后另建run_02，不修改旧计划。
+$ragRunName = "stage34_run_02"
+$ragRun = "results/stage34/$ragRunName"
+
 # 默认只读预览：不查数据库、不加载模型、不联网、不写计划。
-python scripts/evaluate_stage34.py --source-run stage33_run_03
+python scripts/evaluate_stage34.py --run $ragRunName --source-run stage33_run_03
 if ($LASTEXITCODE -ne 0) { throw "计划预览失败" }
 
 # 仅保存本地计划和空评分报告。
-python scripts/evaluate_stage34.py --step plan --run stage34_run_01 --source-run stage33_run_03 --execute
+python scripts/evaluate_stage34.py --step plan --run $ragRunName --source-run stage33_run_03 --execute
 if ($LASTEXITCODE -ne 0) { throw "计划保存失败" }
 
-$ragRun = "results/stage34/stage34_run_01"
 $ragPlan = Get-Content "$ragRun/plan.json" -Raw -Encoding UTF8 | ConvertFrom-Json
+$ragPlan.plan.policy | Select-Object fallback,llm_calls_per_case_max
 $ragPlan.plan.cases | Select-Object case_id,dataset,scope,purpose,question | Format-Table -Wrap
 $ragPlan.plan.cases | Group-Object scope | Format-Table Name,Count
 ```
 
-计划只核对阶段32已有文件存在/大小及QA元数据，复验阶段33选题、索引观察和Hash绑定，不解析原件。已有计划不得覆盖；相同计划可加`--resume`，改变种子/数量或索引后另用新run。
+计划只核对阶段32已有文件存在/大小及QA元数据，复验阶段33选题、索引观察和Hash绑定，不解析原件。主备开关及单题请求上界同时冻结；开关不影响题目选择。现有配置开启备用时应显示`fallback=true`、`llm_calls_per_case_max=2`。已有计划不得覆盖；相同计划可加`--resume`，改变开关、种子/数量或索引后另用新run。`run_02`若已使用，手动改为未使用的新编号。
 
 ## 2. 显式付费：先执行一题
 
 以下步骤**由用户核对题单、提供方、外传权限和费用后手动执行**。需要现有PostgreSQL和本地BGE-M3、Reranker模型；无需CPU/GPU Worker、API、Redis或MinerU。CLI直接使用本地模型，首次加载占内存/显存，请勿并发评测。
 
-评测服务固定关闭Fallback，不更改`.env`；每题最多一个当前提供方POST。没有自动LLM裁判或额外评分费用。`--max-cloud-calls`为本run累计调用预算，包含中断后的保守预留，不是金额报价。空证据可不调用LLM；失败/超时仍可能已收费。
+评测沿用`.env`/进程中的现有配置，不强制关闭Fallback，也不修改配置。关闭时每题最多一次请求；开启`custom→deepseek`备用时，每题最多两次，须预留两次预算。仅网络错误、HTTP 5xx/429允许切换一次；401/403/其他普通4xx、坏JSON、非法引用、证据不足均不切换。两方接收相同原Prompt及最终证据，各用独立密钥/模型。没有自动LLM裁判。`--max-cloud-calls`为本run累计请求上限，包含中断题的保守占额；空证据可不调用LLM，失败/超时仍可能已收费。
 
 ```powershell
-python scripts/evaluate_stage34.py --step evaluate --run stage34_run_01 --execute --allow-cloud --max-cloud-calls 1 --limit 1
-if ($LASTEXITCODE -ne 0) { throw "首题执行或来源检查未通过，先查看本地记录" }
+$ragPerCaseMax = [int]$ragPlan.plan.policy.llm_calls_per_case_max
+python scripts/evaluate_stage34.py --step evaluate --run $ragRunName --execute --allow-cloud --max-cloud-calls $ragPerCaseMax --limit 1
+$ragFirstExit = $LASTEXITCODE
+
+# 先显示安全诊断，再决定是否续跑；不输出Key、Prompt或上游错误正文。
+if (Test-Path "$ragRun/cases") {
+    $ragFirst = Get-ChildItem "$ragRun/cases/*.json" | Select-Object -First 1 |
+        Get-Content -Raw -Encoding UTF8 | ConvertFrom-Json
+    $ragFirst | Select-Object status,error_code,failure_stage,actual_provider,actual_model,index_check,source_check
+    $ragFirst.llm_attempts | Format-Table ordinal,provider,model,status,http_status,error_code -AutoSize
+}
+if ($ragFirstExit -ne 0) { throw "首题未通过，停止续跑；查看上述失败阶段及逐次请求" }
 Get-Content "$ragRun/summary.md" -Encoding UTF8
 Invoke-Item "$ragRun/review_packet.md"
 ```
 
-`MANUAL_REVIEW_PENDING`或`EXECUTION_INCOMPLETE`表示评分待办/剩余题未执行，不要求100%正确率。实际异常、来源失败、中断或索引变化返回非零退出码。检查首题回答、最终证据及来源核对后再续跑。
+主服务正常只记录一条`custom`；若本次仍返回503，应再记录一条`deepseek`，成功响应的`actual_provider=deepseek`。备用失败时保留`DEEPSEEK_*`及对应HTTP状态，不再抹成通用错误。无需为了验证切换故意制造真实故障。`COMPLETED`表示流程完成，答案可能是合理拒答；`MANUAL_REVIEW_PENDING`或`EXECUTION_INCOMPLETE`表示评分待办/剩余题未执行，不要求100%正确率。实际异常、来源失败、中断或索引变化返回非零退出码。检查首题回答、最终证据及来源核对后再续跑。
 
 ## 3. 用户确认首题后续跑
 
 ```powershell
-$ragCallBudget = $ragPlan.plan.cases.Count
-python scripts/evaluate_stage34.py --step evaluate --run stage34_run_01 --execute --resume --allow-cloud --max-cloud-calls $ragCallBudget --limit $ragCallBudget
+$ragCaseCount = $ragPlan.plan.cases.Count
+$ragCallBudget = $ragCaseCount * [int]$ragPlan.plan.policy.llm_calls_per_case_max
+# 默认20题，备用开启则本run累计最多40次请求；首题已用次数包含在其中。
+python scripts/evaluate_stage34.py --step evaluate --run $ragRunName --execute --resume --allow-cloud --max-cloud-calls $ragCallBudget --limit $ragCaseCount
 ```
 
-每题先保存`STARTED`，HTTP前保存`llm_attempted`；写盘失败不得发请求。完成、失败或中断题都不自动重发；续跑只执行未开始题。中断按可能已收费计预算。LLM错误、来源核对失败或索引变化停止本轮。确需重测时，人工核对后使用新run、重新确认预算并保留旧记录，不删除检查点绕过保护。
+每题先保存`STARTED`，每个主/备用请求前保存`llm_attempts`意图，包括顺序、提供方和模型；写盘失败不得发送对应请求。后续意图及最终结果保存此前安全错误码/HTTP状态/耗时。`llm_attempted`保留兼容旧记录。完成、失败或中断题都不自动重发；续跑只执行未开始题。中断题保守占完整单题上界，开启备用为两次，占额不代表已实际计费。LLM错误、来源核对失败或索引变化停止本轮。确需重测时，人工核对后使用新run、重新确认预算并保留旧记录，不删除检查点绕过保护。
 
-每题前后通过短只读观察核对原200文档索引身份；有引用时另调用原`EvidenceService.resolve_answer`核对字符、Hash、来源和页语义。这不是长期锁库或不可变数据库快照。来源失败仍保存原答案并单独标明错误，不通过重问掩盖。运行时冻结实际模型、提供方、端点Hash、Prompt及主要代码Hash，变化后不能续写原run。
+每题前后通过短只读观察核对原200文档索引身份；有引用时另调用原`EvidenceService.resolve_answer`核对字符、Hash、来源和页语义。这不是长期锁库或不可变数据库快照。来源失败仍保存原答案并单独标明错误，不通过重问掩盖。运行时冻结双方模型、端点Hash、预算/超时、主备开关、Prompt及主要代码Hash，变化后不能续写原run。旧单请求计划遇到开启备用的新配置会在加载模型前报`LLM_POLICY_CHANGED`；旧run仍可离线生成报告，不改其原始结果。
 
 ## 4. 人工评分与离线报告
 
@@ -74,7 +90,7 @@ python scripts/evaluate_stage34.py --step evaluate --run stage34_run_01 --execut
 | 文件 | 用途 |
 |---|---|
 | `plan.json` | 问题、实际范围、官方依据、200文档质量/索引快照 |
-| `cases/*.json` | 同次最终证据、答案、引用、来源Trace、耗时和失败阶段 |
+| `cases/*.json` | 同次最终证据、答案、引用、来源Trace、逐方请求/实际响应方、耗时和失败阶段 |
 | `review_packet.md` | 人工阅读材料，包含全部最终证据，不代替完整原件 |
 | `reviews.json` | 人工评分；报告只补新题，不覆盖已有判断 |
 | `summary.json/md` | 执行覆盖、人工指标、缺口与分阶段耗时 |
@@ -88,10 +104,10 @@ python scripts/evaluate_stage34.py --step evaluate --run stage34_run_01 --execut
 未评分项保持`{"passed": null, "total": null}`。评分绑定原结果Hash，答案变化后不能沿用旧判断。来源结构通过不自动给语义分，满足OCB文件依赖不算回答正确。
 
 ```powershell
-python scripts/evaluate_stage34.py --step report --run stage34_run_01 --execute
+python scripts/evaluate_stage34.py --step report --run $ragRunName --execute
 Get-Content "$ragRun/summary.md" -Encoding UTF8
 ```
 
-报告保留计划总数、未执行、失败、中断、拒答、已评题数及分母，JSON另按OHR/OCB和实际问答范围分组。人工比率仅针对已评项，不代表全部4087题。耗时按完成题给出检索、重排、合成、来源反查和总耗时，包含冷启动，不当成稳定性能结论。90%忠实度是目标，未达标如实记录，不靠丢弃失败或空拒答提升。
+报告保留计划总数、未执行、失败、中断、拒答、已评题数及分母，JSON另按OHR/OCB和实际问答范围分组。`llm_attempts_recorded`计逐请求意图，`llm_requests_by_provider`计各方请求，`llm_response_cases_by_provider`计实际响应方，`fallback_cases`计启动备用的题数；旧记录缺提供方时保持未知，金额仍需人工核对账单。人工比率仅针对已评项，不代表全部4087题。耗时按完成题给出检索、重排、合成、来源反查和总耗时，包含冷启动，不当成稳定性能结论。90%忠实度是目标，未达标如实记录，不靠丢弃失败或空拒答提升。
 
 下一步返回首题/首轮结果，再按实际生成、召回、来源或拒答问题改进，并补尚未覆盖的数值/表格/公式与歧义案例。多轮体验及其他专项能力留到后续。
