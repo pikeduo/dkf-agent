@@ -38,6 +38,7 @@ ROLE_LABELS = MappingProxyType({
     "formula-binding-cli": "Formula Binding CLI",
     "formula-calculation-cli": "Formula Calculation CLI",
     "knowledge-agent-cli": "Knowledge Agent CLI",
+    "document-analysis-cli": "Document Analysis CLI",
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
     "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
@@ -139,6 +140,12 @@ LOCK_TIMEOUT_SECONDS = 1.0
 LOCK_RETRY_SECONDS = 0.01
 # 中文说明便于直接阅读；保留事件码便于跨 API/Worker 搜索和定位。
 EVENT_LABELS = {
+    "document_analysis.started": "开始只读文档结构、复杂度与质量评估",
+    "document_analysis.finished": "文档派生评估完成，未知项和人工核验状态保留",
+    "document_analysis.failed": "文档评估未完成，未修改解析结果或索引",
+    "specialty.started": "开始委托既有公式专项服务",
+    "specialty.finished": "公式专项步骤完成，语义与单位仍需人工核对",
+    "specialty.failed": "公式专项步骤安全失败，未自动重试",
     "office.pdf_started": "开始LibreOffice本地分页转换，尚未提交云任务",
     "office.pdf_completed": "Office转换PDF及来源回执已发布，尚未完成业务入库",
     "office.pdf_reused": "复用已核验的Office转换PDF，未重新运行引擎",

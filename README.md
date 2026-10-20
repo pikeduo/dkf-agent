@@ -627,17 +627,27 @@ python scripts/migrate_llm_env.py --apply
 
 PDF沿用物理页与点数bbox，图片为第1页/像素bbox，Office沿用逻辑页且bbox为空；来源一致不证明答案忠实度。详细契约、反查用法及人工核验见[Citation / Evidence](docs/CITATION_EVIDENCE.md)。
 
+### 文档结构、复杂度与质量评估
+
+`POST /api/knowledge/documents/analyze`接受`kb_id / doc_id`及可选`visual_pages`（1～5个不重复正整数页码，默认空）。默认只读ACTIVE库中READY/PARTIAL_READY文档的现有Block，返回派生目录层级、目录与正文的匹配、公开规则的复杂度分及质量提示，不修改原文、章节、解析质量或检索索引。每块只读取前512字符及整块字符数，超长或多行正文不会被裁成假标题。历史空序号、缺失字体/布局、未知总页数明确保留为未知。
+
+只有明确提供`visual_pages`才读取原PDF/图片并前后校验原件SHA256；最多5页、长边1024像素，在内存计算对比度、梯度和行投影方向。模糊/倾斜结论只是待人工确认的风险提示，空白、复杂图像或方向信号不足时为unknown；不OCR、不写图片、不转换Office、不访问云端。此预算仅适用于专项检查，不改变原解析/分页限制，也不是整个渲染过程的超时保证。
+
+已有PostgreSQL即可做默认评估，无需CPU/GPU Worker、Redis或本地模型。可先运行`python -m scripts.analyze_document`查看dry-run；用户显式`--kb-id <真实库UUID> --case outline --execute --output results/stage35/outline.json`会按已有标题Block选择真实文档并创建新报告，已有报告拒绝覆盖。`--case`还支持overview/formula/complexity/coverage/visual_review，找不到候选时如实报错；`--doc-id`可固定文档。报告包含标题片段，仅保存在受限本地目录。接口细节、规则和操作说明见[专项能力说明](docs/STAGE35_SPECIALTY.md)。
+
 ### 公式语义结构化
 
-Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`只处理指定READY文档中已有、完整的MinerU公式Block，核对Evidence后复用统一LLM工厂做一次逻辑结构化。默认不切换；仅启用上述双方授权Fallback时，运输类故障允许一次备用，原式/变量/来源校验不变。需已部署PostgreSQL与所需LLM配置，不需要GPU/Redis/Worker、新依赖或迁移；不新增HTTP接口，也不在上传或普通RAG中自动调用。
+Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc_id=None, allow_cloud=False)`只处理指定已索引文档中已有、完整的MinerU公式Block，核对Evidence后复用统一LLM工厂做一次逻辑结构化。默认不切换；仅启用上述双方授权Fallback时，运输类故障允许一次备用，原式/变量/来源校验不变。需已部署PostgreSQL与所需LLM配置，不需要GPU/Redis/Worker、新依赖或迁移；不在上传或普通RAG中自动调用。
 
 返回公式名称、原式、受限四则表达式、变量/含义及完整来源；未知含义为null，不改OCR原式或伪造页码。**只有明确`allow_cloud=True`才允许公式及相邻正文外传并接受本次费用**，异常不自动重试。结构合法不证明数学等价或语义准确，结果标记`manual_pending`；本功能不绑定变量值、不执行SymPy计算。
 
 用户可用`python -m scripts.stage27_formula_acceptance`查看默认dry-run说明，实际调用需真实业务ID及显式执行/云许可。详细输入选择、限制和手动验收见[公式语义说明](docs/FORMULA_SEMANTICS.md)。
 
+HTTP提供`/api/knowledge/formulas/discover /extract /bind /calculate`四个POST入口。`/discover`使用与`/search`相同的请求、原Hybrid/重排和本地模型，重新核对Evidence后返回完整MinerU公式候选，不调用LLM；空候选仅表示本次最多5个检索Chunk没有可用完整公式。`/extract`接受准确的`kb_id/doc_id/chunk_id/block_id`，逐次`allow_cloud=true`才允许外传及费用；不自动选中候选。`/bind`与`/calculate`接收原`FormulaBindingRequest`（formula/user_inputs/evidence_inputs），只读复核来源，复用定义，不再次调用LLM。补参流程、错误码与真实示例选择见[专项操作](docs/STAGE35_SPECIALTY.md)。
+
 ### 公式参数绑定
 
-`app.services.formula_binding.bind_formula_variables(formula, user_inputs=..., evidence_inputs=...)`消费已有公式定义：支持显式用户数值或指定文档引文，重新核对当前来源，缺参返回`need_variables`。数值使用字符串，单位保持原样；不猜值、不换算、不执行计算或LLM请求。只需现有PostgreSQL，不新增依赖、迁移、HTTP接口或Worker。
+`app.services.formula_binding.bind_formula_variables(formula, user_inputs=..., evidence_inputs=...)`消费已有公式定义：支持显式用户数值或指定文档引文，重新核对当前来源，缺参返回`need_variables`。数值使用字符串，单位保持原样；不猜值、不换算、不执行计算或LLM请求。只需现有PostgreSQL，不新增依赖、迁移或Worker；HTTP薄入口为上述`/formulas/bind`。
 
 `python -m scripts.stage28_formula_acceptance`默认dry-run；用户准备包含已有公式结果及参数的本地JSON后，通过`--input <文件> --execute`执行只读绑定。默认不显示数值/正文；详细输入契约与操作见[参数绑定说明](docs/FORMULA_SEMANTICS.md#阶段28参数识别与绑定)。
 

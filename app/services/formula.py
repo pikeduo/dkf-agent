@@ -236,6 +236,11 @@ def validate_formula_snapshot(formula: FormulaSemanticResult, trace: EvidenceTra
         raise FormulaError("FORMULA_SOURCE") from None
 
 
+def select_formula_source(trace: EvidenceTrace, block_id: UUID):
+    """供显式发现入口复用完整公式筛选；不调用LLM，原Hash/字符/唯一性规则保持一致。"""
+    return _context(trace, _uuid(block_id))[1]
+
+
 class FormulaService:
     """公式提取的唯一显式业务边界；不触发检索、模型加载、解析任务或数据库写入。"""
 

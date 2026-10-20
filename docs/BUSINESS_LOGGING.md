@@ -26,6 +26,7 @@
 | formula-binding-cli | Formula Binding CLI |
 | formula-calculation-cli | Formula Calculation CLI |
 | knowledge-agent-cli | Knowledge Agent CLI |
+| document-analysis-cli | Document Analysis CLI |
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |
@@ -62,6 +63,8 @@ LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次�
 阶段33入口使用`dataset-evaluation-cli`，`dataset_evaluation.started / finished`仅记录KB、固定步骤、文件/题目数量、结束状态、耗时和安全码；原问题、答案、断言、证据正文及模型路径只保留在本地受限评测报告，不进入业务日志。
 
 阶段34复用`rag-cli`角色；`rag_evaluation.started / finished`只记录KB、题数与评测状态。正式RAG沿用原日志；问题、参考答案、同次最终证据与原始模型内容只保存在忽略的本地结果目录，完成事件不表示语义质量通过。
+
+阶段35使用集中注册`document-analysis-cli`。`document_analysis.started / finished / failed`只记录库/文档ID、Block数、观测页数、固定状态、耗时与安全码；不记录标题、目录、原件路径、Hash或像素。HTTP公式薄门面使用`specialty.started / finished / failed`和固定operation，底层沿用原formula/evidence事件；不输出问题、原式、参数、计算结果或上游异常。finished只表示该步骤完成，不表示语义、单位、模糊/倾斜或整份解析质量已验收。
 
 Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_code`记录查询取消/锁不可用/连接/资源分类，`step`仅记录五位SQLSTATE；不增加日志字段，不记录SQL、参数、连接信息或驱动原文。57014只证明查询取消，不等同于已证实超时。BM25摘要失败沿用`batch_index / chunk_count`记录当前批次号与此前已检查的行数，`operation=SOURCE_IDS / SOURCE_HASH_BATCH`区分单次候选扫描和Hash批次，不记录候选ID；这些计数不表示已返回部分检索结果。`bm25.snapshot_finished.duration_ms`表示全量摘要耗时；索引事件的`duration_ms`表示后续锁等待、完整验证及构建/复用耗时；不逐批输出成功日志。`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`表示完整来源验证/全量摘要相同后的验证复用，均不跳过本题来源快照核对。
 

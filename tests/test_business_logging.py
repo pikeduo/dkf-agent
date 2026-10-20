@@ -147,6 +147,7 @@ def test_mineru_raw_result_events_keep_separate_statuses_without_private_payload
     ("formula-binding-cli", "Formula Binding CLI"),
     ("formula-calculation-cli", "Formula Calculation CLI"),
     ("knowledge-agent-cli", "Knowledge Agent CLI"),
+    ("document-analysis-cli", "Document Analysis CLI"),
     ("preset-cli", "Preset CLI"),
 ])
 def test_registered_process_roles_keep_exact_labels_and_real_pid(role, label):
