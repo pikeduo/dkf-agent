@@ -302,7 +302,7 @@ def test_async_boundary_does_not_use_base_callbacks_or_global_llm(monkeypatch):
 
 
 def test_existing_real_retriever_classes_share_query_service_and_readonly_sessions():
-    """两路共享一次Query编码；BM25分批扫描和命中取回在同一只读快照且保留SQL范围。"""
+    """两路只编码一次Query；BM25的ID、摘要、完整校验和命中取证四步共享只读快照。"""
     from bm25_stubs import StreamingSessionStub
 
     pytest.importorskip("rank_bm25", reason="缺少已声明rank-bm25；跳过不算通过")
@@ -328,7 +328,15 @@ def test_existing_real_retriever_classes_share_query_service_and_readonly_sessio
     assert all("document_chunks.doc_id IN" in str(session.statements[0]) for session in sessions)
     assert all(session.new == () and session.dirty == () for session in sessions)
     assert ["READY", "PARTIAL_READY"] in sessions[1].statements[0].compile().params.values()
-    assert len(sessions[1].statements) == 3 and all(result.closed for result in sessions[1].results)
+    statements = sessions[1].statements
+    assert len(statements) == 4 and all(result.closed for result in sessions[1].results)
+    # 核对各步职责，防止只修改SQL次数断言而漏掉重复扫描或命中范围退化。
+    candidate_ids, snapshot, corpus, evidence = statements
+    assert tuple(candidate_ids.selected_columns.keys()) == ("chunk_id",)
+    assert tuple(snapshot.selected_columns.keys()) == ("chunk_id", "text_bytes", "text_hash", "source_hash")
+    assert [chunk.chunk_id] in snapshot.compile().params.values()
+    assert "document_chunks.chunk_id IN" not in str(corpus)
+    assert [chunk.chunk_id] in evidence.compile().params.values()
 
 
 def test_summary_logs_are_chinese_safe_and_keep_upstream_failure_code(monkeypatch):
