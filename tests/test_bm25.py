@@ -324,7 +324,7 @@ def test_source_snapshot_enforces_full_corpus_budgets_and_closes_cursor(budget):
 
 @pytest.mark.parametrize('streaming_statement', [False, True], ids=['base', 'streaming'])
 def test_snapshot_bounds_id_batch_before_hashing_full_sources(streaming_statement):
-    """原语句及生产流式执行选项均保留批次屏障，外层不能重新连接全库Chunk或解析其JSON。"""
+    """流式选项保留Chunk和文档两道屏障，Hash外层只读受限CTE，不连接原始全表。"""
     kb_id, doc_id = uuid4(), uuid4()
     chunk_ids = [UUID(int=number) for number in range(1, tool.SOURCE_BATCH_SIZE + 1)]
     candidates = tool.source_statement(kb_id, [doc_id], ids_only=True)
@@ -345,6 +345,8 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources(streaming_statemen
     batch = next(value for value in visitors.iterate(statement)
         if isinstance(value, CTE) and value.name == 'bm25_source_batch')
     batch_sql = str(batch.element.compile(dialect=postgresql.dialect()))
+    documents = next(value for value in visitors.iterate(statement)
+        if isinstance(value, CTE) and value.name == 'bm25_documents')
     assert 'bm25_source_batch AS MATERIALIZED' in str(compiled)
     expected = [getattr(DocumentChunk, name).property.columns[0] for name in tool.SOURCE_CHUNK_FIELDS]
     actual = tuple(batch.element.selected_columns)
@@ -362,9 +364,10 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources(streaming_statemen
         else:
             relations.append(relation)
     # ORM生成FROM时可能克隆CTE；核对表达式结构，不能依赖Python对象身份。
-    assert len(relations) == 3  # 批次CTE、Document和KnowledgeBase，不允许额外的全表连接。
+    assert len(relations) == 2
     assert any(relation.compare(batch) for relation in relations)
-    assert all(not relation.compare(DocumentChunk.__table__) for relation in relations)
+    assert any(relation.compare(documents) for relation in relations)
+    assert all(relation.compare(batch) or relation.compare(documents) for relation in relations)
     source_array = next(value for value in visitors.iterate(statement.selected_columns['source_hash'])
         if isinstance(value, FunctionElement) and value.name == 'jsonb_build_array')
     assert all(column.table.compare(batch) for column in tuple(source_array.clauses)[:len(expected) - 1])
@@ -376,6 +379,54 @@ def test_snapshot_bounds_id_batch_before_hashing_full_sources(streaming_statemen
     assert {'source_parse_task_id', 'source_chunk_task_id', 'embedding_task_id'} <= set(
         value for value in compiled.params.values() if isinstance(value, str))
     assert 'document_chunks.embedding' not in str(compiled)
+
+
+@pytest.mark.parametrize('snapshot', [False, True], ids=['ids', 'hashes'])
+def test_document_generation_checks_are_materialized_before_chunk_checks(snapshot):
+    """文档级代次检查不随Chunk重复；摘要文档屏障仅从当前256项批次选父文档。"""
+    doc_id = uuid4()
+    options = {'snapshot': True, 'chunk_ids': [UUID(int=1)]} if snapshot else {'ids_only': True}
+    statement = tool.source_statement(uuid4(), [doc_id], **options)
+    documents = next(value for value in visitors.iterate(statement)
+        if isinstance(value, CTE) and value.name == 'bm25_documents')
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    document_where = str(documents.element.whereclause.compile(dialect=postgresql.dialect()))
+    outer_where = str(statement.whereclause.compile(dialect=postgresql.dialect()))
+    assert 'bm25_documents AS MATERIALIZED' in sql
+    assert 'documents.index_config' in document_where and 'documents.status IN' in document_where
+    assert 'documents.doc_id IN' in document_where and 'documents.kb_id =' in document_where
+    assert 'bm25_documents.processing_task_id' in outer_where and 'documents.index_config' not in outer_where
+    if snapshot:
+        assert 'SELECT bm25_source_batch.doc_id' in document_where
+        expected = [getattr(Document, name).property.columns[0] for name in tool.SOURCE_DOCUMENT_FIELDS]
+        assert len(documents.element.selected_columns) == len(expected)
+        assert all(column.shares_lineage(mapped)
+            for column, mapped in zip(documents.element.selected_columns, expected))
+    else:
+        assert tuple(documents.c.keys()) == ('doc_id', 'kb_id', 'processing_task_id')
+        assert 'document_chunks' not in document_where
+    # BM25不依赖当前Query模型，不能把Dense的模型资格限制带入关键词分支。
+    assert 'model' not in statement.compile().params.values()
+
+
+@pytest.mark.parametrize('count', [0, 1, 5])
+def test_source_timings_are_aggregated_once_per_query_not_per_batch(monkeypatch, count):
+    """空库不伪造Hash耗时，多批核对仅汇总两条事件且不泄露候选或正文。"""
+    monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
+    kb_id, events = uuid4(), []
+
+    def log(event, **fields):
+        """收集当前调用的安全数值，确认没有逐批成功日志。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(tool, 'log_event', log)
+    _, items = tool.read_source_snapshot(SqlSessionStub([
+        stored_pair(kb_id, number) for number in range(1, count + 1)]), kb_id)
+    expected = ['bm25.source_ids_observed'] + (['bm25.source_hashes_observed'] if count else [])
+    assert [event for event, _ in events] == expected and len(items) == count
+    assert all(fields['duration_ms'] >= 0 and fields['status'] == 'SUCCESS'
+        and fields['chunk_count'] == count for _, fields in events)
+    assert all(set(fields) == {'kb_id', 'status', 'duration_ms', 'chunk_count'} for _, fields in events)
 
 
 @pytest.mark.parametrize('count', [0, 1, 2, 3, 4, 5])
@@ -496,7 +547,7 @@ def test_candidate_ids_are_validated_before_hash_batch(ids):
 
 
 def test_candidate_fetch_failure_after_hash_batch_preserves_sqlstate_and_closes_cursors(monkeypatch):
-    """候选游标续读取消时保留最初SQLSTATE/进度；关闭次生异常不得覆盖根因。"""
+    """续读取消保留SQLSTATE/进度/部分耗时，关闭次生错误和计时事件均不得覆盖根因。"""
     from test_retrieval_database import driver_error
 
     monkeypatch.setattr(tool, 'SOURCE_BATCH_SIZE', 2)
@@ -521,9 +572,18 @@ def test_candidate_fetch_failure_after_hash_batch_preserves_sqlstate_and_closes_
 
     session = SqlSessionStub(rows)
     session.result_type = FailedCandidates
+    events = []
+
+    def log(event, **fields):
+        """捕获失败前已完成及中断阶段的聚合计时，不写磁盘。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(tool, 'log_event', log)
     with pytest.raises(tool.BM25RetrievalError, match='BM25_DATABASE_QUERY_CANCELED') as caught:
         tool.read_source_snapshot(session, first[0].kb_id)
     assert caught.value.database_diagnostic == {'reason': 'QUERY_CANCELED', 'sqlstate': '57014'}
     assert caught.value.source_progress == {'operation': 'SOURCE_IDS', 'batch_index': 2, 'chunk_count': 2}
     assert len(session.results) == 2 and all(result.closed for result in session.results)
+    assert [event for event, _ in events] == ['bm25.source_ids_observed', 'bm25.source_hashes_observed']
+    assert all(fields['status'] == 'FAILED' and fields['duration_ms'] >= 0 for _, fields in events)
     assert 'PRIVATE' not in str(caught.value)

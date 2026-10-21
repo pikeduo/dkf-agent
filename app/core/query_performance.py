@@ -11,8 +11,11 @@ _TRACE = ContextVar("query_performance", default=None)
 _EVENT_METRICS = {
     "rag.query_encoded": "query_embedding_ms",
     "dense.finished": "dense_retrieval_ms", "dense.empty": "dense_retrieval_ms",
+    "dense.database_observed": "dense_database_ms",
     "bm25.finished": "bm25_ms", "bm25.empty": "bm25_ms",
     "bm25.snapshot_finished": "bm25_snapshot_ms",
+    "bm25.source_ids_observed": "bm25_source_ids_ms",
+    "bm25.source_hashes_observed": "bm25_source_hashes_ms",
     "bm25.index_built": "bm25_index_ms", "bm25.index_reused": "bm25_index_ms",
     "fusion.finished": "fusion_ms", "fusion.empty": "fusion_ms",
     "rerank.finished": "rerank_ms", "rerank.scored": "rerank_model_ms",
@@ -25,6 +28,9 @@ _FAILURE_STAGES = {
     "llm.call_failed": "llm", "rag.failed": "rag", "knowledge.failed": "service",
     "rag.adapter_failed": "embedding_or_adapter",
 }
+_DATABASE_ERRORS = frozenset(prefix + "_DATABASE" + suffix
+    for prefix in ("DENSE", "BM25")
+    for suffix in ("", "_QUERY_CANCELED", "_LOCK_UNAVAILABLE", "_CONNECTION", "_RESOURCE"))
 
 
 @dataclass
@@ -35,10 +41,11 @@ class QueryPerformance:
     failure_stage: str | None = None
     bm25_index_reused: bool | None = None
     sqlstate: str | None = None
+    database_error_code: str | None = None
     total_ms: float | None = None
 
     def observe(self, event, fields):
-        """从白名单事件聚合墙钟时间，失败优先保留最内层阶段，不保存任意错误字符串。"""
+        """聚合固定阶段墙钟，首个失败保留合法SQLSTATE和有限数据库码，不保存原始错误。"""
         metric, duration = _EVENT_METRICS.get(event), fields.get("duration_ms")
         if metric and type(duration) in {int, float} and math.isfinite(duration) and duration >= 0:
             self.timings_ms[metric] = self.timings_ms.get(metric, 0.0) + duration
@@ -49,11 +56,16 @@ class QueryPerformance:
             state = fields.get("step")
             if isinstance(state, str) and len(state) == 5 and state.isascii() and state.isalnum():
                 self.sqlstate = state
+            code = fields.get("error_code")
+            if (event in {"dense.failed", "bm25.failed"} and isinstance(code, str)
+                    and code in _DATABASE_ERRORS and code.startswith(self.failure_stage.upper() + "_DATABASE")):
+                self.database_error_code = code
 
     def snapshot(self):
         """返回独立数值快照；父阶段包含子阶段，不能相加声称总耗时。"""
         return {"timings_ms": dict(self.timings_ms), "total_ms": self.total_ms,
                 "failure_stage": self.failure_stage, "sqlstate": self.sqlstate,
+                "database_error_code": self.database_error_code,
                 "bm25_index_reused": self.bm25_index_reused}
 
 

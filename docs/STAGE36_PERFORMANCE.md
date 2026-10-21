@@ -1,6 +1,8 @@
 # 阶段36：性能基线与并发观察
 
-本轮先提供可重复的本地检索测量工具，尚无真实性能结论。阶段35的专项语义问题按用户要求暂缓，原验收状态保留。运行不会上传、重新解析、重建Chunk/向量或改变READY/PARTIAL_READY，也没有LLM/MinerU请求入口。
+`stage36_run_01`已完成首轮观察：10/50份范围均测量成功；200份/86528个Chunk在并发1时4/6成功、两次Dense查询取消（SQLSTATE 57014），并发2未测。索引MATCHED、新增云调用0，整体仍为INCOMPLETE_OR_INVALID。全库BM25复用词频索引时，来源核对仍约16～126秒；这些记录定位了需要优化的阶段，未取得服务器执行计划，不能认定具体数据库瓶颈已被证明。
+
+当前改动将文档资格提前物化，避免在Chunk关联中重复求值文档JSON，并补充分项耗时及内层数据库码；精确Top-K、全部Hash字段、256项批次、10秒语句和2秒锁等待保持。本页命令已改用新`stage36_run_02`，优化效果尚未验证。阶段35的专项问题继续暂缓。运行不会上传、重新解析、重建Chunk/向量或改变READY/PARTIAL_READY，没有LLM/MinerU请求入口。
 
 ## 测量范围
 
@@ -22,7 +24,7 @@
 以下用例由用户执行；内存桩覆盖计时隔离、注入范围保护、调度上限、失败/中断恢复和报告分母，不运行真实文档、数据库、模型或收费API：
 
 ```powershell
-python -m pytest tests/test_query_performance.py tests/test_stage36_performance.py tests/test_knowledge_search.py tests/test_business_logging.py -q -ra
+python -m pytest tests/test_retrieval_database.py tests/test_dense_sql.py tests/test_dense_retriever.py tests/test_bm25.py tests/test_bm25_retriever.py tests/test_hybrid_retriever.py tests/test_query_performance.py tests/test_stage36_performance.py tests/test_knowledge_search.py tests/test_business_logging.py -q -ra
 if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止性能测量" }
 ```
 
@@ -30,12 +32,12 @@ if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止性能测量" }
 
 ## 冻结计划并先测一组
 
-以下整段可以粘贴到PowerShell。失败会停止本段，避免继续读取不存在的报告。`stage36_run_01`必须是新目录；已有记录保留，换新run不要删除旧记录。
+以下整段可以粘贴到PowerShell。先确认上面的Mock回归通过，再运行本段。失败会停止本段，避免继续读取不存在的报告。`stage36_run_02`必须是新目录；若已存在则换一个未使用的run名，不删除旧记录。保持同一源run、默认题单、seed、范围、并发和预算，便于与run_01比较；代码指纹已经改变，不能在run_01续跑新代码。
 
 ```powershell
 & {
     $ErrorActionPreference = "Stop"
-    $perfRun = "stage36_run_01"
+    $perfRun = "stage36_run_02"
     python scripts/evaluate_stage36.py --step plan --run $perfRun --source-run stage34_run_03 --execute
     if ($LASTEXITCODE -ne 0) { throw "计划未通过，停止测量" }
 
@@ -55,7 +57,7 @@ if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止性能测量" }
 ```powershell
 & {
     $ErrorActionPreference = "Stop"
-    $perfRun = "stage36_run_01"
+    $perfRun = "stage36_run_02"
     python scripts/evaluate_stage36.py --step evaluate --run $perfRun --execute --resume --limit-groups 6
     if ($LASTEXITCODE -ne 0) { throw "续跑有失败或索引变化，保留报告并停止" }
 
@@ -78,10 +80,12 @@ if ($LASTEXITCODE -ne 0) { throw "回归未通过，停止性能测量" }
 
 ## 报告口径与下一步
 
-`summary.md`显示总表、分阶段P50/P95与失败摘要。`report.json`补充所有尝试/成功延迟、成功QPS、空结果数、预热明细、初始化耗时、CPU时间、RSS及失败阶段。`groups/*.json`保留逐请求固定阶段数值，不保存问题、命中文本、向量或任意异常原文。
+`summary.md`显示总表、分阶段P50/P95与失败摘要。`report.json`补充所有尝试/成功延迟、成功QPS、空结果数、预热明细、初始化耗时、CPU时间、RSS及失败阶段。失败组另聚合`database_error_codes`，逐请求保留`database_error_code`与SQLSTATE，外层RAG_RETRIEVAL不再遮住已观测的内层分类。旧记录缺少内层码时保留缺失，不凭SQLSTATE补造。`groups/*.json`保留逐请求固定阶段数值，不保存问题、命中文本、向量或任意异常原文。
+
+新增分项为`dense_database_ms`（SQL执行及结果读取）、`bm25_source_ids_ms`（候选ID构造/读取/校验）和`bm25_source_hashes_ms`（全部Hash批次构造/读取/校验）。这是客户端墙钟，包含驱动等待与Python处理，不是数据库服务器纯执行时间；仍包含在原Dense或BM25摘要阶段内。失败请求保留已观测分项，见逐请求记录；成功分位数不混入失败，未执行的阶段不补零。
 
 计时有包含关系：Dense包含Query编码；fusion包含Dense/BM25；重排包含模型评分；历史合成包含LLM。不能相加这些父子阶段。预热与初始化单列，不进入测量分位数；`--warmup 0`时首个请求可能含BM25构建成本。请求耗时从工作线程开始计，不包含HTTP和提交前排队；批次QPS包含线程调度与检查点落盘。
 
 RSS只观察本CLI批次前后，峰值为进程生命周期峰值；CPU时间是本进程消耗，不是整机利用率。没有测GPU显存/利用率、数据库服务进程资源、解析入库耗时、故障注入或完整在线RAG并发。阶段34已有成功RAG/LLM耗时单列在`historical_rag`，失败记录数量保留；它们不是本轮同配置数据，不能拼成本轮全链路耗时。
 
-收到真实报告后，先根据阶段耗时和资源确认瓶颈，再选一个改动，用新run在相同题单、范围、并发和环境下比较；代码指纹变更必须记录。三种物理库规模、长表/低质量专项压力、故障恢复与付费RAG并发仍待另行规划及用户验收。本轮不宣称任何优化收益。
+复测首先检查200份组是否完成、是否仍出现查询取消，再对比同范围成功P50/P95、BM25摘要及资源占用；不能只看更快的成功子集而忽略失败率。若仍取消或来源核对很慢，根据内层码及ID/Hash分项再确定下一处检查，必要时由用户在本机核对数据库日志和执行计划；不先放宽超时或跳过来源。三种物理库规模、长表/低质量专项压力、故障恢复与付费RAG并发仍待另行规划及用户验收，本轮不宣称优化收益。

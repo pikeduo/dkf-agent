@@ -27,6 +27,7 @@
 - 中文采用字符+相邻二元片段，无jieba/外部分词模型。支持关键词基线，不宣称专业分词、语义同义词或专有名词消歧；中文长词可能部分匹配，须人工核对。欧洲小数、特殊Unicode符号和复杂单位规范化仍有边界。
 - 只对实际词项重叠的Chunk计分，避免BM25Plus背景delta分把零命中Chunk当Evidence。同分按原chunk_id UUID升序稳定排序。
 - 每个Retriever最多保留一个进程内词频索引。每题仅执行一次完整资格筛选，服务端游标按UUID递增产出候选ID；每次取至多256个明确ID，先按主键物化本批摘要和资格检查所需的完整Chunk列（含text/metadata，不含embedding），再复核范围并计算原文字节数、正文SHA256和完整来源SHA256。外层只读取批次CTE，不重新连接整张Chunk表，使来源JSON的资格检查和Hash都限定在本批。避免每页反复扫描/排序全库候选，不用OFFSET，也不一次物化全库ID列表。候选游标和Hash批次在同一连接、同一REPEATABLE READ事务中，逐行严格核对返回ID、顺序和数量；缺行/重复/错序即失败。摘要配方、UUID顺序和累计行数/字节预算保持；摘要覆盖全部Adapter输入、完整JSONB元数据及当前代次，由PostgreSQL 17内置函数计算，无需扩展/迁移。不能只凭数量、任务ID或命中项判断全库未变。
+- 候选扫描与Hash批次另用`bm25_documents AS MATERIALIZED`提前核对文档范围、ACTIVE/READY和文档代次，避免随每个Chunk重复求值文档JSON。Hash批次的文档屏障仅检查本批Chunk所属文档，外层只关联Chunk批次与合格文档两个CTE；完整来源字段及Hash数组顺序不变。BM25仍不绑定当前Query模型，逐项Chunk代次及完整来源校验继续保留；256项批次和全库Hash成本未消失，真实收益待测。
 - 首次或摘要变化时，在同一REPEATABLE READ快照逐行完整Adapter校验，临时Node随行释放，正文/ID必须与摘要一致；完全相同且此前已验证的摘要才复用验证结果。仅元数据变化重新验证，但正文未变可保留词频。热查询不传输/解码全库正文和JSON，评分后只读Top-K完整证据，并核对ID/正文Hash与当前摘要；缺失或改变整批失败，未命中项损坏也会使摘要失效。Node不缓存，检索范围不缩减。
 - 建索引只持有一块临时词项，相同词项字符串在本次构建共享，不积攒整库词项数组或使用全局永久词表。失效索引先释放再重建；并发请求已经持有的索引会在其查询结束后释放。Top-K使用有界堆，原评分与同分UUID规则保持。数据库查询/Adapter/构建失败不返回旧缓存。
 - 不保存磁盘索引、不使用pickle、不新建业务表或第二份Node真相；重启后自然重建。每题仍核对全部合格语料摘要，冷启动另需完整读取/校验；首次构建和数据库摘要扫描仍有CPU/内存成本，吞吐待验收。
@@ -49,6 +50,8 @@ core首次导入仍可能检查NLTK缓存，由用户按[Adapter说明](LLAMA_IN
 数据库错误采用`BM25_DATABASE_QUERY_CANCELED / BM25_DATABASE_LOCK_UNAVAILABLE / BM25_DATABASE_CONNECTION / BM25_DATABASE_RESOURCE`及原通用码。首次执行、流式拉取或关闭游标捕获SQLSTATE；关闭次生错误不覆盖首次原因。57014不单独证明语句超时，未知状态不猜测。摘要失败日志沿用`batch_index / chunk_count`标明失败批次和此前已检查的行数，`operation=SOURCE_IDS / SOURCE_HASH_BATCH`区分候选读取和Hash批次；整题失败，不返回半份摘要或旧缓存，不记录ID列表。10秒语句及2秒锁等待预算保持不变。日志`step`仅保留SQLSTATE；`index_built/index_reused`的`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`区分本次完整校验与摘要相同的验证复用。
 
 复用每日中文日志：bm25.started、snapshot_finished、index_built/index_reused、finished/empty/failed。`snapshot_finished.duration_ms`单列全量摘要耗时；索引事件的`duration_ms`单列锁等待、完整验证和索引构建/复用耗时，最终事件为整题总耗时；不逐批刷成功日志。只记录UUID/范围数量/Chunk数/复用/耗时/安全码，不写词项、Query、正文、Node、SQL、索引摘要或异常原文。BM25批量Node转换使用`log_success=False`，只省略逐项成功日志，错误仍记；原Adapter调用默认行为不变。SQL echo/第三方Tracing仍必须禁用。
+
+来源核对每题另汇总`bm25.source_ids_observed`和`bm25.source_hashes_observed`，分别累计候选读取/校验和全部Hash批次构造/读取/校验的客户端墙钟，不逐批输出。失败也保留已观测耗时，固定状态为FAILED，不表示部分检索成功；空库未执行Hash时不补零。显式性能采集分别映射`bm25_source_ids_ms / bm25_source_hashes_ms`，二者包含在`bm25_snapshot_ms`内，不是服务器SQL耗时。
 
 ## 用户执行单测
 

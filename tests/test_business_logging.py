@@ -67,6 +67,18 @@ def test_bm25_snapshot_and_progress_logs_use_registered_safe_summary(events):
     assert 'PRIVATE' not in events.getvalue()
 
 
+def test_retrieval_subphase_logs_only_contain_registered_numeric_summary(events):
+    """读取阶段只显示固定事件、状态及耗时，拒绝SQL、候选列表和原始错误。"""
+    names = ('dense.database_observed', 'bm25.source_ids_observed', 'bm25.source_hashes_observed')
+    for event in names:
+        logs.log_event(event, status='FAILED', duration_ms=12.5,
+            sql='PRIVATE_SQL', chunk_ids=['PRIVATE_IDS'], error='PRIVATE_ERROR', text='PRIVATE_BODY')
+    result = records(events)
+    assert [row['event'] for row in result] == list(names)
+    assert all(row['status'] == 'FAILED' and row['duration_ms'] == 12.5 for row in result)
+    assert 'PRIVATE' not in events.getvalue() and '业务事件' not in events.getvalue()
+
+
 def test_office_pdf_events_only_log_safe_summary_with_registered_role(events):
     """转换CLI角色集中注册，过程/费用许可日志不暴露配置、路径、凭据和引擎输出。"""
     assert logs.ROLE_LABELS["office-pdf-cli"] == "Office PDF CLI"

@@ -63,7 +63,7 @@ class RuntimeStub:
         self.scopes.append(scope["documents"])
 
     def search(self, plan, scope, case):
-        """模拟固定阶段事件，并用屏障确保并发请求真正交错。"""
+        """模拟阶段和数据库内层错误事件，用屏障确保并发请求真正交错。"""
         with self.lock:
             self.calls += 1
             self.active += 1
@@ -75,7 +75,7 @@ class RuntimeStub:
                 raise KeyboardInterrupt
             log_event("dense.finished", duration_ms=3)
             if self.fail:
-                log_event("bm25.failed", step="57014")
+                log_event("bm25.failed", step="57014", error_code="BM25_DATABASE_QUERY_CANCELED")
                 raise tool.Stage36Error("REQUEST_FAILED")
             return 0
         finally:
@@ -146,7 +146,7 @@ def test_failure_stops_current_round_and_resume_does_not_retry_failed_group(tmp_
 
 
 def test_measurement_failures_keep_full_attempt_denominator_and_safe_stage(tmp_path, plan, monkeypatch):
-    """测量组保留成功与失败分母；真实失败阶段和SQLSTATE不被外层通用码覆盖。"""
+    """保留全部测量分母、原始数据库分类和SQLSTATE，不被外层通用码覆盖。"""
     plan.update(warmup=0, concurrency=[1])
     monkeypatch.setattr(tool, "historical_rag_timings", lambda plan: {})
     tool.execute(tmp_path, plan, RuntimeStub(fail=True), limit_groups=3)
@@ -155,9 +155,27 @@ def test_measurement_failures_keep_full_attempt_denominator_and_safe_stage(tmp_p
     assert group["status"] == "FAILED" and group["planned"] == group["attempted"] == group["failed"] == 6
     assert group["all_attempt_latency_ms"]["count"] == 6 and group["success_latency_ms"]["count"] == 0
     assert group["failure_stages"] == {"bm25": 6}
+    assert group['database_error_codes'] == {'BM25_DATABASE_QUERY_CANCELED': 6}
     rows = read_json(tool.group_paths(tmp_path, plan)[0][2])["rows"]
     assert all(row["sqlstate"] == "57014" and "PRIVATE" not in str(row) for row in rows)
+    assert all(row['database_error_code'] == 'BM25_DATABASE_QUERY_CANCELED' for row in rows)
+    assert 'BM25_DATABASE_QUERY_CANCELED' in (tmp_path / 'summary.md').read_text(encoding='utf-8')
     assert result["groups"][1]["status"] == "NOT_RUN"
+
+
+def test_old_rows_without_database_code_remain_readable_without_guessing_cause(tmp_path, plan, monkeypatch):
+    """旧结果缺少内层错误码时报告保持空分类，不凭57014补造或洗白历史原因。"""
+    monkeypatch.setattr(tool, 'historical_rag_timings', lambda plan: {})
+    tool.execute(tmp_path, plan, RuntimeStub(fail=True))
+    path = tool.group_paths(tmp_path, plan)[0][2]
+    value = read_json(path)
+    for row in value['warmup']:
+        del row['database_error_code']
+    write_json(path, value)
+    result = tool.report(tmp_path, plan)
+    assert result['status'] == 'INCOMPLETE_OR_INVALID'
+    assert result['groups'][0]['database_error_codes'] == {}
+    assert result['groups'][0]['warmup'][0]['sqlstate'] == '57014'
 
 
 def test_interrupt_preserves_started_group_and_complete_resume_loads_no_models(tmp_path, plan):

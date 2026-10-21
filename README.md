@@ -822,6 +822,8 @@ MinerU API 成功不等于结果 CDN 可下载。下载失败先查 parse-jobs�
 
 Dense/BM25检索的数据库错误使用`*_DATABASE_QUERY_CANCELED / *_DATABASE_LOCK_UNAVAILABLE / *_DATABASE_CONNECTION / *_DATABASE_RESOURCE`及原通用码，日志`step`保留安全SQLSTATE。57014表示查询取消，可能为超时或人工取消；不凭十秒耗时直接认定数据库故障类型，也不自动重建文档或重试。查询仍为只读，语句10秒/锁等待2秒预算不变。
 
+检索日志另汇总Dense数据库读取、BM25候选ID与全量Hash核对耗时，失败仍保留已观测阶段；客户端耗时包含驱动等待及校验。性能报告会单列内层数据库安全码，具体测量和故障定位见[性能说明](docs/STAGE36_PERFORMANCE.md)。
+
 MinerU当前归一化版本为`mineru-adapter-v4`：先从同ZIP逐页原始结构/V1提取可靠内容，再尝试严格结构增强。局部合并失败不再一律拒绝整份正文；覆盖不足保留PARTIAL_READY及告警，不冒充完整解析。旧v1/v2/v3成功缓存隔离，不删除、覆盖或重标旧产物。详见[MinerU质量分层与本地重放](docs/MINERU_CLOUD.md#v4基础提取与质量分层)。
 
 出现`MERGE_EVIDENCE`时，成功Parse Cache可能不存在，但当前Worker会在Adapter前独立归档原ZIP。先按[只读离线诊断](docs/MINERU_CLOUD.md#merge_evidence只读诊断与原batch复用)核对原Batch归档、Hash、版本及具体子原因；旧任务确实缺归档时才人工确认从**原已完成Batch**取得结果，不申请新Batch。诊断不会恢复FAILED任务或新增批次，不能用Force重解析代替结果复用。

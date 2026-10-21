@@ -8,17 +8,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from heapq import nsmallest
 from itertools import islice
+from time import perf_counter
 from uuid import UUID
 
 from sqlalchemy import String, Text, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import aliased, load_only
 
+from app.core.business_logging import log_event
 from app.models import Document, DocumentChunk, KnowledgeBase
 from app.services.indexing import INDEX_VERSION
 from app.services.rag.database import DATABASE_REASONS, database_diagnostic, database_error_codes
 from app.services.rag.dense import (
-    DEFAULT_TOP_K, DenseRetrievalError, validate_doc_ids, validate_query, validate_scope,
+    DEFAULT_TOP_K, DenseRetrievalError, document_eligibility, validate_doc_ids, validate_query, validate_scope,
 )
 
 BM25_VERSION = "rank-bm25-plus-v1"
@@ -124,7 +126,7 @@ def tokenize(text: str, *, max_terms=MAX_CORPUS_TOKENS) -> list[str]:
 
 
 def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapshot=False, ids_only=False):
-    """候选只筛选一次；摘要先按明确ID物化完整来源列，外层不再连接整张Chunk表。"""
+    """扫描/摘要先物化文档资格；摘要仍按明确ID物化完整Chunk列，不重扫全库。"""
     if (type(snapshot) is not bool or type(ids_only) is not bool or (snapshot and ids_only)
             or (snapshot and chunk_ids is None) or (ids_only and chunk_ids is not None)):
         raise BM25RetrievalError("BM25_INPUT")
@@ -143,32 +145,44 @@ def source_statement(kb_id, doc_ids=None, *, limits=None, chunk_ids=None, snapsh
             .where(DocumentChunk.chunk_id.in_(chunk_ids))
             .cte("bm25_source_batch").prefix_with("MATERIALIZED", dialect="postgresql"))
         chunk = aliased(DocumentChunk, batch)
-    config = Document.index_config
-    parse_id = cast(Document.processing_task_id, String)
-    filters = [chunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
-        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]), Document.index_task_id.is_not(None),
-        config["version"].as_string() == INDEX_VERSION,
-        config["source_parse_task_id"].as_string() == parse_id,
-        config["source_chunk_task_id"].as_string() == cast(Document.chunk_task_id, String),
-        config["embedding_task_id"].as_string() == cast(Document.embedding_task_id, String),
-        chunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id]
+    document = Document
+    if snapshot or ids_only:
+        # 文档级JSON条件与Chunk级来源校验分开，避免每个Chunk重复解析同份文档配置。
+        names = SOURCE_DOCUMENT_FIELDS if snapshot else ("doc_id", "kb_id", "processing_task_id")
+        qualified = (select(*(getattr(Document, name) for name in names))
+            .select_from(Document)
+            .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id)
+            .where(*document_eligibility(kb_id, doc_ids)))
+        if snapshot:
+            # 仅检查本批父文档；IN子查询只读已物化的至多256个Chunk，不连接全库。
+            qualified = qualified.where(Document.doc_id.in_(select(batch.c.doc_id).correlate(None)))
+        qualified = qualified.cte("bm25_documents").prefix_with("MATERIALIZED", dialect="postgresql")
+        document = qualified.c
+    filters = [chunk.kb_id == kb_id,
+        chunk.chunk_metadata["source_parse_task_id"].as_string() == cast(document.processing_task_id, String)]
     if doc_ids is not None:
         filters.append(chunk.doc_id.in_(doc_ids))
     if chunk_ids is not None and not snapshot:
         filters.append(chunk.chunk_id.in_(chunk_ids))
     if snapshot:
         fields = [getattr(chunk, field) for field in SOURCE_CHUNK_FIELDS if field != "text"]
-        fields += [getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS]
+        fields += [getattr(document, field) for field in SOURCE_DOCUMENT_FIELDS]
         return (select(chunk.chunk_id, func.octet_length(chunk.text).label("text_bytes"),
                 func.sha256(func.convert_to(chunk.text, "UTF8")).label("text_hash"),
                 func.sha256(func.convert_to(cast(func.jsonb_build_array(*fields), Text), "UTF8")).label("source_hash"))
             .select_from(chunk)
-            .join(Document, (chunk.doc_id == Document.doc_id) & (chunk.kb_id == Document.kb_id))
-            .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
+            .join(qualified, (chunk.doc_id == document.doc_id) & (chunk.kb_id == document.kb_id))
+            .where(*filters)
             .order_by(chunk.chunk_id.asc()).execution_options(populate_existing=True))
-    statement = (select(DocumentChunk.chunk_id) if ids_only else select(DocumentChunk, Document).options(
+    if ids_only:
+        return (select(DocumentChunk.chunk_id)
+            .select_from(DocumentChunk)
+            .join(qualified, (DocumentChunk.doc_id == document.doc_id) & (DocumentChunk.kb_id == document.kb_id))
+            .where(*filters).order_by(DocumentChunk.chunk_id.asc()).limit(budget.chunks + 1))
+    filters.extend(document_eligibility(kb_id, doc_ids))
+    statement = select(DocumentChunk, Document).options(
         load_only(*(getattr(DocumentChunk, field) for field in SOURCE_CHUNK_FIELDS), raiseload=True),
-        load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True)))
+        load_only(*(getattr(Document, field) for field in SOURCE_DOCUMENT_FIELDS), raiseload=True))
     return (statement.select_from(DocumentChunk)
         .join(Document, (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id))
         .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id).where(*filters)
@@ -203,11 +217,12 @@ def source_cursor(session, statement):
 
 
 def read_source_snapshot(session, kb_id, doc_ids=None, *, limits=None):
-    """同一事务流式枚举一次ID并逐批核对摘要；累计预算、严格对齐，失败不返回半份指纹。"""
+    """同快照枚举ID并核对全部摘要；累计两类阶段墙钟，失败也不返回半份指纹。"""
     budget = checked_limits(limits)
     digest = hashlib.sha256(("bm25-source-snapshot-v1:" + BM25_VERSION + ":" + TOKENIZER_VERSION).encode("ascii"))
     items, total, last, batch_index = [], 0, None, 0
     operation = "SOURCE_IDS"
+    timings, phase_started, status = {}, perf_counter(), "FAILED"
     try:
         statement = source_statement(kb_id, doc_ids, limits=limits, ids_only=True)
         with source_cursor(session, statement) as candidates:
@@ -231,7 +246,8 @@ def read_source_snapshot(session, kb_id, doc_ids=None, *, limits=None):
                     last = chunk_id
                 if len(items) + len(chunk_ids) > budget.chunks:
                     raise BM25RetrievalError("BM25_LIMIT")
-                operation = "SOURCE_HASH_BATCH"
+                timings[operation] = timings.get(operation, 0.0) + perf_counter() - phase_started
+                operation, phase_started = "SOURCE_HASH_BATCH", perf_counter()
                 statement = source_statement(kb_id, doc_ids, limits=limits,
                     snapshot=True, chunk_ids=chunk_ids)
                 count = 0
@@ -255,10 +271,21 @@ def read_source_snapshot(session, kb_id, doc_ids=None, *, limits=None):
                         count += 1
                 if count != len(chunk_ids):
                     raise BM25RetrievalError("BM25_RESULT")
+                timings[operation] = timings.get(operation, 0.0) + perf_counter() - phase_started
+                operation, phase_started = "SOURCE_IDS", perf_counter()
             operation = "SOURCE_IDS"
+        status = "SUCCESS"
     except BM25RetrievalError as exc:
         exc.source_progress = {"operation": operation, "batch_index": batch_index, "chunk_count": len(items)}
         raise
+    finally:
+        timings[operation] = timings.get(operation, 0.0) + perf_counter() - phase_started
+        # 每题至多两条汇总，包含语句构造、驱动等待和行校验，不冒称服务器执行时间。
+        for phase, event in (("SOURCE_IDS", "bm25.source_ids_observed"),
+                             ("SOURCE_HASH_BATCH", "bm25.source_hashes_observed")):
+            if phase in timings:
+                log_event(event, kb_id=kb_id, status=status, chunk_count=len(items),
+                          duration_ms=timings[phase] * 1000)
     return digest.hexdigest(), items
 
 

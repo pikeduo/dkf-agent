@@ -112,6 +112,62 @@ def test_exact_candidates_materialize_only_ids_and_scalar_distances():
     assert "dense_eligible.cosine_distance ASC, dense_eligible.chunk_id ASC" in compiled
 
 
+def test_document_barrier_checks_identity_before_joining_all_chunks():
+    """完整模型和代次仅在文档屏障求值，Chunk来源条件仍在全候选排序前保留。"""
+    doc_id, identity = uuid4(), model_identity()
+    statement = dense_statement(uuid4(), [1.0] + [0.0] * 1023, identity, doc_ids=[doc_id])
+    documents = next(value for value in visitors.iterate(statement)
+        if isinstance(value, CTE) and value.name == 'dense_documents')
+    candidates = next(value for value in visitors.iterate(statement)
+        if isinstance(value, CTE) and value.name == 'dense_eligible')
+    compiled = documents.element.compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert tuple(documents.c.keys()) == ('doc_id', 'kb_id', 'processing_task_id')
+    assert 'document_chunks' not in sql and 'LIMIT' not in sql
+    assert identity in compiled.params.values() and INDEX_VERSION in compiled.params.values()
+    assert ['READY', 'PARTIAL_READY'] in compiled.params.values() and 'ACTIVE' in compiled.params.values()
+    assert 'documents.doc_id IN' in sql
+    assert 'source_parse_task_id' in compiled.params.values()
+    assert 'source_chunk_task_id' in compiled.params.values() and 'embedding_task_id' in compiled.params.values()
+    # 仅检查候选自身谓词，不把嵌套文档CTE内合法的配置读取误算成逐Chunk检查。
+    predicates = str(candidates.element.whereclause.compile(dialect=postgresql.dialect()))
+    assert 'document_chunks.metadata' in predicates and 'dense_documents.processing_task_id' in predicates
+    assert 'documents.index_config' not in predicates
+    assert 'dense_documents AS MATERIALIZED' in str(statement.compile(dialect=postgresql.dialect()))
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_database_duration_survives_success_or_query_failure(monkeypatch, failed):
+    """SQL及结果读取均留一条有界耗时，失败不标成功、不记录原始异常或正文。"""
+    from app.services.rag import dense as tool
+
+    class TimedSession(SqlSessionStub):
+        """仅模拟数据库读取结果和异常，不进行真实计时压测。"""
+
+        def all(self):
+            """按参数返回原行或抛私有驱动错误，供生产捕获边界校验。"""
+            if failed:
+                raise SQLAlchemyError('PRIVATE_SQL_PASSWORD')
+            return super().all()
+
+    events = []
+
+    def log(event, **fields):
+        """捕获聚合事件，避免落盘并确认不携带驱动原文。"""
+        events.append((event, fields))
+
+    monkeypatch.setattr(tool, 'log_event', log)
+    session = TimedSession([])
+    if failed:
+        with pytest.raises(DenseRetrievalError, match='DENSE_DATABASE'):
+            select_dense_hits(session, uuid4(), [1.0] + [0.0] * 1023, model_identity())
+    else:
+        assert select_dense_hits(session, uuid4(), [1.0] + [0.0] * 1023, model_identity()) == []
+    assert len(events) == 1 and events[0][0] == 'dense.database_observed'
+    assert events[0][1]['status'] == ('FAILED' if failed else 'SUCCESS')
+    assert events[0][1]['duration_ms'] >= 0 and 'PRIVATE' not in repr(events)
+
+
 def test_omitted_document_scope_keeps_stage17_full_kb_statement():
     """省略/None 不添加文档谓词，保留阶段17全库语义，但显式空范围不能被当作 None。"""
     kb_id, vector = uuid4(), [1.0] + [0.0] * 1023

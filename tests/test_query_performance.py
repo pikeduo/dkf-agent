@@ -59,13 +59,41 @@ def test_threads_and_async_tasks_keep_independent_query_contexts():
 
 
 def test_failed_inner_stage_and_sqlstate_survive_outer_generic_error():
-    """只保留最初失败阶段与合法SQLSTATE，丢弃任意正文和异常内容。"""
+    """最初数据库分类和SQLSTATE不被外层通用错误覆盖，任意正文和异常内容丢弃。"""
     with capture_query_performance() as trace:
         logs.log_event("bm25.failed", step="57014", error_code="BM25_DATABASE_QUERY_CANCELED")
         logs.log_event("fusion.failed", step="SECRET_PASSWORD", error="SECRET")
         logs.log_event("bm25.index_reused", duration_ms=2)
     assert trace.failure_stage == "bm25" and trace.sqlstate == "57014"
+    assert trace.database_error_code == 'BM25_DATABASE_QUERY_CANCELED'
     assert trace.bm25_index_reused is True and "SECRET" not in str(trace.snapshot())
+
+
+@pytest.mark.parametrize('event,code,expected', [
+    ('dense.failed', 'DENSE_DATABASE_QUERY_CANCELED', 'DENSE_DATABASE_QUERY_CANCELED'),
+    ('bm25.failed', 'BM25_DATABASE', 'BM25_DATABASE'),
+    ('dense.failed', 'BM25_DATABASE_RESOURCE', None),
+    ('bm25.failed', 'SECRET_PASSWORD', None),
+    ('bm25.failed', ['SECRET_PASSWORD'], None),
+    ('fusion.failed', 'DENSE_DATABASE_CONNECTION', None),
+])
+def test_database_error_code_only_accepts_fixed_matching_branch(event, code, expected):
+    """仅Dense/BM25原始失败事件能写对应白名单码，不从外层或任意字符串推断根因。"""
+    with capture_query_performance() as trace:
+        observe_query_event(event, {'error_code': code})
+    assert trace.snapshot()['database_error_code'] == expected
+    assert 'SECRET' not in str(trace.snapshot())
+
+
+def test_database_and_source_subphase_timings_preserve_partial_failure_observations():
+    """数据库读取和ID/Hash分项分别汇总，失败仍留已观测耗时，不代替整题总时间。"""
+    with capture_query_performance() as trace:
+        logs.log_event('dense.database_observed', duration_ms=7, status='SUCCESS')
+        logs.log_event('bm25.source_ids_observed', duration_ms=3, status='FAILED')
+        logs.log_event('bm25.source_hashes_observed', duration_ms=5, status='FAILED')
+        logs.log_event('bm25.failed', step='57014', error_code='BM25_DATABASE_QUERY_CANCELED')
+    assert trace.timings_ms == {'dense_database_ms': 7, 'bm25_source_ids_ms': 3, 'bm25_source_hashes_ms': 5}
+    assert trace.failure_stage == 'bm25' and 'bm25_snapshot_ms' not in trace.timings_ms
 
 
 @pytest.mark.parametrize("value", [None, True, -1, float("nan"), float("inf"), "SECRET"])

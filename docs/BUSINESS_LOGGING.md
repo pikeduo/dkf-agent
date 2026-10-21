@@ -10,7 +10,7 @@
 
 ### 进程角色
 
-阶段36通过默认关闭的`capture_query_performance()`在当前请求ContextVar内观察既有白名单事件，只保留固定阶段耗时、缓存复用布尔值、失败阶段与合法SQLSTATE。并发线程/异步任务各自显式开启，不保存Query、正文或异常原文，不改变业务结果；`performance.started/finished/failed`记录本地测量批次摘要，继续使用每日合并日志。
+阶段36通过默认关闭的`capture_query_performance()`在当前请求ContextVar内观察白名单事件，只保留固定阶段耗时、缓存复用布尔值、失败阶段、合法SQLSTATE及有限的`database_error_code`。数据库码只接受首个Dense/BM25失败事件所属分支的现有固定分类，外层RAG通用码不能覆盖；缺失时不凭SQLSTATE推断。并发线程/异步任务各自显式开启，不保存Query、正文或异常原文，不改变业务结果；`performance.started/finished/failed`记录本地测量批次摘要，继续使用每日合并日志。
 
 唯一集中映射为`app/core/business_logging.py`的只读`ROLE_LABELS`。所有入口显式配置与用途一致的role，不改操作系统进程名称/PID，不接受请求/业务字段覆盖；未知或非字符串角色仅显示固定“未知进程”，任意外部角色文本不进入日志。新增role同次更新注册表、入口、测试和必要文档，不伪装为API/Worker。
 
@@ -70,6 +70,8 @@ LibreOffice使用`office.pdf_started/completed/reused/failed`区分本地首次�
 阶段35使用集中注册`document-analysis-cli`。`document_analysis.started / finished / failed`只记录库/文档ID、Block数、观测页数、固定状态、耗时与安全码；不记录标题、目录、原件路径、Hash或像素。HTTP公式薄门面使用`specialty.started / finished / failed`和固定operation，底层沿用原formula/evidence事件；不输出问题、原式、参数、计算结果或上游异常。finished只表示该步骤完成，不表示语义、单位、模糊/倾斜或整份解析质量已验收。
 
 Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_code`记录查询取消/锁不可用/连接/资源分类，`step`仅记录五位SQLSTATE；不增加日志字段，不记录SQL、参数、连接信息或驱动原文。57014只证明查询取消，不等同于已证实超时。BM25摘要失败沿用`batch_index / chunk_count`记录当前批次号与此前已检查的行数，`operation=SOURCE_IDS / SOURCE_HASH_BATCH`区分单次候选扫描和Hash批次，不记录候选ID；这些计数不表示已返回部分检索结果。`bm25.snapshot_finished.duration_ms`表示全量摘要耗时；索引事件的`duration_ms`表示后续锁等待、完整验证及构建/复用耗时；不逐批输出成功日志。`SOURCE_VALIDATED / SOURCE_VALIDATION_REUSED`表示完整来源验证/全量摘要相同后的验证复用，均不跳过本题来源快照核对。
+
+`dense.database_observed`记录SQL及结果读取的客户端墙钟；`bm25.source_ids_observed / bm25.source_hashes_observed`分别汇总ID读取/校验和Hash批次构造/读取/校验。仅使用既有kb_id、status、chunk_count、duration_ms白名单字段，每题至多三条汇总；失败也保留观测，空库不补未执行的Hash耗时。包含驱动等待及Python处理，不能称为纯数据库执行时间；后续证据校验失败不改变此前阶段已完成的事实，整题仍按原失败事件判断。
 
 | 事件 | 含义 |
 |---|---|

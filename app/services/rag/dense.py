@@ -4,12 +4,14 @@ import math
 import re
 from dataclasses import dataclass
 from numbers import Real
+from time import perf_counter
 from uuid import UUID
 
 from sqlalchemy import String, cast, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, load_only
 
+from app.core.business_logging import log_event
 from app.models import Document, DocumentChunk, KnowledgeBase
 from app.services.embedding.service import DIMENSION, MODEL_ID, VERSION
 from app.services.indexing import INDEX_VERSION
@@ -117,28 +119,28 @@ def model_snapshot(value: dict) -> dict:
         raise DenseRetrievalError("DENSE_MODEL") from None
 
 
-def eligibility(kb_id: UUID, identity: dict, doc_ids: tuple[UUID, ...] | None = None) -> tuple:
-    """知识库及可选文档过滤均进入候选 SQL，再做 Top-K；未知模型/失效代次不参与。"""
+def document_eligibility(kb_id: UUID, doc_ids: tuple[UUID, ...] | None = None, *, identity=None) -> tuple:
+    """构造文档级范围与代次条件；Dense另验模型，供小型文档屏障复用，不涉及Chunk。"""
     config = Document.index_config
     parse_id = cast(Document.processing_task_id, String)
     filters = (
-        DocumentChunk.kb_id == kb_id, Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
-        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]), DocumentChunk.embedding.is_not(None),
+        Document.kb_id == kb_id, KnowledgeBase.kb_id == kb_id,
+        KnowledgeBase.status == "ACTIVE", Document.status.in_(["READY", "PARTIAL_READY"]),
         Document.index_task_id.is_not(None),
         config["version"].as_string() == INDEX_VERSION,
-        config["result"]["model"] == identity,
         config["embedding_task_id"].as_string() == cast(Document.embedding_task_id, String),
         config["source_chunk_task_id"].as_string() == cast(Document.chunk_task_id, String),
         config["source_parse_task_id"].as_string() == parse_id,
-        DocumentChunk.chunk_metadata["source_parse_task_id"].as_string() == parse_id,
     )
-    return filters if doc_ids is None else filters + (DocumentChunk.doc_id.in_(doc_ids),)
+    if identity is not None:
+        filters += (config["result"]["model"] == identity,)
+    return filters if doc_ids is None else filters + (Document.doc_id.in_(doc_ids),)
 
 
 def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict,
                     top_k: int = DEFAULT_TOP_K, *,
                     doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None):
-    """物化已过滤候选的ID/标量距离，按距离及UUID精确取Top-K后读取正文。
+    """先物化文档资格，再物化全量候选ID/标量距离，精确取Top-K后读取正文。
 
     物化屏障避免 HNSW 近似候选截断造成过滤后的漏项；不修改索引或向量值。
     """
@@ -151,10 +153,22 @@ def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict
         raise DenseRetrievalError("DENSE_MODEL") from None
     owner_join = (DocumentChunk.doc_id == Document.doc_id) & (DocumentChunk.kb_id == Document.kb_id)
     distance = DocumentChunk.embedding.cosine_distance(vector)
+    # 模型JSON和文档代次只在文档屏障内求值，不能随全库Chunk连接重复检查。
+    documents = (select(Document.doc_id, Document.kb_id, Document.processing_task_id)
+        .select_from(Document)
+        .join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id)
+        .where(*document_eligibility(kb_id, doc_ids, identity=identity))
+        .cte("dense_documents").prefix_with("MATERIALIZED", dialect="postgresql"))
+    filters = [DocumentChunk.kb_id == kb_id, DocumentChunk.embedding.is_not(None),
+        DocumentChunk.chunk_metadata["source_parse_task_id"].as_string()
+            == cast(documents.c.processing_task_id, String)]
+    if doc_ids is not None:
+        filters.append(DocumentChunk.doc_id.in_(doc_ids))
     # 物化全部1024维向量会产生大量临时I/O；屏障内计算距离，仅保留ID与标量。
     candidates = (select(DocumentChunk.chunk_id, distance.label("cosine_distance")).select_from(DocumentChunk)
-        .join(Document, owner_join).join(KnowledgeBase, KnowledgeBase.kb_id == Document.kb_id)
-        .where(*eligibility(kb_id, identity, doc_ids)).cte("dense_eligible").prefix_with("MATERIALIZED", dialect="postgresql"))
+        .join(documents, (DocumentChunk.doc_id == documents.c.doc_id)
+            & (DocumentChunk.kb_id == documents.c.kb_id))
+        .where(*filters).cte("dense_eligible").prefix_with("MATERIALIZED", dialect="postgresql"))
     ranked = (select(candidates.c.chunk_id, candidates.c.cosine_distance)
         .order_by(candidates.c.cosine_distance.asc(), candidates.c.chunk_id.asc()).limit(top_k).cte("dense_ranked"))
     return (select(DocumentChunk, Document, ranked.c.cosine_distance).select_from(DocumentChunk)
@@ -172,18 +186,23 @@ def dense_statement(kb_id: UUID | str, query_vector: list[float], identity: dict
 def select_dense_hits(session: Session, kb_id: UUID | str, query_vector: list[float], identity: dict,
                       top_k: int = DEFAULT_TOP_K, *,
                       doc_ids: list[UUID | str] | tuple[UUID | str, ...] | None = None) -> list[DenseHit]:
-    """只读执行已下推范围的 SELECT；越界行全批拒绝，不以 Python 删除其他文档冒充 SQL 过滤。"""
+    """只读执行并计量SQL及结果读取；越界行全批拒绝，失败耗时也保留且不输出SQL。"""
     kb_id = validate_scope(kb_id, top_k)
     doc_ids = validate_doc_ids(doc_ids)
     identity = model_snapshot(identity)
     statement = dense_statement(kb_id, query_vector, identity, top_k, doc_ids=doc_ids)
     if session.new or session.dirty or session.deleted:
         raise DenseRetrievalError("DENSE_SESSION")
+    started, status = perf_counter(), "FAILED"
     try:
         with session.no_autoflush:
             rows = session.execute(statement).all()
+        status = "SUCCESS"
     except SQLAlchemyError as exc:
         raise DenseRetrievalError("DENSE_DATABASE", database_error=exc) from None
+    finally:
+        log_event("dense.database_observed", kb_id=kb_id, status=status,
+                  duration_ms=(perf_counter() - started) * 1000)
     if len(rows) > top_k:
         raise DenseRetrievalError("DENSE_RESULT")
     hits, seen, last = [], set(), None

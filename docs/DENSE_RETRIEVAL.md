@@ -44,7 +44,7 @@ QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_str
 
 未知身份/历史失效代次不会偷偷补向量、恢复任务或跨库搜索。返回行还会防御性检查上述来源及距离/顺序，任意坏行/重复 ID/非法距离拒绝整个结果，不部分成功。已 READY 文档的全量有效单位向量仍由阶段 15 事务和阶段 16 人工验收保证；管理员绕过应用直接 SQL 破坏数据不在本模块完整性保证内。
 
-当前仍为**精确基线**：符合条件的候选在 MATERIALIZED CTE 内计算 `<=>`，仅物化 chunk_id/标量距离，按距离、UUID升序取Top-K，再读命中正文/证据。无需把全部1024维向量写入候选临时结果；过滤、完整候选集合及同分顺序不变。候选不经过HNSW近似截断，不新增索引或迁移；大库扫描仍有成本，实际性能待用户验收。
+当前仍为**精确基线**：先在`dense_documents AS MATERIALIZED`内核对文档范围、ACTIVE/READY、完整模型JSON和文档代次，仅输出doc_id/kb_id/解析代次；随后关联Chunk，核对Chunk范围、非空向量及来源代次。文档级条件不随Chunk关联重复求值。全部合格候选仍在`dense_eligible AS MATERIALIZED`内计算`<=>`，仅物化chunk_id/标量距离，按距离、UUID升序取Top-K，再读命中正文/证据。无需把全部1024维向量写入临时结果，完整候选集合及同分规则不变。候选不经过HNSW近似截断，不新增索引或迁移；大库扫描仍有成本，新结构的真实收益待阶段36新run比较。
 
 同一数据快照及相同 Query 向量排序稳定。并发导入/维护改变候选或不同 GPU/精度的数值差异，不能承诺跨时刻结果完全相同。结果表示当前 SQL 快照，查询结束后的 Reindex/删除/状态变化不由长时间行锁阻止。
 
@@ -55,6 +55,8 @@ QueryBundle 仅接受 query_str，不接受外部 embedding/custom_embedding_str
 ## 日志、依赖与安全
 
 采用既有 UTF-8 中文白名单每日日志，dense.started/finished/empty/failed 仅 kb_id、top_k、数量/维度、阶段、耗时和安全错误码；指定范围时复用source_document_count，单文档另记doc_id，不输出ID数组。不记录 Query、正文、Node、向量、SQL、连接串、模型目录或异常原文。空结果是一个正常结果，不解释成语义上“没有答案”。
+
+`dense.database_observed`单列SQL执行和结果读取的客户端墙钟，成功/失败均记录固定状态及耗时；包含驱动等待、网络和ORM解码，不代表纯服务器执行时间，也不表示后续证据校验已通过。显式性能采集映射为`dense_database_ms`，仍包含于整题Dense耗时；数据库取消不会自动重试或调高10秒超时。
 
 遵循 [LlamaIndex BaseRetriever 抽象](https://developers.llamaindex.ai/python/framework-api-reference/retrievers/)，但复写公共 retrieve/aretrieve，避免基类含 Query/Node 的 callback payload、递归检索和默认 Query Engine。显式空 CallbackManager、不改全局 Settings/LLM/Tracing；第三方全局 instrumentation 或数据库 echo/debug 若被调用方开启仍可能记录参数，必须禁用未经审查的追踪导出，不能把第三方输出当作项目脱敏日志。
 

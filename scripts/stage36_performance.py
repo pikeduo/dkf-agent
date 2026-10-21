@@ -368,7 +368,7 @@ def historical_rag_timings(plan):
 
 
 def report(run, plan):
-    """保留未测/失败分母，分开冷启动和暖态延迟；只在自己的运行目录写摘要。"""
+    """保留失败分母及内层数据库码，分开冷启动和暖态延迟；只在本run写摘要。"""
     groups = []
     for scope in plan["scopes"]:
         for concurrency in plan["concurrency"]:
@@ -394,6 +394,8 @@ def report(run, plan):
                                           for row in success]) for stage in stages},
                 "failure_stages": dict(Counter(row.get("failure_stage") for row in failures)),
                 "error_codes": dict(Counter(row.get("error_code") for row in failures)),
+                "database_error_codes": dict(Counter(row["database_error_code"] for row in failures
+                                                      if row.get("database_error_code"))),
                 "group_failure_stage": value.get("failure_stage"), "group_error_code": value.get("error_code"),
                 "index_error_code": value.get("index_error_code"),
                 "warmup": value.get("warmup", []), "setup_ms": value.get("setup_ms"),
@@ -429,10 +431,12 @@ def report(run, plan):
         if group["error_codes"] or group["group_error_code"] or group["index_error_code"]:
             lines.append(f"- {group['documents']}份/并发{group['concurrency']}："
                          f"阶段{group['failure_stages']}；错误{group['error_codes']}；"
+                         f"数据库{group['database_error_codes']}；"
                          f"批次{group['group_failure_stage']}/{group['group_error_code']}；"
                          f"索引{group['index_error_code']}。")
     lines += ["", "预热请求及模型初始化单列，不纳入暖态分位数。并发包含原共享模型锁等待；没有HTTP网络/线程池排队计时。",
               "Dense包含Query编码，fusion包含Dense/BM25，重排包含模型评分，合成包含LLM；父子阶段不能相加。",
+              "dense_database_ms为客户端SQL执行及结果读取；BM25的ID/Hash阶段含语句构造、驱动等待和校验，不等于服务器执行时间。",
               "RSS仅为进程批次前后快照；峰值为进程生命周期峰值，不是本批峰值或显存。",
               "各规模复用同一固定题单，未按参考答案缩小查询范围；小范围可能缺少答案，空结果和阶段覆盖需结合明细看。",
               "阶段34的历史RAG耗时单列于report.json，问题/模型/代码不同，不能与本轮并发检索相加或宣称同次完整RAG测量。",
