@@ -10,6 +10,8 @@
 
 ### 进程角色
 
+阶段36通过默认关闭的`capture_query_performance()`在当前请求ContextVar内观察既有白名单事件，只保留固定阶段耗时、缓存复用布尔值、失败阶段与合法SQLSTATE。并发线程/异步任务各自显式开启，不保存Query、正文或异常原文，不改变业务结果；`performance.started/finished/failed`记录本地测量批次摘要，继续使用每日合并日志。
+
 唯一集中映射为`app/core/business_logging.py`的只读`ROLE_LABELS`。所有入口显式配置与用途一致的role，不改操作系统进程名称/PID，不接受请求/业务字段覆盖；未知或非字符串角色仅显示固定“未知进程”，任意外部角色文本不进入日志。新增role同次更新注册表、入口、测试和必要文档，不伪装为API/Worker。
 
 | role | 显示名称 |
@@ -27,6 +29,7 @@
 | formula-calculation-cli | Formula Calculation CLI |
 | knowledge-agent-cli | Knowledge Agent CLI |
 | document-analysis-cli | Document Analysis CLI |
+| performance-cli | Performance CLI |
 | retrieval-acceptance | 检索验收 |
 | preset-cli | Preset CLI |
 | mineru-diagnostic-cli | MinerU Diagnostic CLI |

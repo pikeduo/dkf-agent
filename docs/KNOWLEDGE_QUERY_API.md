@@ -4,6 +4,8 @@
 
 ## 公开契约
 
+阶段36允许内部Python搜索调用显式注入已冻结同kb/doc/Top-K的检索与重排实例，供本地性能测量复用；仍经过原证据校验。HTTP请求参数、默认构造方式及生产语料预算不变，见[性能运行手册](STAGE36_PERFORMANCE.md)。
+
 | 接口 | 链路 | 返回 |
 |---|---|---|
 | POST /api/knowledge/search | 同范围Hybrid（各路默认20）→RRF Top-K→本地BGE Top5 | KnowledgeSearchResponse：status=success/empty，evidence列表 |

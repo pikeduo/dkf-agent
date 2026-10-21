@@ -16,6 +16,7 @@ from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from app.core.config import PROJECT_ROOT, Settings
+from app.core.query_performance import observe_query_event
 
 if os.name == "nt":
     import msvcrt
@@ -39,6 +40,7 @@ ROLE_LABELS = MappingProxyType({
     "formula-calculation-cli": "Formula Calculation CLI",
     "knowledge-agent-cli": "Knowledge Agent CLI",
     "document-analysis-cli": "Document Analysis CLI",
+    "performance-cli": "Performance CLI",
     "retrieval-acceptance": "检索验收",
     "preset-cli": "Preset CLI",
     "mineru-diagnostic-cli": "MinerU Diagnostic CLI",
@@ -328,6 +330,9 @@ EVENT_LABELS = {
     "rag.node_converted": "已有 Chunk 已转换为运行时 Node，未重新处理或落库",
     "rag.result_converted": "运行时 Node 已还原项目证据结果",
     "rag.query_encoded": "Query 已通过项目共享服务编码，未新增文档向量",
+    "performance.started": "开始显式本地性能测量，复用当前索引及共享模型",
+    "performance.finished": "本地性能测量批次结束，失败及未测项目保留在报告",
+    "performance.failed": "性能测量停止，保留本地记录且不自动重试",
     "rag.nodes_reused": "复用已有 Node 向量，未重新编码",
     "rag.adapter_failed": "RAG 适配边界安全拒绝或调用失败",
     "dense.started": "开始指定知识库的只读 Dense 检索",
@@ -583,13 +588,15 @@ def safe_fields(fields: dict) -> dict:
 
 
 def log_event(event: str, *, level: int = logging.INFO, **fields) -> None:
-    """记录白名单业务摘要；日志系统异常不得改变上传、事务或任务的业务结果。"""
+    """记录白名单摘要并通知显式性能采集；日志故障不得改变业务结果。"""
 
     try:
+        summary = safe_fields((CONTEXT.get() or {}) | fields)
+        observe_query_event(event, summary)
         LOGGER.log(
             level,
             event,
-            extra={"business_fields": safe_fields((CONTEXT.get() or {}) | fields)},
+            extra={"business_fields": summary},
         )
     except Exception:  # noqa: BLE001
         # 可观测性不是事务的一部分；不得因为磁盘满而回退已成功的文档处理。

@@ -8,8 +8,8 @@ from app.services.rag.synthesis import RAGError
 
 
 def search_knowledge_base(kb_id: UUID | str, question: str, *, doc_ids=None,
-                          top_k: int = 30) -> list[RetrievalResult]:
-    """只读Hybrid候选→Top5重排，不构造QueryEngine/LLM、重建索引或读取原件。"""
+                          top_k: int = 30, retriever=None, reranker=None) -> list[RetrievalResult]:
+    """只读Hybrid→Top5；可注入同范围组件供性能测量复用，HTTP默认行为不变。"""
     stage = "input"
     try:
         kb_id, doc_ids = validate_scope(kb_id, top_k), validate_doc_ids(doc_ids)
@@ -19,7 +19,14 @@ def search_knowledge_base(kb_id: UUID | str, question: str, *, doc_ids=None,
         from app.services.rag.llama_index.node_adapter import node_to_result
         from app.services.rag.llama_index.reranker_adapter import BGERerankerAdapter
 
-        candidates = HybridRetriever(kb_id, doc_ids=doc_ids, top_k=top_k).retrieve(question)
+        if retriever is not None and (retriever.kb_id != kb_id or retriever.doc_ids != doc_ids
+                                      or retriever.top_k != top_k):
+            raise RAGError("RAG_INPUT")
+        if reranker is not None and reranker.top_n != 5:
+            raise RAGError("RAG_INPUT")
+        active_retriever = retriever if retriever is not None else HybridRetriever(
+            kb_id, doc_ids=doc_ids, top_k=top_k)
+        candidates = active_retriever.retrieve(question)
         if not isinstance(candidates, list) or len(candidates) > top_k:
             raise RAGError("RAG_EVIDENCE")
         original = {}
@@ -33,7 +40,8 @@ def search_knowledge_base(kb_id: UUID | str, question: str, *, doc_ids=None,
         if not candidates:
             return []
         stage = "rerank"
-        final = BGERerankerAdapter(top_n=5).postprocess_nodes(candidates, query_str=question)
+        active_reranker = reranker if reranker is not None else BGERerankerAdapter(top_n=5)
+        final = active_reranker.postprocess_nodes(candidates, query_str=question)
         if not isinstance(final, list) or len(final) != min(5, len(candidates)):
             raise RAGError("RAG_EVIDENCE")
         results, seen = [], set()

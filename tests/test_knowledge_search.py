@@ -2,6 +2,7 @@
 
 import copy
 from uuid import uuid4
+from types import SimpleNamespace
 
 import pytest
 
@@ -115,3 +116,43 @@ def test_reranker_cannot_replace_original_chunk_text(monkeypatch):
     with pytest.raises(RAGError, match="RAG_EVIDENCE") as error:
         search_knowledge_base(first.kb_id, "question")
     assert "PRIVATE" not in str(error.value)
+
+
+def test_injected_same_scope_components_keep_original_evidence_and_skip_factories(monkeypatch):
+    """性能调用可复用同范围实例，仍执行真实证据与重排完整性检查。"""
+    nodes = candidates(2)
+    first = node_to_result(nodes[0], log_success=False)
+    ranker = reranker_adapter.BGERerankerAdapter(service=ServiceStub([1, 2]), top_n=5)
+
+    def retrieve(question):
+        """返回内存候选，不访问数据库或编码Query。"""
+        return nodes
+
+    def forbidden(*args, **kwargs):
+        """显式注入时不得额外构造模型或派生索引。"""
+        pytest.fail("不能重复构造检索/重排实例")
+
+    retriever = SimpleNamespace(kb_id=first.kb_id, doc_ids=None, top_k=30, retrieve=retrieve)
+    monkeypatch.setattr(hybrid_retriever, "HybridRetriever", forbidden)
+    monkeypatch.setattr(reranker_adapter, "BGERerankerAdapter", forbidden)
+    results = search_knowledge_base(first.kb_id, "question", retriever=retriever, reranker=ranker)
+    assert len(results) == 2 and all(item.rerank is not None for item in results)
+    retriever.doc_ids = (uuid4(),)
+    with pytest.raises(RAGError, match="RAG_INPUT"):
+        search_knowledge_base(first.kb_id, "question", retriever=retriever, reranker=ranker)
+
+
+@pytest.mark.parametrize("field,value", [("kb_id", uuid4()), ("top_k", 20), ("top_n", 3)])
+def test_injected_wrong_scope_or_top_n_fails_before_retrieval(field, value):
+    """跨库、候选上限或重排上限不符时先拒绝，不执行任何检索。"""
+    kb_id = uuid4()
+
+    def forbidden(question):
+        """范围校验失败不允许继续检索。"""
+        pytest.fail("范围不符仍执行检索")
+
+    retriever = SimpleNamespace(kb_id=kb_id, doc_ids=None, top_k=30, retrieve=forbidden)
+    ranker = SimpleNamespace(top_n=5)
+    setattr(ranker if field == "top_n" else retriever, field, value)
+    with pytest.raises(RAGError, match="RAG_INPUT"):
+        search_knowledge_base(kb_id, "question", retriever=retriever, reranker=ranker)
