@@ -1,6 +1,6 @@
 # 阶段35：公式、目录、复杂度与质量
 
-本轮交付代码与未执行的测试，不把接口存在或结构合法当成专项效果已验收。阶段34停止继续优化，保留原报告。仅复用现有索引/Block、检索、Evidence和阶段27～29公式服务；没有新模型、依赖、数据库表/迁移、Worker任务或自动云调用。
+阶段35已有代码；本轮公式格式/重试修复的授权Mock结果见下文，其余专项回归及真实效果仍待验收。不把接口存在或结构合法当成专项效果已通过。阶段34停止优化并保留报告。仅复用现有索引/Block、检索、Evidence和阶段27～29公式服务；没有新模型、依赖、数据库表/迁移、Worker任务或自动云调用。
 
 ## 入口与真实边界
 
@@ -37,7 +37,7 @@ contrast为灰度标准差；edge_energy为相邻像素平方差均值。暗像�
 
 ## 用户先执行的回归
 
-Codex没有运行以下命令，也没有启动服务/模型或读真实文档。现有Conda dkf-agent环境中执行：
+下列全专项回归尚未全部执行；本轮公式相关Mock回归范围与结果见后文。没有启动服务/模型或处理真实文档。现有Conda dkf-agent环境中执行：
 
 ```powershell
 conda activate dkf-agent
@@ -132,6 +132,31 @@ $calculated | ConvertTo-Json -Depth 100
 使用文档参数时改用原契约evidence_inputs，必须显式给同库真实doc/chunk/block、唯一quote/value_text及可选相邻unit_text；不可把人工值包装成证据。错误保留FORMULA_*/FORMULA_BINDING_*/FORMULA_CALC_*/EVIDENCE_*，如FORMULA_CALC_ZERO_DIVISION、EVIDENCE_STALE；数据库、模型、供应商故障保留原安全分类，不返回UNKNOWN或伪造need_variables。
 
 ## 典型案例与效果记录
+
+### F01/F03提取格式修复与受控复验
+
+已确认历史两次DeepSeek返回HTTP200后在`formula.py`的output校验失败，不是MinerU/Block/检索失败；由于没有保存模型响应，不能断定当时具体是哪种非法格式。现补充严格的小写右侧表达式要求和F01/F03完整JSON示例，原式逐字符一致性、受限AST和所有来源核对保持。
+
+本次经用户专项授权，在`dkf-agent`环境运行公式提取/绑定/计算、专项HTTP、账本及日志相关本地回归，**307 passed**；HTTP由MockTransport拦截，账本请求为内存回调。没有调用真实LLM/MinerU、启动服务或修改现有PDF/标准答案/业务数据库。回归命令：
+
+```powershell
+python -m pytest tests/test_formula.py tests/test_formula_acceptance.py tests/test_formula_binding.py tests/test_formula_calculation.py tests/test_knowledge_specialty.py tests/test_formula_extract_attempt.py tests/test_business_logging.py::test_formula_failure_reason_is_a_finite_enum_and_does_not_expose_model_output -q -ra -p no:cacheprovider --tb=short
+```
+
+可复用账本实现在仓库`scripts/formula_extract_attempt.ps1`，本地素材包的`results/stage35_formula_fixture/stage35_formula_acceptance.ps1`已接入。后者位于忽略的results目录；旧ZIP包未改动，重新解压旧包会带回旧runner，不能据此认为仓库修复丢失。原PDF、标准答案和旧请求/结果均不覆盖。
+
+账本默认遇到`extract_attempt_F01.json`即停止；有definition时复用结果，任何状态都不自动再提取。仅已有请求但没有保存结果时，使用`-RetryFailedExtract`并逐次输入`RETRY F01`，才增加一次同来源提取。原意图不删除，每次重试另建UUID意图及结果回执；后续默认运行仍会阻断。新意图核对kb/doc/chunk/block全部身份，旧版仅有Block的意图先核对原Block，再冻结本次完整身份；不是全局HTTP幂等。
+
+真实复验前需人工确认：原请求已结束、此前可能已收费；API已在没有在途请求时手动重启以加载新Prompt；当前提供方允许接收相同证据并接受新增费用。Fallback开启时，一次逻辑提取仍可能最多两次POST。不要删除extract_attempt来绕过保护，不需要重新上传或重新解析。
+
+确认后先只复验F01。以下命令**会调用真实LLM**，本轮未执行：
+
+```powershell
+& .\results\stage35_formula_fixture\stage35_formula_acceptance.ps1 -Step extract -CaseId F01 -AllowLLMCloud -RetryFailedExtract
+if (-not $?) { throw 'F01未完成，停止后续提取并检查安全分类日志' }
+```
+
+按脚本选择与原意图同一Block，确认外传后再输入`RETRY F01`。成功保存定义后，人工核对`raw_formula`仍为原式、normalized_formula对应`r-c`、输入变量只对应R/C；再使用原`-Step calculate -CaseId F01`，复用定义完成缺参/参数/计算验收，不重复提取。F01通过后以同样方式单独复验F03（输入`RETRY F03`），核对右侧`s/q`及输入变量S/Q；名称、数学关系、变量含义和单位仍需人工判断。失败只查看安全码及有限原因，不输出或归档完整LLM响应。
 
 下列是**选样与验收方法，不是已有成绩**。候选来自用户现有文件，缺某类样本如实记缺口，不制造数据或重新收费解析。
 

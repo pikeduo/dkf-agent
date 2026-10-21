@@ -94,6 +94,16 @@ def test_agent_workflow_fields_only_accept_registered_safe_scalars(events):
         "final_status": "PRIVATE", "step_count": True, "tool_duration_ms": float("nan")}) == {}
 
 
+def test_formula_failure_reason_is_a_finite_enum_and_does_not_expose_model_output(events):
+    """公式诊断只接收固定枚举；恶意字符串/容器及模型输出不进入真实中文格式。"""
+    for reason in sorted(logs.FORMULA_FAILURE_REASONS):
+        logs.log_event("formula.failed", stage="output", error_code="FORMULA_EXPRESSION",
+            formula_failure_reason=reason, raw_formula="PRIVATE_FORMULA", response="PRIVATE_RESPONSE")
+    assert "公式失败原因=" in events.getvalue() and "PRIVATE" not in events.getvalue()
+    for invalid in ("PRIVATE_RESPONSE", "EXPRESSION_UNICODE\nPRIVATE", [], {}, 1, True):
+        assert logs.safe_fields({"formula_failure_reason": invalid}) == {}
+
+
 def test_management_task_uses_worker_doc_context_and_safe_registered_event(events):
     """管理任务保留doc/request关联和原Worker角色，不输出私有返回值或另建日志文件。"""
     doc_id, task_id = str(uuid4()), str(uuid4())

@@ -90,6 +90,7 @@ FIELDS = {
     "retry_count",
     "delay_seconds",
     "error_code",
+    "formula_failure_reason",
     "error_type",
     "source_file", "source_function", "source_line",
     "queue",
@@ -133,6 +134,14 @@ AGENT_LOG_ENUMS = {
     "tool_name": {"search_knowledge_base", "query_knowledge_base", "extract_formula", "calculate_formula"},
     "final_status": {"success", "empty", "insufficient_evidence", "need_variables", "unsupported_formula", "failed"},
 }
+# 公式失败细分只接受固定枚举，不能借诊断字段输出公式或模型响应。
+FORMULA_FAILURE_REASONS = frozenset({
+    "EXPRESSION_REQUIRED", "EXPRESSION_LIMIT", "EXPRESSION_EQUATION", "EXPRESSION_LATEX",
+    "EXPRESSION_UPPERCASE", "EXPRESSION_UNICODE", "EXPRESSION_CHARACTERS", "EXPRESSION_SYNTAX",
+    "EXPRESSION_SYMBOL", "EXPRESSION_NUMBER", "EXPRESSION_OPERATOR", "EXPRESSION_NODE",
+    "EXPRESSION_INVALID", "OUTPUT_LIMIT", "OUTPUT_JSON", "OUTPUT_SCHEMA",
+    "RAW_FORMULA_MISMATCH", "VARIABLE_SET_MISMATCH", "REFERENCE_INVALID", "OUTPUT_CONTRACT",
+})
 # FastAPI 自带文档路由不总是设置 scope.route，只接受这些固定公开路径作为回退。
 PUBLIC_ROUTES = {"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"}
 FILE_PREFIX = "knowledge-service"
@@ -436,6 +445,7 @@ FIELD_LABELS = {
     "delay_seconds": "等待秒数",
     "duration_ms": "耗时_ms",
     "error_code": "错误码",
+    "formula_failure_reason": "公式失败原因",
     "error_type": "错误类型",
     "source_file": "源码文件", "source_function": "源码函数", "source_line": "源码行号",
     "decision_version": "路由版本",
@@ -512,11 +522,15 @@ def shared_file_lock(directory: Path):
 
 
 def safe_fields(fields: dict) -> dict:
-    """保留白名单标量；资源及Token计数仅接受有界非负整数，标识仅接受UUID。"""
+    """保留白名单标量；公式原因仅接受有限枚举，资源计数有界且标识仅接受UUID。"""
 
     result = {}
     for key, value in fields.items():
         if key not in FIELDS or value is None:
+            continue
+        if key == "formula_failure_reason" and (
+            not isinstance(value, str) or value not in FORMULA_FAILURE_REASONS
+        ):
             continue
         # 资源计数不能夹带正文、布尔值或任意对象，零计数也必须保留。
         if key in {"drawing_count", "line_count", "object_count", "limit_count", "token_count"} and (

@@ -641,6 +641,8 @@ Python入口`app.services.formula.extract_formula(kb_id, chunk_id, block_id, doc
 
 返回公式名称、原式、受限四则表达式、变量/含义及完整来源；未知含义为null，不改OCR原式或伪造页码。**只有明确`allow_cloud=True`才允许公式及相邻正文外传并接受本次费用**，异常不自动重试。结构合法不证明数学等价或语义准确，结果标记`manual_pending`；本功能不绑定变量值、不执行SymPy计算。
 
+原式允许大写和LaTeX，模型规范式严格只接受小写变量的ASCII右侧四则表达式；不符合时仍返回`FORMULA_EXPRESSION`。日志“公式失败原因”提供有限格式分类，不输出公式或模型响应。已有请求但未保存定义时，验收账本默认阻断重复收费；人工确认终态和新增费用后才可受控重试，见[专项复验步骤](docs/STAGE35_SPECIALTY.md#f01f03提取格式修复与受控复验)。
+
 用户可用`python -m scripts.stage27_formula_acceptance`查看默认dry-run说明，实际调用需真实业务ID及显式执行/云许可。详细输入选择、限制和手动验收见[公式语义说明](docs/FORMULA_SEMANTICS.md)。
 
 HTTP提供`/api/knowledge/formulas/discover /extract /bind /calculate`四个POST入口。`/discover`使用与`/search`相同的请求、原Hybrid/重排和本地模型，重新核对Evidence后返回完整MinerU公式候选，不调用LLM；空候选仅表示本次最多5个检索Chunk没有可用完整公式。`/extract`接受准确的`kb_id/doc_id/chunk_id/block_id`，逐次`allow_cloud=true`才允许外传及费用；不自动选中候选。`/bind`与`/calculate`接收原`FormulaBindingRequest`（formula/user_inputs/evidence_inputs），只读复核来源，复用定义，不再次调用LLM。补参流程、错误码与真实示例选择见[专项操作](docs/STAGE35_SPECIALTY.md)。

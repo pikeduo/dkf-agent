@@ -147,6 +147,8 @@ Dense/BM25数据库失败在首次捕获点提取驱动SQLSTATE，既有`error_c
 
 公式服务沿用同一每日日志，集中注册`formula-cli`；新增`block_id`与原doc_id/chunk_id一样只允许UUID。API/Worker格式不变，不创建公式专用文件；外传许可在来源查询之前核对，失败不自动重试。变量数量沿用item_count摘要，不记录变量名或含义。
 
+`formula.failed`新增`formula_failure_reason`（中文“公式失败原因”），仅允许集中有限枚举：表达式的REQUIRED/LIMIT/EQUATION/LATEX/UPPERCASE/UNICODE/CHARACTERS/SYNTAX/SYMBOL/NUMBER/OPERATOR/NODE/INVALID使用`EXPRESSION_`前缀；输出的LIMIT/JSON/SCHEMA/CONTRACT使用`OUTPUT_`前缀，另有`RAW_FORMULA_MISMATCH / VARIABLE_SET_MISMATCH / REFERENCE_INVALID`。未知字符串、容器和上游文本一律舍弃。公共FORMULA_EXPRESSION/OUTPUT错误码与固定文案不变；无响应归档、原文Hash或额外收费重试。
+
 RAG拒答诊断：`rag.insufficient`的stage为`empty_final_evidence`时chunk_count=0，未调用DeepSeek；为`model_judged_insufficient`时记录本次非空最终证据数量，表示模型返回了有效的不足JSON。`rag.synthesis_started`在最终Node/上下文预算通过后、单次Chat前记录；`supported_claims`表示引用绑定通过而非事实准确率通过。只有数量/阶段，不能从日志推断哪段原文支持答案，也不得为排障放开Prompt/模型响应正文记录。
 
 ## 自动测试

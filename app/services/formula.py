@@ -11,7 +11,7 @@ from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
-from app.core.business_logging import log_event
+from app.core.business_logging import FORMULA_FAILURE_REASONS, log_event
 from app.schemas.evidence import EvidenceTrace
 from app.schemas.formula import FormulaReference, FormulaSemanticResult, FormulaVariableMeaning
 from app.services.llm import LLMError, create_llm_service, llm_cloud_call, strict_json
@@ -38,6 +38,10 @@ FORMULA_SYSTEM_PROMPT = r"""你负责从给定已核对证据结构化一条公�
 需要函数、幂、条件、矩阵、比较、求导、积分、循环或其他不支持语法时返回unsupported_formula。
 第一版针对利润率、毛利率、增长率、同比、环比、占比、有限项加权平均、四则运算、百分比。
 normalized_formula只包含等号右侧表达式：ASCII小写snake_case变量、普通十进制数、+ - * / 和括号。
+这是严格机器契约，不是原式的排版副本：大写输入符号须在表达式、variables、variable_meanings的键中
+一致映射为不同的小写标识；若大小写映射造成碰撞，使用不同的小写名称，不合并原本不同的变量。
+LaTeX只保留在raw_formula中，normalized_formula中不得出现反斜杠、花括号、美元符号或LaTeX命令。
+normalized_formula不能包含左侧输出变量或任何等号，不能使用Unicode乘除号/减号；四则关系只能用ASCII运算符。
 不使用等号、百分号、科学计数法、函数调用或Python代码；百分数按原意显式乘100或除100，不能猜单位。
 原式的输出量由formula_name描述，不把左侧输出量当成右侧输入变量。加权平均只能展开证据中明确的有限项，
 不能为一般求和式猜项数。变量最多32个、符号最长32字符，数字至多12位整数和8位小数，不含指数。
@@ -51,7 +55,23 @@ formula_name允许忠实概括/翻译，但须给formula_name_evidence；原文�
 "normalized_formula":"profit / revenue * 100","variables":["profit","revenue"],
 "variable_meanings":{"profit":{"meaning":null,"evidence":[]},"revenue":{"meaning":null,"evidence":[]}},
 "formula_name_evidence":[]}
-上述只是字段示意，不是当前文档的公式或变量，请不要照抄。非success时除status/raw_formula外，
+以下为格式示例，假设只有原式证据、没有可确认的业务名称/变量解释，故含义与名称均为null；
+实际输出只依据当前target，不能照抄示例、发明业务含义或修复OCR：
+示例F01，原式G = R - C，正确JSON：
+{"status":"success","formula_name":null,"raw_formula":"G = R - C",
+"normalized_formula":"r - c","variables":["c","r"],
+"variable_meanings":{"c":{"meaning":null,"evidence":[]},"r":{"meaning":null,"evidence":[]}},
+"formula_name_evidence":[]}
+G是输出量，不出现在variables中；不返回G = R - C或R - C作为normalized_formula。
+示例F03，原式U = \frac{S}{Q}，正确JSON（原式的反斜杠按JSON转义）：
+{"status":"success","formula_name":null,"raw_formula":"U = \\frac{S}{Q}",
+"normalized_formula":"s / q","variables":["q","s"],
+"variable_meanings":{"q":{"meaning":null,"evidence":[]},"s":{"meaning":null,"evidence":[]}},
+"formula_name_evidence":[]}
+U是输出量，不出现在variables中；normalized_formula不能复制LaTeX或返回U = S / Q。
+发送前逐项检查：raw_formula逐字相同；normalized_formula只有小写变量与右侧ASCII四则；
+variables和variable_meanings的键与表达式完全一致。上述只是格式示意，不是当前文档的公式或变量。
+非success时除status/raw_formula外，
 formula_name和normalized_formula均为null，variables=[]，variable_meanings={}，formula_name_evidence=[]。
 """
 
@@ -59,9 +79,10 @@ formula_name和normalized_formula均为null，variables=[]，variable_meanings={
 class FormulaError(Exception):
     """仅输出固定安全代码，不承载公式、证据、Prompt、模型原文或私有路径。"""
 
-    def __init__(self, code: str):
-        """未知错误归为输出错误，不把外部异常文本透传给调用方。"""
+    def __init__(self, code: str, *, reason: str | None = None):
+        """错误码及内部原因均限定白名单；公开异常仍只含固定文案，不携带输入。"""
         self.code = code if code in ERRORS else "FORMULA_OUTPUT"
+        self.reason = reason if isinstance(reason, str) and reason in FORMULA_FAILURE_REASONS else None
         super().__init__(f"{self.code}：{ERRORS[self.code]}")
 
 
@@ -105,28 +126,44 @@ def _uuid(value) -> UUID:
 
 
 def normalize_expression(expression: str) -> tuple[str, list[str]]:
-    """只解析有界AST并序列化白名单四则树；不调用eval/exec/SymPy，不代入或求值。"""
+    """仅规范已合法的四则AST；拒绝模型格式偏差并分类，不自动改大小写/LaTeX或求值。"""
     try:
-        if (not isinstance(expression, str) or not expression.strip() or len(expression) > MAX_EXPRESSION_CHARS
-                or not re.fullmatch(r"[a-z0-9_+*/(). \t-]+", expression)):
-            raise ValueError
+        if not isinstance(expression, str) or not expression.strip():
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_REQUIRED")
+        if len(expression) > MAX_EXPRESSION_CHARS:
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_LIMIT")
+        if "=" in expression:
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_EQUATION")
+        if any(char in expression for char in "\\{}$"):
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_LATEX")
+        if re.search(r"[A-Z]", expression):
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_UPPERCASE")
+        if not expression.isascii():
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_UNICODE")
+        if not re.fullmatch(r"[a-z0-9_+*/(). \t-]+", expression):
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_CHARACTERS")
         expression = expression.strip()
-        tree = ast.parse(expression, mode="eval")
+        try:
+            tree = ast.parse(expression, mode="eval")
+        except (SyntaxError, ValueError, RecursionError):
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_SYNTAX") from None
         if sum(1 for _ in ast.walk(tree)) > 128:
-            raise ValueError
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_LIMIT")
         names = set()
 
         def render(node, depth=0):
             """保留运算优先级并规范括号/数字表示，拒绝函数、属性、索引和任意代码节点。"""
             if depth > 16:
-                raise ValueError
-            if isinstance(node, ast.Name) and SYMBOL.fullmatch(node.id):
+                raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_LIMIT")
+            if isinstance(node, ast.Name):
+                if not SYMBOL.fullmatch(node.id):
+                    raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_SYMBOL")
                 names.add(node.id)
                 return node.id
             if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
                 original = ast.get_source_segment(expression, node)
                 if not original or not NUMBER.fullmatch(original):
-                    raise ValueError
+                    raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_NUMBER")
                 return format(Decimal(original).normalize(), "f")
             operators = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}
             if isinstance(node, ast.BinOp) and type(node.op) in operators:
@@ -134,14 +171,17 @@ def normalize_expression(expression: str) -> tuple[str, list[str]]:
             if isinstance(node, ast.UnaryOp) and type(node.op) in {ast.UAdd, ast.USub}:
                 operand = render(node.operand, depth + 1)
                 return operand if isinstance(node.op, ast.UAdd) else f"(-{operand})"
-            raise ValueError
+            reason = "EXPRESSION_OPERATOR" if isinstance(node, (ast.BinOp, ast.UnaryOp)) else "EXPRESSION_NODE"
+            raise FormulaError("FORMULA_EXPRESSION", reason=reason)
 
         canonical = render(tree.body)
         if len(names) > 32:
-            raise ValueError
+            raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_LIMIT")
         return canonical, sorted(names)
+    except FormulaError:
+        raise
     except Exception:
-        raise FormulaError("FORMULA_EXPRESSION") from None
+        raise FormulaError("FORMULA_EXPRESSION", reason="EXPRESSION_INVALID") from None
 
 
 def _context(trace: EvidenceTrace, block_id: UUID):
@@ -164,16 +204,16 @@ def _context(trace: EvidenceTrace, block_id: UUID):
 
 
 def _references(items, spans) -> list[FormulaReference]:
-    """以唯一逐字引文回填原Block/Chunk字符位置，未知ID、重复或歧义引用整体拒绝。"""
+    """以唯一逐字引文绑定字符位置；非法或歧义引用整体拒绝，仅附固定诊断枚举。"""
     result, seen = [], set()
     for item in items:
         span = spans.get(item.evidence_id)
         marker = (item.evidence_id, item.quote)
         if span is None or not item.quote.strip() or marker in seen:
-            raise FormulaError("FORMULA_OUTPUT")
+            raise FormulaError("FORMULA_OUTPUT", reason="REFERENCE_INVALID")
         position = span.text.find(item.quote)
         if position < 0 or span.text.find(item.quote, position + 1) >= 0:
-            raise FormulaError("FORMULA_OUTPUT")
+            raise FormulaError("FORMULA_OUTPUT", reason="REFERENCE_INVALID")
         result.append(FormulaReference(evidence_id=item.evidence_id, block_id=span.block_id,
             start_char=span.start_char + position, end_char=span.start_char + position + len(item.quote),
             chunk_start_char=span.chunk_start_char + position,
@@ -183,25 +223,33 @@ def _references(items, spans) -> list[FormulaReference]:
 
 
 def _bind(text: str, trace: EvidenceTrace, block_id: UUID, target, spans) -> FormulaSemanticResult:
-    """严格JSON与表达式/变量/引用全量校验后本地绑定来源，失败不修补或发布半份定义。"""
+    """严格绑定JSON/原式/表达式/变量/引用，按固定原因分类且不修补失败输出。"""
+    reason = "OUTPUT_LIMIT"
     try:
         if not isinstance(text, str) or len(text) > MAX_OUTPUT_CHARS:
             raise ValueError
-        wire = _WireResult.model_validate(strict_json(text))
+        reason = "OUTPUT_JSON"
+        payload = strict_json(text)
+        reason = "OUTPUT_SCHEMA"
+        wire = _WireResult.model_validate(payload)
+        reason = "RAW_FORMULA_MISMATCH"
         if wire.raw_formula != target.text:
             raise ValueError
         canonical, variables = None, []
         if wire.status == "success":
             canonical, variables = normalize_expression(wire.normalized_formula)
+            reason = "VARIABLE_SET_MISMATCH"
             if (len(wire.variables) != len(set(wire.variables)) or set(wire.variables) != set(variables)
                     or set(wire.variable_meanings) != set(variables)):
                 raise ValueError
+        reason = "REFERENCE_INVALID"
         meanings = {name: FormulaVariableMeaning(meaning=value.meaning,
             evidence=_references(value.evidence, spans)) for name, value in wire.variable_meanings.items()}
         name_evidence = _references(wire.formula_name_evidence, spans)
         identity = f"{VERSION}:{trace.chunk_id}:{block_id}:{trace.file_hash}:" + (
             f"{trace.source_parse_task_id}:{trace.source_chunk_task_id}:{target.block_text_hash}")
         # 拒答的原始非空定义也必须送入公共模型校验，不能通过清空字段把非法输出洗成正常不足。
+        reason = "OUTPUT_CONTRACT"
         return FormulaSemanticResult(status=wire.status, formula_id=uuid5(trace.doc_id, identity),
             formula_block_id=block_id, raw_formula=target.text, formula_name=wire.formula_name,
             normalized_formula=canonical if wire.status == "success" else wire.normalized_formula,
@@ -210,7 +258,7 @@ def _bind(text: str, trace: EvidenceTrace, block_id: UUID, target, spans) -> For
     except FormulaError:
         raise
     except Exception:
-        raise FormulaError("FORMULA_OUTPUT") from None
+        raise FormulaError("FORMULA_OUTPUT", reason=reason) from None
 
 
 def validate_formula_snapshot(formula: FormulaSemanticResult, trace: EvidenceTrace) -> FormulaSemanticResult:
@@ -250,7 +298,7 @@ class FormulaService:
         self._llm = llm_service
 
     def extract_formula(self, kb_id, chunk_id, block_id, *, doc_id=None, allow_cloud=False) -> FormulaSemanticResult:
-        """核对原式后单次逻辑结构化；显式配置可一次备用，原式/变量/来源校验不变。"""
+        """核对原式后单次逻辑提取；失败仅记录固定分类，不记录响应或自动修补重发。"""
         started, scope, stage = perf_counter(), {}, "permission"
         try:
             if allow_cloud is not True:
@@ -290,6 +338,7 @@ class FormulaService:
             error = exc if isinstance(exc, (FormulaError, EvidenceError, LLMError)) else FormulaError(
                 "FORMULA_SOURCE" if stage == "source" else "FORMULA_OUTPUT")
             log_event("formula.failed", level=logging.WARNING, **scope, stage=stage, error_code=error.code,
+                      formula_failure_reason=error.reason if isinstance(error, FormulaError) else None,
                       duration_ms=(perf_counter() - started) * 1000)
             raise error from None
 

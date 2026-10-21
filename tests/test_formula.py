@@ -126,6 +126,120 @@ def test_first_version_formula_families_are_structured_without_calculation(name,
     assert not hasattr(result, "result") and not hasattr(result, "substitution") and len(llm.calls) == 1
 
 
+@pytest.mark.parametrize("case,raw,expression,names,canonical", [
+    ("F01", "G = R - C", "r - c", ["c", "r"], "(r - c)"),
+    ("F03", r"U = \frac{S}{Q}", "s / q", ["q", "s"], "(s / q)"),
+])
+def test_uppercase_raw_formula_uses_lowercase_rhs_and_complete_prompt_example(case, raw, expression, names, canonical):
+    """F01/F03原式逐字保留；Mock输出仅小写右侧，Prompt完整JSON示例可独立解析。"""
+    response = {"status": "success", "formula_name": None, "raw_formula": raw,
+        "normalized_formula": expression, "variables": names,
+        "variable_meanings": {name: {"meaning": None, "evidence": []} for name in names},
+        "formula_name_evidence": []}
+    # 直接写明期望结构，不调用待测规范化器生成模型输出或预期结果。
+    marker = f"示例{case}，"
+    # 先跳过示例标题行，避免把LaTeX中的{S}误当成JSON对象起点。
+    example_text = tool.FORMULA_SYSTEM_PROMPT.split(marker, 1)[1].split("\n", 1)[1].lstrip()
+    example, _ = json.JSONDecoder().raw_decode(example_text)
+    assert example == response
+    context, llm = source(raw, context=None), LLMStub(response)
+    result = extract(context, llm)
+    assert result.raw_formula == raw == context[-1][0].text
+    assert result.normalized_formula == canonical and result.variables == names
+    assert set(result.variable_meanings) == set(names) and len(llm.calls) == 1
+    assert result.semantic_validation == "manual_pending"
+    assert llm.calls[0][1]["evidence"][0]["text"] == raw
+
+
+@pytest.mark.parametrize("expression,reason", [
+    (None, "EXPRESSION_REQUIRED"),
+    ("G = R - C", "EXPRESSION_EQUATION"),
+    ("R - C", "EXPRESSION_UPPERCASE"),
+    (r"\frac{s}{q}", "EXPRESSION_LATEX"),
+    ("r − c", "EXPRESSION_UNICODE"),
+    ("s ÷ q", "EXPRESSION_UNICODE"),
+    ("r +", "EXPRESSION_SYNTAX"),
+    ("r**2", "EXPRESSION_OPERATOR"),
+    ("r//c", "EXPRESSION_OPERATOR"),
+    ("r.real", "EXPRESSION_NODE"),
+    ("sum(r)", "EXPRESSION_NODE"),
+    ("__import__('os')", "EXPRESSION_CHARACTERS"),
+    ("1e3", "EXPRESSION_NUMBER"),
+    ("_private", "EXPRESSION_SYMBOL"),
+])
+def test_invalid_model_expression_has_safe_reason_without_repair_or_retry(monkeypatch, expression, reason):
+    """模型HTTP成功后的非法表达式仍拒绝，记录有限原因且不泄漏模型正文或追加调用。"""
+    events = []
+
+    def record(event, **fields):
+        """捕获实际服务日志字段，仍应用生产白名单而不写运行日志。"""
+        events.append((event, logs.safe_fields(fields)))
+
+    monkeypatch.setattr(tool, "log_event", record)
+    reply = wire()
+    reply["normalized_formula"] = expression
+    context, llm = source(context=CONTEXT + "PRIVATE_CONTEXT"), LLMStub(reply)
+    with pytest.raises(tool.FormulaError, match="FORMULA_EXPRESSION") as error:
+        extract(context, llm)
+    assert error.value.reason == reason and len(llm.calls) == 1
+    event, fields = events[-1]
+    assert event == "formula.failed" and fields["stage"] == "output"
+    assert fields["error_code"] == "FORMULA_EXPRESSION" and fields["formula_failure_reason"] == reason
+    encoded = json.dumps(events)
+    assert "PRIVATE" not in encoded and RAW not in encoded and "normalized_formula" not in encoded
+    assert "FORMULA_EXPRESSION" in str(error.value) and "PRIVATE" not in str(error.value)
+
+
+@pytest.mark.parametrize("change,reason", [("raw", "RAW_FORMULA_MISMATCH"),
+    ("variables", "VARIABLE_SET_MISMATCH"), ("meaning_keys", "VARIABLE_SET_MISMATCH")])
+def test_raw_identity_and_variable_mapping_are_not_repaired(change, reason):
+    """原式一字符变化或大小写映射不一致仍整体拒绝，不能靠格式兼容绕过身份。"""
+    reply = wire("G = R - C", "r-c", name=None, grounded=False)
+    if change == "raw":
+        reply["raw_formula"] = "G=R-C"
+    elif change == "variables":
+        reply["variables"] = ["R", "C"]
+    else:
+        reply["variable_meanings"] = {"R": {"meaning": None, "evidence": []},
+                                      "C": {"meaning": None, "evidence": []}}
+    llm = LLMStub(reply)
+    with pytest.raises(tool.FormulaError, match="FORMULA_OUTPUT") as error:
+        extract(source("G = R - C", context=None), llm)
+    assert error.value.reason == reason and len(llm.calls) == 1
+
+
+@pytest.mark.parametrize("raw,expression,canonical", [
+    ("G = R - C", "r-c", "(r - c)"),
+    (r"U = \frac{S}{Q}", "s/q", "(s / q)"),
+])
+@pytest.mark.parametrize("invalid_output", [False, True])
+def test_f01_f03_http_200_still_requires_strict_output_contract(raw, expression, canonical, invalid_output):
+    """真实HTTP封装配合MockTransport：200仅代表收到响应，格式非法仍拒绝且只发一次。"""
+    response = wire(raw, expression, name=None, grounded=False)
+    if invalid_output:
+        response["normalized_formula"] = "R-C" if raw.startswith("G") else r"\frac{S}{Q}"
+    requests = []
+
+    def respond(request):
+        """在内存返回HTTP200及指定JSON，绝不连接DeepSeek或读取真实密钥。"""
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": json.dumps(response)}}]})
+
+    settings = Settings(_env_file=None, llm_provider="deepseek", deepseek_provider=None,
+                        deepseek_api_key="unit-test-key", llm_fallback_enabled=False)
+    llm = create_llm_service(settings, transport=httpx.MockTransport(respond))
+    context = source(raw, context=None)
+    if invalid_output:
+        with pytest.raises(tool.FormulaError, match="FORMULA_EXPRESSION") as error:
+            extract(context, llm)
+        assert error.value.reason in {"EXPRESSION_UPPERCASE", "EXPRESSION_LATEX"}
+    else:
+        result = extract(context, llm)
+        assert result.raw_formula == raw and result.normalized_formula == canonical
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("file_type,page,semantics", [("pdf", 3, "physical_pdf"), ("docx", 5, "logical"),
                                                     ("png", 1, "image_page")])
 def test_original_page_semantics_and_source_are_not_model_generated(file_type, page, semantics):
